@@ -1,0 +1,958 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>投标书防废标体检与偏离表生成系统 - 企业级工作台</title>
+  <style>
+    :root {
+      /* 默认采用工业浅岩灰侧栏，左下角文字采用深色高对比度变量 */
+      --sidebar-bg: #e2e8f0;
+      --sidebar-hover: #cbd5e1;
+      --sidebar-text: #1e293b;
+      --sidebar-muted: #64748b;
+      --sidebar-foot-bg: #d5dde7;
+      --sidebar-foot-border: #bdc8d6;
+      --sidebar-foot-text: #334155;
+      --sidebar-foot-bold: #0f172a;
+      --navy: #0f172a;
+      --blue: #2563eb;
+      --blue-hover: #1d4ed8;
+      --blue-soft: #eff6ff;
+      --bg: #f4f6f8;
+      --card: #ffffff;
+      --line: #e2e8f0;
+      --txt: #0f172a;
+      --txt-sec: #475569;
+      --mut: #64748b;
+      --red: #dc2626;
+      --red-soft: #fef2f2;
+      --orange: #ea580c;
+      --orange-soft: #fff7ed;
+      --amber: #d97706;
+      --amber-soft: #fffbeb;
+      --green: #16a34a;
+      --green-soft: #f0fdf4;
+      --radius: 12px;
+      --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.06);
+      --shadow-md: 0 8px 24px rgba(15, 23, 42, 0.08);
+      --shadow-lg: 0 20px 50px rgba(15, 23, 42, 0.22);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--txt);
+      font-size: 13.5px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input, select, textarea { font-family: inherit; font-size: inherit; }
+
+    .app-shell { display: flex; flex-direction: column; min-height: 100vh; }
+    .app-header {
+      height: 58px; background: #ffffff; border-bottom: 1px solid var(--line);
+      display: flex; align-items: center; padding: 0 24px; gap: 14px;
+      position: sticky; top: 0; z-index: 100; box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+    }
+    .brand-area { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+    .brand-logo {
+      width: 30px; height: 30px; background: var(--blue-soft); border-radius: 8px;
+      display: inline-flex; align-items: center; justify-content: center; color: var(--blue);
+    }
+    .brand-title { font-size: 16px; font-weight: 800; color: var(--navy); letter-spacing: -0.3px; }
+    .env-badge {
+      font-size: 11.5px; font-weight: 600; background: #f1f5f9; color: #475569;
+      border: 1px solid #e2e8f0; padding: 2px 10px; border-radius: 99px;
+    }
+    .header-spacer { flex: 1; }
+    .header-btn {
+      display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px;
+      border-radius: 8px; border: 1px solid var(--line); background: #f8fafc;
+      color: var(--txt); font-size: 12.5px; cursor: pointer; transition: all 0.15s;
+      position: relative; user-select: none;
+    }
+    .header-btn:hover { border-color: var(--blue); background: var(--blue-soft); }
+    .user-name { font-weight: 700; color: var(--navy); }
+    .role-tag { font-size: 11px; padding: 1px 8px; border-radius: 99px; font-weight: 600; background: var(--blue-soft); color: var(--blue); }
+    .caret { color: var(--mut); font-size: 10px; }
+
+    .dropdown-box {
+      display: none; position: absolute; top: calc(100% + 6px); right: 0;
+      background: #ffffff; border: 1px solid var(--line); border-radius: 8px;
+      box-shadow: var(--shadow-md); min-width: 185px; z-index: 200; padding: 4px 0;
+    }
+    .dropdown-box.is-show { display: block; }
+    .dropdown-item {
+      padding: 8px 14px; font-size: 12.5px; color: #334155; cursor: pointer;
+      display: flex; align-items: center; gap: 8px; transition: background 0.12s;
+    }
+    .dropdown-item:hover { background: #f1f5f9; color: var(--blue); }
+    .dropdown-item.is-selected { background: var(--blue-soft); color: var(--blue); font-weight: 700; }
+    .dropdown-item.danger { color: #dc2626; border-top: 1px solid #f1f5f9; }
+
+    /* ── 左侧导航栏（支持三色切换，左下角高对比度清晰显示） ── */
+    .app-body { display: flex; flex: 1; min-height: calc(100vh - 58px); }
+    .app-sidebar {
+      width: 228px; background: var(--sidebar-bg); color: var(--sidebar-text);
+      display: flex; flex-direction: column; flex-shrink: 0; padding: 12px 10px;
+      border-right: 1px solid #cbd5e1; transition: background 0.2s;
+    }
+    .menu-group-label {
+      font-size: 11px; font-weight: 700; color: var(--sidebar-muted);
+      padding: 14px 14px 6px; letter-spacing: 0.5px;
+    }
+    .side-nav-item {
+      height: 42px; border-radius: 8px; margin-bottom: 4px; font-size: 13.5px;
+      font-weight: 600; display: flex; align-items: center; padding: 0 14px;
+      color: var(--sidebar-text); cursor: pointer; transition: all 0.15s; user-select: none; gap: 10px;
+    }
+    .side-nav-item:hover { background: var(--sidebar-hover); }
+    .side-nav-item.is-active {
+      background: var(--blue) !important; color: #ffffff !important; font-weight: 700;
+      box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+    }
+    .sidebar-footer {
+      margin-top: auto; padding: 12px; background: var(--sidebar-foot-bg);
+      border: 1px solid var(--sidebar-foot-border); border-radius: 10px; font-size: 11.5px;
+      color: var(--sidebar-foot-text); line-height: 1.65;
+    }
+    .sidebar-footer b { color: var(--sidebar-foot-bold); font-weight: 800; }
+
+    /* ── 主展示区 ── */
+    .app-main {
+      flex: 1; min-width: 0; width: 100%; max-width: 1680px; margin: 0 auto;
+      padding: 22px 28px; overflow-x: hidden;
+    }
+    .view-panel { display: none; }
+    .view-panel.is-active { display: block; animation: fadeIn 0.2s ease-out; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+    .page-hd { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 18px; gap: 16px; flex-wrap: wrap; }
+    .page-hd h1 { font-size: 21px; font-weight: 800; color: var(--navy); letter-spacing: -0.2px; }
+    .page-hd .sub { color: var(--mut); font-size: 12.5px; margin-top: 3px; }
+    .cra-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; margin-bottom: 16px; box-shadow: var(--shadow-sm); }
+    .card-hd-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 12px; flex-wrap: wrap; }
+    .card-hd-row h2 { font-size: 15px; font-weight: 800; color: var(--navy); }
+
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 7px 16px; border-radius: 6px; font-weight: 700; font-size: 13px;
+      cursor: pointer; border: 1px solid transparent; transition: all 0.15s; white-space: nowrap;
+    }
+    .btn-primary { background: var(--blue); color: #ffffff; }
+    .btn-primary:hover { background: var(--blue-hover); }
+    .btn-primary-plain { background: #eff6ff; border-color: #93c5fd; color: #1d4ed8; }
+    .btn-primary-plain:hover { background: #dbeafe; }
+    .btn-default { background: #ffffff; border-color: var(--line); color: #334155; }
+    .btn-default:hover { border-color: var(--blue); color: var(--blue); }
+    .btn-sm { padding: 4px 10px; font-size: 12px; }
+    .btn-text { background: none; border: none; padding: 0; color: var(--blue); font-weight: 700; cursor: pointer; }
+
+    .tag-pill { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 2px 9px; border-radius: 99px; font-weight: 700; white-space: nowrap; }
+    .tag-pill.high { background: var(--red-soft); color: var(--red); }
+    .tag-pill.medium { background: var(--orange-soft); color: var(--orange); }
+    .tag-pill.low { background: var(--amber-soft); color: var(--amber); }
+    .tag-pill.done { background: var(--green-soft); color: var(--green); }
+    .tag-pill.run { background: var(--blue-soft); color: var(--blue); }
+    .tag-pill.neutral { background: #f1f5f9; color: #475569; }
+
+    .stats-grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 16px; }
+    .stat-card { position: relative; overflow: hidden; padding: 18px 20px; }
+    .stat-card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; }
+    .stat-card.blue::before { background: var(--blue); }
+    .stat-card.green::before { background: var(--green); }
+    .stat-card.red::before { background: var(--red); }
+    .stat-card.slate::before { background: #64748b; }
+    .st-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .st-label { font-size: 13px; font-weight: 700; color: var(--txt-sec); }
+    .st-val { font-size: 28px; font-weight: 900; color: var(--navy); line-height: 1.1; margin-bottom: 6px; letter-spacing: -0.5px; }
+    .st-unit { font-size: 14px; font-weight: 500; color: var(--mut); margin-left: 2px; }
+    .st-sub { font-size: 12px; color: var(--mut); }
+
+    /* ── 全新大盘中段：六大防废标防线健康度矩阵 + 截标倒计时与控标预警卡（无柱状图） ── */
+    .mid-grid2 { display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; margin-bottom: 16px; }
+    .check-matrix-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .cm-item {
+      border: 1px solid var(--line); border-radius: 8px; padding: 11px 14px;
+      background: #f8fafc; display: flex; flex-direction: column; gap: 4px;
+    }
+    .cm-hd { display: flex; justify-content: space-between; align-items: center; font-weight: 800; font-size: 13px; color: var(--navy); }
+    .cm-sub { font-size: 11.5px; color: var(--txt-sec); }
+
+    .countdown-item {
+      border: 1px solid var(--line); border-left: 4px solid var(--red);
+      border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; background: #ffffff;
+    }
+    .countdown-item.ok { border-left-color: var(--green); }
+
+    .fmt-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+    .fmt-docx { background: #dbeafe; color: #1e40af; }
+    .fmt-pdf { background: #fee2e2; color: #991b1b; }
+
+    .form-input {
+      width: 100%; height: 36px; padding: 0 12px; border: 1px solid #cbd5e1;
+      border-radius: 6px; font-size: 13px; color: var(--txt); background: #ffffff;
+    }
+
+    .flow-stepper-wrap { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; background: #ffffff; border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 16px; overflow-x: auto; }
+    .flow-step-item { display: flex; flex-direction: column; align-items: center; position: relative; flex: 1; min-width: 120px; text-align: center; }
+    .flow-step-item:not(:last-child)::after { content: ""; position: absolute; top: 14px; left: 55%; width: 90%; height: 2px; background: var(--green); z-index: 1; }
+    .flow-step-dot { width: 28px; height: 28px; border-radius: 50%; background: var(--green-soft); border: 2px solid var(--green); color: var(--green); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; z-index: 2; margin-bottom: 6px; }
+    .flow-step-title { font-size: 11.5px; font-weight: 700; color: var(--navy); }
+
+    .workbench-split { display: grid; grid-template-columns: 44% 56%; gap: 16px; align-items: start; }
+    .clause-viewer-pane, .risk-list-pane { height: calc(100vh - 215px); min-height: 600px; display: flex; flex-direction: column; overflow: hidden; padding: 16px 18px; }
+    .pane-hd { display: flex; justify-content: space-between; align-items: center; padding-bottom: 12px; border-bottom: 1px solid var(--line); margin-bottom: 12px; }
+    .pane-hd .pt { font-size: 15px; font-weight: 800; color: var(--navy); display: flex; align-items: center; gap: 8px; }
+    .clause-scroll-list, .risk-cards-scroll { flex: 1; overflow-y: auto; padding-right: 4px; }
+    .clause-item { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; background: #ffffff; cursor: pointer; transition: all 0.15s; }
+    .clause-item.active-clause { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15); background: #eff6ff; }
+    .clause-header-line { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .clause-header-line .cn { font-size: 12px; font-weight: 800; color: var(--navy); background: #f1f5f9; padding: 1px 7px; border-radius: 4px; }
+    .clause-header-line .ctitle { font-size: 12.5px; font-weight: 700; color: #475569; }
+    .clause-body-text { font-size: 13px; line-height: 1.6; color: #334155; }
+    .hl-quote { background: #fee2e2; color: #991b1b; padding: 2px 4px; border-radius: 3px; font-weight: 600; border-bottom: 2px solid #ef4444; }
+    .redline-bubble { margin-top: 8px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 8px 10px; font-size: 12px; line-height: 1.5; color: #92400e; }
+    .redline-bubble-hd { font-weight: 700; display: flex; justify-content: space-between; margin-bottom: 3px; color: #b45309; }
+
+    .risk-tabs { display: flex; gap: 6px; margin-bottom: 12px; border-bottom: 1px solid var(--line); padding-bottom: 8px; flex-wrap: wrap; }
+    .rtab { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 6px; cursor: pointer; color: var(--mut); background: #f8fafc; }
+    .rtab.on { background: var(--blue); color: #ffffff; }
+    .risk-card-item { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; background: #ffffff; border-left: 4px solid #cbd5e1; box-shadow: var(--shadow-sm); }
+    .risk-card-item.high { border-left-color: var(--red); }
+    .risk-card-item.medium { border-left-color: var(--orange); }
+    .rc-hd { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+    .sev-badge { font-size: 11px; font-weight: 800; padding: 1px 7px; border-radius: 4px; }
+    .sev-badge.high { background: var(--red-soft); color: var(--red); }
+    .sev-badge.medium { background: var(--orange-soft); color: var(--orange); }
+    .src-badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; font-weight: 600; }
+    .src-badge.ai { background: #eff6ff; color: #2563eb; }
+    .src-badge.rule { background: #f1f5f9; color: #475569; }
+    .clause-tag { font-size: 11.5px; font-weight: 700; color: #1e293b; background: #e2e8f0; padding: 1px 6px; border-radius: 4px; cursor: pointer; }
+    .rule-title { font-size: 13.5px; font-weight: 800; color: var(--navy); }
+    .rc-quote { font-size: 12px; background: #f8fafc; border-left: 3px solid #cbd5e1; padding: 6px 10px; margin-bottom: 6px; color: #475569; font-family: Consolas, "Microsoft YaHei", monospace; }
+    .rc-suggestion { font-size: 12.5px; background: #f0fdf4; border-radius: 6px; padding: 8px 10px; color: #166534; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .rc-basis { font-size: 12px; color: #64748b; margin-bottom: 8px; }
+
+    .cra-modal {
+      display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45);
+      z-index: 2000; align-items: center; justify-content: center; padding: 16px;
+    }
+    .cra-modal.is-open { display: flex; }
+    .cra-modal-box {
+      background: #ffffff; border-radius: 12px; width: 640px; max-width: 94vw;
+      max-height: 90vh; overflow-y: auto; box-shadow: var(--shadow-lg);
+      padding: 24px; position: relative;
+    }
+    .modal-hd { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; font-size: 17px; font-weight: 800; color: var(--navy); }
+    .modal-close-btn { cursor: pointer; color: var(--mut); font-size: 18px; line-height: 1; border: none; background: none; }
+    .modal-ft { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line); }
+    .form-group { margin-bottom: 14px; }
+    .form-group label { display: block; font-size: 12.5px; font-weight: 700; color: var(--txt-sec); margin-bottom: 6px; }
+
+    .qa-box { display: flex; height: calc(100vh - 170px); min-height: 620px; padding: 0 !important; overflow: hidden; }
+    .qa-side { width: 230px; border-right: 1px solid var(--line); background: #f8fafc; display: flex; flex-direction: column; flex-shrink: 0; }
+    .qa-main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: #ffffff; }
+    .chat-bubble { max-width: 82%; border-radius: 12px; padding: 12px 16px; font-size: 13.5px; line-height: 1.6; }
+    .chat-bubble.user { align-self: flex-end; background: var(--blue); color: #ffffff; border-bottom-right-radius: 2px; }
+    .chat-bubble.assistant { align-self: flex-start; background: #f1f5f9; color: var(--navy); border-bottom-left-radius: 2px; border: 1px solid #e2e8f0; }
+    .react-card { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px 12px; margin-bottom: 8px; font-size: 12px; }
+  </style>
+</head>
+<body>
+
+<div class="app-shell">
+  <!-- 顶栏 App Header -->
+  <header class="app-header">
+    <div class="brand-area" onclick="switchNav('dashboard')">
+      <span class="brand-logo">
+        <svg viewBox="0 0 1024 1024" width="18" height="18" fill="currentColor">
+          <path d="M512 64 128 224v288c0 245.76 163.84 474.88 384 544 220.16-69.12 384-298.24 384-544V224zm0 118.4 288 120V512c0 189.44-122.88 369.92-288 432.64C346.88 881.92 224 701.44 224 512V302.4z"/>
+        </svg>
+      </span>
+      <span class="brand-title">投标书防废标体检与偏离表生成系统</span>
+      <span class="env-badge">卖方投标专版</span>
+    </div>
+
+    <div class="header-spacer"></div>
+
+    <!-- 侧栏色调切换（默认选中工业浅岩灰） -->
+    <div class="header-btn" onclick="toggleDropdown('theme-dropdown')">
+      <span>侧栏色调：<b id="theme-current-label">工业浅岩灰</b></span>
+      <span class="caret">▾</span>
+      <div id="theme-dropdown" class="dropdown-box">
+        <div class="dropdown-item is-selected" onclick="changeSidebarTheme('stone', '工业浅岩灰', this)">工业浅岩灰（默认浅灰）</div>
+        <div class="dropdown-item" onclick="changeSidebarTheme('warm', '深暖炭褐灰', this)">深暖炭褐灰（沉稳暖灰）</div>
+        <div class="dropdown-item" onclick="changeSidebarTheme('teal', '莫兰迪深青灰', this)">莫兰迪深青灰（深青灰）</div>
+      </div>
+    </div>
+
+    <!-- 投标事业部切换 -->
+    <div class="header-btn" onclick="toggleDropdown('tenant-dropdown')">
+      <span>当前部门：<b id="tenant-current-label">政企系统集成投标部</b></span>
+      <span class="caret">▾</span>
+      <div id="tenant-dropdown" class="dropdown-box">
+        <div class="dropdown-item is-selected" onclick="changeTenant('政企系统集成投标部', this)">政企系统集成投标部</div>
+        <div class="dropdown-item" onclick="changeTenant('弱电智能化工程部', this)">弱电智能化工程部</div>
+        <div class="dropdown-item" onclick="changeTenant('智能装备销售中心', this)">智能装备销售中心</div>
+      </div>
+    </div>
+
+    <!-- 用户菜单 -->
+    <div class="header-btn" onclick="toggleDropdown('user-dropdown')">
+      <svg viewBox="0 0 1024 1024" width="14" height="14" fill="#64748b"><path d="M512 128a192 192 0 1 1 0 384 192 192 0 0 1 0-384m0 64a128 128 0 1 0 0 256 128 128 0 0 0 0-256m-384 704a384 384 0 0 1 768 0v64H128z"/></svg>
+      <span class="user-name">李明</span>
+      <span class="role-tag">投标商务经理</span>
+      <span class="caret">▾</span>
+      <div id="user-dropdown" class="dropdown-box">
+        <div class="dropdown-item" style="color: #94a3b8; cursor: default;">账号：liming_bid</div>
+        <div class="dropdown-item" onclick="openModal('modal-model-config')"><span>模型配置</span></div>
+        <div class="dropdown-item" onclick="switchNav('reports')"><span>审计日志</span></div>
+        <div class="dropdown-item" onclick="openModal('modal-change-pwd')"><span>修改密码</span></div>
+        <div class="dropdown-item danger" onclick="alert('已安全退出登录')">退出登录</div>
+      </div>
+    </div>
+  </header>
+
+  <div class="app-body">
+    <!-- 左侧导航栏 -->
+    <aside class="app-sidebar">
+      <div class="menu-group-label">封标体检与投前评估</div>
+      <div id="nav-dashboard" class="side-nav-item is-active" onclick="switchNav('dashboard')">
+        <svg viewBox="0 0 1024 1024" width="16" height="16" fill="currentColor"><path d="M512 128 128 447.936V896h255.936V640h256v256H896V447.936z"/></svg>
+        <span>防废标体检总览</span>
+      </div>
+      <div id="nav-extract" class="side-nav-item" onclick="switchNav('extract')">
+        <svg viewBox="0 0 1024 1024" width="16" height="16" fill="currentColor"><path d="M128 320h768v64H128zm0 192h768v64H128zm0 192h768v64H128z"/></svg>
+        <span>招标红线与条款提取</span>
+      </div>
+      <div id="nav-check" class="side-nav-item" onclick="switchNav('check')">
+        <svg viewBox="0 0 1024 1024" width="16" height="16" fill="currentColor"><path d="M832 384H576V128H192v768h640zm-26.496-64L640 154.496V320zM160 64h480l256 256v608a32 32 0 0 1-32 32H160a32 32 0 0 1-32-32V96a32 32 0 0 1 32-32m160 448h384v64H320zm0 192h384v64H320z"/></svg>
+        <span>封标前防废标体检台</span>
+      </div>
+      <div id="nav-deviation" class="side-nav-item" onclick="switchNav('deviation')">
+        <svg viewBox="0 0 1024 1024" width="16" height="16" fill="currentColor"><path d="M224 448a32 32 0 0 0-32 32v384a32 32 0 0 0 32 32h576a32 32 0 0 0 32-32V480a32 32 0 0 0-32-32zm0-64h576a96 96 0 0 1 96 96v384a96 96 0 0 1-96 96H224a96 96 0 0 1-96-96V480a96 96 0 0 1 96-96"/></svg>
+        <span>偏离表一键生成</span>
+      </div>
+      <div id="nav-radar" class="side-nav-item" onclick="switchNav('radar')">
+        <svg viewBox="0 0 1024 1024" width="16" height="16" fill="currentColor"><path d="M512 64a448 448 0 1 1 0 896 448 448 0 0 1 0-896m0 64a384 384 0 1 0 0 768 384 384 0 0 0 0-768m144.512 239.488L564.352 564.352 363.52 656.512l92.16-200.832z"/></svg>
+        <span>投前控标雷达</span>
+      </div>
+      <div id="nav-qa" class="side-nav-item" onclick="switchNav('qa')">
+        <svg viewBox="0 0 1024 1024" width="16" height="16" fill="currentColor"><path d="m174.72 855.68 135.296-45.12A407.04 407.04 0 0 0 512 832a416 416 0 1 0-416-416c0 79.936 22.656 156.48 65.408 222.08l-45.696 135.68a31.936 31.936 0 0 0 39.04 39.04z"/></svg>
+        <span>标书专家追问</span>
+      </div>
+
+      <div class="menu-group-label" style="margin-top: 14px;">规则底座与交付归档</div>
+      <div id="nav-rules" class="side-nav-item" onclick="switchNav('rules')">
+        <svg viewBox="0 0 1024 1024" width="16" height="16" fill="currentColor"><path d="M600.704 64a32 32 0 0 1 30.464 22.208l35.2 109.376c14.784 7.232 28.928 15.36 42.432 24.512l105.856-43.072a32 32 0 0 1 36.416 8.448l69.44 81.536a32 32 0 0 1 3.52 36.672l-58.88 98.752z"/></svg>
+        <span>废标规则与证照底表</span>
+      </div>
+      <div id="nav-reports" class="side-nav-item" onclick="switchNav('reports')">
+        <svg viewBox="0 0 1024 1024" width="16" height="16" fill="currentColor"><path d="M128 192v640h768V320H485.76L357.76 192zM64 128h320l128 128h448a32 32 0 0 1 32 32v672a32 32 0 0 1-32 32H64a32 32 0 0 1-32-32V160a32 32 0 0 1 32-32"/></svg>
+        <span>交付中心与审计</span>
+      </div>
+
+      <div class="sidebar-footer">
+        <div><b>双轨引擎：</b>算术/日期沙盒 + 逐条核验</div>
+        <div><b>核心交付：</b>原位标红投标书 + 偏离表</div>
+        <div><b>数据安全：</b>支持配置私有化本地模型</div>
+      </div>
+    </aside>
+
+    <!-- 主展示面板 -->
+    <main class="app-main">
+
+      <!-- ════════ 1. 防废标体检总览 Dashboard（无柱状图，采用六大防线矩阵 + 截标倒计时看板） ════════ -->
+      <section id="view-dashboard" class="view-panel is-active">
+        <div class="page-hd">
+          <div>
+            <h1>投标防废标体检与偏离表工作台</h1>
+            <div class="sub">数据范围：<b id="dashboard-scope-label" style="color: var(--blue);">政企系统集成投标部</b> · 封标前最后一道安全锁（先抽取招标红线后逐条勾稽，杜绝长文档漏检）</div>
+          </div>
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <button class="btn btn-primary" onclick="openModal('modal-create-check')">＋ 发起封标前防废标体检（主流程）</button>
+            <button class="btn btn-primary-plain" onclick="openModal('modal-create-radar')">＋ 投前控标雷达扫描（立项评估流）</button>
+          </div>
+        </div>
+
+        <div class="stats-grid4">
+          <div class="cra-card stat-card blue">
+            <div class="st-top"><span class="st-label">本季参标体检项目</span></div>
+            <div class="st-val">28<span class="st-unit">个</span></div>
+            <div class="st-sub">封标前终审 21 个 · 投前控标评估 7 个</div>
+          </div>
+          <div class="cra-card stat-card red">
+            <div class="st-top"><span class="st-label">封标前拦截一票否决废标项</span></div>
+            <div class="st-val" style="color: #dc2626;">34<span class="st-unit">处</span></div>
+            <div class="st-sub">报价差额 6 · ★号漏答 11 · 证照过期/串名 9 · 矛盾 8</div>
+          </div>
+          <div class="cra-card stat-card green">
+            <div class="st-top"><span class="st-label">一键生成标准 Word 偏离表</span></div>
+            <div class="st-val" style="color: #16a34a;">42<span class="st-unit">份</span></div>
+            <div class="st-sub">单份制作耗时由 2 天压缩至 <b style="color: #16a34a;">12 分钟</b></div>
+          </div>
+          <div class="cra-card stat-card slate">
+            <div class="st-top"><span class="st-label">★/▲ 实质性参数提取召回率</span></div>
+            <div class="st-val" style="color: var(--blue);">100%</div>
+            <div class="st-sub">先结构化提取后逐条比对 · 杜绝长文档注意力衰减</div>
+          </div>
+        </div>
+
+        <!-- 全新中段：六大防废标防线矩阵 + 重点项目截标倒计时与控标预警 -->
+        <div class="mid-grid2">
+          <div class="cra-card" style="margin-bottom: 0;">
+            <div class="card-hd-row">
+              <h2>封标前六大一票否决防线核查矩阵（F1 ~ F5 引擎分工）</h2>
+              <span class="tag-pill run">双文档逐条对齐</span>
+            </div>
+            <div class="check-matrix-grid">
+              <div class="cm-item">
+                <div class="cm-hd">
+                  <span>1. F1 废标红线与 ★/▲ 提取</span>
+                  <span class="tag-pill done">漏检率 0%</span>
+                </div>
+                <div class="cm-sub">先从 200 页招标书抽取资格项、符合项、★强制参数与评分表，作为核验基准。</div>
+              </div>
+              <div class="cm-item">
+                <div class="cm-hd">
+                  <span>2. F2 报价算术与大小写沙盒</span>
+                  <span class="tag-pill neutral">0 Token 纯算术</span>
+                </div>
+                <div class="cm-sub">核验单价×数量=合价、分项累加=一览表总价、大小写一致、未超最高限价。</div>
+              </div>
+              <div class="cm-item">
+                <div class="cm-hd">
+                  <span>3. F3 证照效期与社保月份</span>
+                  <span class="tag-pill neutral">0 Token 日期引擎</span>
+                </div>
+                <div class="cm-sub">核验营业执照/ISO/授权书是否覆盖开标日，社保证明月份是否满足要求。</div>
+              </div>
+              <div class="cm-item">
+                <div class="cm-hd">
+                  <span>4. F3 跨项目串名穿帮扫描</span>
+                  <span class="tag-pill neutral">0 Token 实体排他</span>
+                </div>
+                <div class="cm-sub">全文扫描是否残留上一投标项目的甲方单位名称或异地地名，防止低级穿帮。</div>
+              </div>
+              <div class="cm-item">
+                <div class="cm-hd">
+                  <span>5. F4 ★条款响应与前后矛盾</span>
+                  <span class="tag-pill run">大模型①② 附页码</span>
+                </div>
+                <div class="cm-sub">逐条核查 ★ 参数是否漏答、是否缺检测报告页码，以及商务与售后质保期矛盾。</div>
+              </div>
+              <div class="cm-item">
+                <div class="cm-hd">
+                  <span>6. F5 标准偏离表一键生成</span>
+                  <span class="tag-pill done">2天 → 15分钟</span>
+                </div>
+                <div class="cm-sub">自动填好条款号、招标要求、投标响应、正/无/负偏离与说明页码并导出 Word。</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="cra-card" style="margin-bottom: 0;">
+            <div class="card-hd-row">
+              <h2>近期截标项目倒计时与投前控标预警</h2>
+              <span class="tag-pill high">封标前必查</span>
+            </div>
+            <div>
+              <div class="countdown-item">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <span style="font-weight:800;color:var(--navy);">[ZB-2026-089] 某省政务云安全态势感知项目</span>
+                  <span class="tag-pill high">距截标仅剩 18 小时</span>
+                </div>
+                <div style="font-size:12px;color:var(--txt-sec);margin-bottom:8px;">
+                  当前状态：检出 <b>4 处一票否决废标项</b>（P19 分项报价差 500 元、P88 漏答 ★4.2.8 麒麟信创要求、P51 ISO 证书过期、P215 质保期矛盾）。
+                </div>
+                <div style="display:flex;justify-content:flex-end;gap:8px;">
+                  <button class="btn btn-primary btn-sm" onclick="switchNav('check')">立即进入体检台排障 →</button>
+                </div>
+              </div>
+
+              <div class="countdown-item ok" style="margin-bottom:0;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                  <span style="font-weight:800;color:var(--navy);">[ZB-2026-095] 某市财政局大数据审计平台采购（刚拿标书）</span>
+                  <span class="tag-pill medium">F6 控标雷达预警</span>
+                </div>
+                <div style="font-size:12px;color:var(--txt-sec);margin-bottom:8px;">
+                  投前评估：检出 2 处疑似友商排他性控标参数（限定特定软著全称及非标机箱尺寸，涉及 9 分），建议先发函提疑。
+                </div>
+                <div style="display:flex;justify-content:flex-end;gap:8px;">
+                  <button class="btn btn-default btn-sm" onclick="switchNav('radar')">查看控标雷达分析 →</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 投标项目体检台账 -->
+        <div class="cra-card" style="padding: 0; overflow: hidden;">
+          <div style="padding: 16px 20px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center;">
+            <h2 style="font-size: 15px; font-weight: 800; color: var(--navy);">在途投标项目防废标体检台账</h2>
+          </div>
+          <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 13px;">
+            <thead>
+              <tr style="background: #f8fafc; border-bottom: 1px solid var(--line); color: var(--txt-sec); height: 42px;">
+                <th style="padding: 8px 16px;">项目编号</th>
+                <th style="padding: 8px 16px;">招标项目名称与双书规模</th>
+                <th style="padding: 8px 16px;">F1 提取红线数</th>
+                <th style="padding: 8px 16px;">F6 投前控标评估</th>
+                <th style="padding: 8px 16px;">封标体检结果</th>
+                <th style="padding: 8px 16px; text-align: right;">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr style="border-bottom: 1px solid var(--line); height: 58px; cursor: pointer;" onclick="switchNav('check')">
+                <td style="padding: 8px 16px; font-weight: 700; color: #64748b;">ZB-2026-089</td>
+                <td style="padding: 8px 16px;">
+                  <div style="font-weight: 700; color: var(--navy); display: flex; align-items: center; gap: 6px;">
+                    <span>某省政务云安全态势感知与运维集成项目</span>
+                    <span class="fmt-badge fmt-docx">最高限价 145.00 万</span>
+                  </div>
+                  <div style="font-size: 11.5px; color: #94a3b8; margin-top: 2px;">甲方招标书.pdf (186页) ↔ 我方投标书正本.docx (294页)</div>
+                </td>
+                <td style="padding: 8px 16px;">资格8 / 符合12 / ★参数26</td>
+                <td style="padding: 8px 16px;"><span class="tag-pill medium">谨慎投 (2处疑似排他)</span></td>
+                <td style="padding: 8px 16px;">
+                  <span class="tag-pill high" style="margin-right: 4px;">4 处一票否决项</span>
+                  <span class="tag-pill low">1 处扣分项</span>
+                </td>
+                <td style="padding: 8px 16px; text-align: right;" onclick="event.stopPropagation()">
+                  <button class="btn-text" style="margin-right: 10px;" onclick="switchNav('check')">进入体检台</button>
+                  <button class="btn-text" style="margin-right: 10px;" onclick="switchNav('deviation')">生成偏离表</button>
+                  <button class="btn btn-primary-plain btn-sm" onclick="alert('已下载原位标红批注版《投标书正本.docx》')">标红批注稿</button>
+                </td>
+              </tr>
+              <tr style="border-bottom: 1px solid var(--line); height: 58px;">
+                <td style="padding: 8px 16px; font-weight: 700; color: #64748b;">ZB-2026-092</td>
+                <td style="padding: 8px 16px;">
+                  <div style="font-weight: 700; color: var(--navy); display: flex; align-items: center; gap: 6px;">
+                    <span>市智慧园区弱电安防与机房升级改造工程</span>
+                    <span class="fmt-badge fmt-pdf">最高限价 320.00 万</span>
+                  </div>
+                  <div style="font-size: 11.5px; color: #94a3b8; margin-top: 2px;">甲方招标书.docx (210页) ↔ 我方投标书终稿.docx (340页)</div>
+                </td>
+                <td style="padding: 8px 16px;">资格7 / 符合10 / ★参数18</td>
+                <td style="padding: 8px 16px;"><span class="tag-pill done">值得投 (无排他参数)</span></td>
+                <td style="padding: 8px 16px;">
+                  <span class="tag-pill done">否决项已清零 · 偏离表已导出</span>
+                </td>
+                <td style="padding: 8px 16px; text-align: right;">
+                  <button class="btn-text" style="margin-right: 10px;" onclick="switchNav('check')">查看复核</button>
+                  <button class="btn-text" style="margin-right: 10px;" onclick="switchNav('deviation')">导出偏离表</button>
+                  <button class="btn btn-primary-plain btn-sm" onclick="alert('已下载《防废标体检报告.docx》')">体检报告</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ════════ 2. F1 招标红线与条款提取 Extract ════════ -->
+      <section id="view-extract" class="view-panel">
+        <div class="page-hd">
+          <div>
+            <h1>F1 · 招标文件废标红线与 ★/▲ 强制条款提取清单</h1>
+            <div class="sub">先从 186 页《甲方招标文件》中结构化提取四类必审基准清单，再与投标书逐条比对（避免两份 200 页长文档直接比对导致的大模型注意力衰减）</div>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn btn-default" onclick="alert('已导出结构化《招标文件必审红线清单.xlsx》')">导出红线清单 Excel</button>
+            <button class="btn btn-primary" onclick="switchNav('check')">进入下一步：逐条响应核验 →</button>
+          </div>
+        </div>
+
+        <div class="cra-card" style="padding: 0; overflow: hidden;">
+          <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 13px;">
+            <thead>
+              <tr style="background: #f8fafc; border-bottom: 1px solid var(--line); color: var(--txt-sec); height: 40px;">
+                <th style="padding: 8px 16px; width: 130px;">清单分类</th>
+                <th style="padding: 8px 16px; width: 110px;">招标书位置</th>
+                <th style="padding: 8px 16px;">招标文件明示要求原文</th>
+                <th style="padding: 8px 16px; width: 140px;">偏离后果</th>
+                <th style="padding: 8px 16px; width: 140px;">分派核验引擎</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr style="border-bottom: 1px solid var(--line);">
+                <td style="padding: 10px 16px; font-weight: 700;">资格审查项 #03</td>
+                <td style="padding: 10px 16px;">P13 第 3.2 条</td>
+                <td style="padding: 10px 16px;">投标人须提供开标前近 3 个月（2026年8月-10月）为拟派项目经理依法缴纳社会保险的证明材料。</td>
+                <td style="padding: 10px 16px;"><span class="tag-pill high">一票否决（废标）</span></td>
+                <td style="padding: 10px 16px;"><span class="tag-pill neutral">F3 证照日期引擎</span></td>
+              </tr>
+              <tr style="border-bottom: 1px solid var(--line);">
+                <td style="padding: 10px 16px; font-weight: 700;">符合性审查 #05</td>
+                <td style="padding: 10px 16px;">P27 第 5.4 条</td>
+                <td style="padding: 10px 16px;">投标报价不得超过最高限价（145.00万元），开标一览表总价须与分项报价表合计一致，大写与小写金额须一致。</td>
+                <td style="padding: 10px 16px;"><span class="tag-pill high">一票否决（废标）</span></td>
+                <td style="padding: 10px 16px;"><span class="tag-pill neutral">F2 报价算术沙盒</span></td>
+              </tr>
+              <tr>
+                <td style="padding: 10px 16px; font-weight: 700; color: var(--red);">★ 实质性技术 #08</td>
+                <td style="padding: 10px 16px;">P64 第 ★4.2.8 条</td>
+                <td style="padding: 10px 16px;">★ 平台服务端须原生适配国产银河麒麟 V10 操作系统与达梦 DM8 数据库，投标文件中须附兼容性互认证书扫描件。</td>
+                <td style="padding: 10px 16px;"><span class="tag-pill high">一票否决（废标）</span></td>
+                <td style="padding: 10px 16px;"><span class="tag-pill run">F4 逐条响应核验</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ════════ 3. 封标前防废标体检台 Check ════════ -->
+      <section id="view-check" class="view-panel">
+        <div class="page-hd">
+          <div>
+            <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 6px;">
+              <button class="btn btn-default btn-sm" onclick="switchNav('dashboard')">← 返回总览</button>
+              <span class="tag-pill high">检出 4 处一票否决项 · 1 处严重扣分项</span>
+              <span class="tag-pill run">0 Token 算术/日期引擎 + AI 逐条核验双轨协同</span>
+            </div>
+            <h1>某省政务云安全态势感知与运维集成项目（封标前防废标体检）</h1>
+            <div class="sub">甲方招标文件：186 页 · 我方投标书正本：294 页 · 最高限价：145.00 万元 · 计划开标日期：2026-11-04</div>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn btn-default" onclick="switchNav('deviation')">生成 Word 偏离表 (.docx)</button>
+            <button class="btn btn-primary-plain" onclick="alert('已下载原位标红批注版《我方投标书正本_批注版.docx》')">下载投标书原位批注副本 (.docx)</button>
+          </div>
+        </div>
+
+        <div class="flow-stepper-wrap">
+          <div class="flow-step-item"><div class="flow-step-dot">✓</div><div class="flow-step-title">1. F1 招标红线提取</div></div>
+          <div class="flow-step-item"><div class="flow-step-dot">✓</div><div class="flow-step-title">2. 投标书解析与OCR</div></div>
+          <div class="flow-step-item"><div class="flow-step-dot">✓</div><div class="flow-step-title">3. F2 报价算术沙盒</div></div>
+          <div class="flow-step-item"><div class="flow-step-dot">✓</div><div class="flow-step-title">4. F3 证照与串名扫描</div></div>
+          <div class="flow-step-item"><div class="flow-step-dot">✓</div><div class="flow-step-title">5. F4 ★条款与矛盾核验</div></div>
+          <div class="flow-step-item"><div class="flow-step-dot">✓</div><div class="flow-step-title">6. F5 原位批注与偏离表</div></div>
+        </div>
+
+        <div class="workbench-split">
+          <div class="clause-viewer-pane cra-card">
+            <div class="pane-hd">
+              <div class="pt"><span>我方投标书正本原文与原位标红预览</span></div>
+            </div>
+            <div class="clause-scroll-list">
+              <div id="sec-box-1" class="clause-item active-clause" onclick="selectSec('P14/P19')">
+                <div class="clause-header-line">
+                  <span class="cn">投标书 P14 & P19</span>
+                  <span class="ctitle">《开标一览表》与《分项报价明细表》</span>
+                  <span class="tag-pill high" style="margin-left: auto;">F2 报价算术否决项</span>
+                </div>
+                <div class="clause-body-text">
+                  • P14 开标一览表投标总价：小写 <mark class="hl-quote">¥1,286,000.00</mark>，大写：<mark class="hl-quote">人民币壹佰贰拾捌万陆仟元整</mark>。<br>
+                  • P19 分项报价表第 9 项「日志审计服务器」：单价 42,500.00 元 × 数量 2 台 = 合价填为 <mark class="hl-quote">84,500.00 元</mark>（第 1~18 项正确累加总和为 1,286,500.00 元）。
+                </div>
+              </div>
+
+              <div id="sec-box-2" class="clause-item" onclick="selectSec('P88')">
+                <div class="clause-header-line">
+                  <span class="cn">投标书 P88</span>
+                  <span class="ctitle">第五章 技术方案 · 5.3 运行环境适配与信创要求</span>
+                  <span class="tag-pill high" style="margin-left: auto;">F4 ★条款漏答否决项</span>
+                </div>
+                <div class="clause-body-text">
+                  本系统服务端支持主流 Linux 操作系统（<mark class="hl-quote">CentOS 7.6 及以上、Ubuntu 22.04 LTS</mark>），数据库支持 PostgreSQL 16 与 MySQL 8.0。
+                </div>
+              </div>
+
+              <div id="sec-box-3" class="clause-item" onclick="selectSec('P46/P51')">
+                <div class="clause-header-line">
+                  <span class="cn">投标书 P46 & P51</span>
+                  <span class="ctitle">第二章 资格证明文件 · 项目经理社保与 ISO27001 证书</span>
+                  <span class="tag-pill high" style="margin-left: auto;">F3 证照效期否决项</span>
+                </div>
+                <div class="clause-body-text">
+                  • P46 项目经理张某社保证明 OCR 提取：<mark class="hl-quote">参保缴费所属期：2026年05月至2026年07月</mark>。<br>
+                  • P51 信息安全管理体系认证证书 OCR 提取：<mark class="hl-quote">证书有效期至：2026年10月28日</mark>。
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="risk-list-pane cra-card">
+            <div class="pane-hd">
+              <div class="pt"><span>封标前防废标核查结果清单（共 5 处问题）</span></div>
+            </div>
+            <div class="risk-cards-scroll">
+              <div class="risk-card-item high">
+                <div class="rc-hd">
+                  <span class="sev-badge high">一票否决项</span>
+                  <span class="src-badge rule">F2 报价算术沙盒 (0 Token)</span>
+                  <span class="clause-tag" onclick="selectSec('P14/P19')">投标书 P14 & P19</span>
+                  <span class="rule-title">分项报价单价×数量≠合价，且分项累加与开标一览表总价差 500 元</span>
+                </div>
+                <div class="rc-quote">
+                  算术校验：P19 第9项 [42,500.00 × 2 = 85,000.00 ≠ 表内合价 84,500.00]；分项正确累加和 ¥1,286,500.00 ≠ P14 总价 ¥1,286,000.00。
+                </div>
+                <div class="rc-basis"><b>招标文件依据：</b>P27 符合性审查第 5.4 条</div>
+              </div>
+
+              <div class="risk-card-item high">
+                <div class="rc-hd">
+                  <span class="sev-badge high">一票否决项</span>
+                  <span class="src-badge ai">F4 ★条款逐条核验 (大模型①)</span>
+                  <span class="clause-tag" onclick="selectSec('P88')">投标书 P88 ↔ 招标书 P64</span>
+                  <span class="rule-title">漏应答第 ★4.2.8 条国产银河麒麟 V10 与达梦 DM8 适配要求及互认证书</span>
+                </div>
+                <div class="rc-quote">
+                  招标书 P64 ★4.2.8：“★ 服务端须原生适配银河麒麟 V10 与达梦 DM8，附互认证书” ↔ 投标书 P88：“未见麒麟/达梦响应及证书页码”。
+                </div>
+                <div class="rc-basis"><b>招标文件依据：</b>第四章技术规范书 P64 第 ★4.2.8 条</div>
+              </div>
+
+              <div class="risk-card-item high">
+                <div class="rc-hd">
+                  <span class="sev-badge high">一票否决项</span>
+                  <span class="src-badge rule">F3 证照日期引擎 (0 Token)</span>
+                  <span class="clause-tag" onclick="selectSec('P46/P51')">投标书 P46 & P51</span>
+                  <span class="rule-title">项目经理社保证明月份不符（5-7月旧图）且 ISO27001 证书已过期 6 天</span>
+                </div>
+                <div class="rc-quote">
+                  开标日 2026-11-04：要求近3个月社保 [2026-08 ~ 2026-10] ≠ 实贴 [2026-05 ~ 2026-07]；P51 ISO27001 到期日 2026-10-28 &lt; 开标日。
+                </div>
+                <div class="rc-basis"><b>招标文件依据：</b>P13 资格性审查第 3.2、3.5 条</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ════════ 4. F5 偏离表一键生成 Deviation ════════ -->
+      <section id="view-deviation" class="view-panel">
+        <div class="page-hd">
+          <div>
+            <h1>F5 · 《技术与商务偏离表》一键对齐生成工作台</h1>
+            <div class="sub">招标技术规范 ↔ 我方投标响应与检测报告页码逐条对齐 · 导出标准 Word 表格</div>
+          </div>
+          <div>
+            <button class="btn btn-primary" onclick="alert('已生成并下载《技术与商务偏离表.docx》！')">导出标准 Word 偏离表 (.docx)</button>
+          </div>
+        </div>
+        <div class="cra-card" style="padding: 0; overflow: hidden;">
+          <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 13px;">
+            <thead>
+              <tr style="background: #f8fafc; border-bottom: 1px solid var(--line); color: var(--txt-sec); height: 42px;">
+                <th style="padding: 8px 14px;">条款号</th>
+                <th style="padding: 8px 14px;">招标文件要求</th>
+                <th style="padding: 8px 14px;">我方投标响应内容</th>
+                <th style="padding: 8px 14px;">偏离结论</th>
+                <th style="padding: 8px 14px;">响应页码与佐证索引</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr style="border-bottom: 1px solid var(--line);">
+                <td style="padding: 10px 14px; font-weight: 800;">★ 4.1.1</td>
+                <td style="padding: 10px 14px;">日志采集并发 ≥ 5,000 EPS，检索响应延迟 ≤ 2.0 秒。（P59）</td>
+                <td style="padding: 10px 14px;">实测并发达 8,500 EPS，检索延迟 ≤ 0.8 秒。</td>
+                <td style="padding: 10px 14px;"><span class="tag-pill done">正偏离</span></td>
+                <td style="padding: 10px 14px;">投标书 P92；《CMA检测报告》P14</td>
+              </tr>
+              <tr style="background: #fffafa;">
+                <td style="padding: 10px 14px; font-weight: 800; color: var(--red);">★ 4.2.8</td>
+                <td style="padding: 10px 14px;">★ 原生适配银河麒麟 V10 与达梦 DM8，附互认证书。（P64）</td>
+                <td style="padding: 10px 14px; color: var(--red); font-weight: 700;">[漏应答告警] P88 未提及麒麟 V10 与达梦 DM8。</td>
+                <td style="padding: 10px 14px;"><span class="tag-pill high">漏应答</span></td>
+                <td style="padding: 10px 14px;"><button class="btn btn-primary btn-sm" onclick="alert('已从证照库调入互认证书并回填偏离表！')">一键补齐</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ════════ 5. F6 投前控标雷达 Radar ════════ -->
+      <section id="view-radar" class="view-panel">
+        <div class="page-hd">
+          <div>
+            <h1>F6 · 投前控标雷达与立项决策评估</h1>
+            <div class="sub">扫描排他性控标参数 · 结论标注“疑似”供销售负责人决策参考</div>
+          </div>
+        </div>
+        <div class="cra-card">
+          <div style="font-weight: 800; color: var(--navy); margin-bottom: 8px;">检出 2 处疑似友商排他性参数（占 9 分）：</div>
+          <div style="font-size: 13px; color: var(--txt-sec); line-height: 1.7;">
+            1. <b>P45 商务评分 #04（5分）</b>：要求一字不差的《基于多维知识图谱的政务云动态微隔离防御系统V3.0》软著全称及特定版本号（疑似特定友商控分）；<br>
+            2. <b>P71 技术参数 ▲4.4.3（4分）</b>：要求前面板 7 颗双色指示灯且机箱深度精确为 312mm±1mm（疑似特定硬件型号外观控标）。
+          </div>
+        </div>
+      </section>
+
+      <!-- ════════ 6. F7 标书专家追问 QA ════════ -->
+      <section id="view-qa" class="view-panel">
+        <div class="page-hd">
+          <div>
+            <h1>F7 · 标书专家多轮追问中心（★大模型③ ReAct）</h1>
+            <div class="sub">跨《招标文件》与《我方投标书》双向检索 · 引用强制附带页码坐标</div>
+          </div>
+        </div>
+        <div class="cra-card">
+          <div style="font-weight: 700; color: var(--blue); margin-bottom: 6px;">提问：商务评分要求的近三年≥200万业绩对应在我方投标书哪几页？</div>
+          <div style="font-size: 13px; color: var(--txt);">答：位于投标书 <b>P60~P76</b>（共3份），其中第3份业绩（P72~P76）仅贴了初验单、漏贴最终验收合格报告，建议立即补入。</div>
+        </div>
+      </section>
+
+      <!-- ════════ 7. 废标规则与证照底表 Rules ════════ -->
+      <section id="view-rules" class="view-panel">
+        <div class="page-hd">
+          <div>
+            <h1>废标体检规则配置与企业投标证照底表</h1>
+            <div class="sub">核查范围：法定废标情形 + 招标书明示条款</div>
+          </div>
+        </div>
+        <div class="cra-card">
+          <div style="font-weight: 800; margin-bottom: 8px;">当前项目校验参数：</div>
+          <div>招标人全称：某省政务云管理中心 ｜ 最高限价：145.00 万元 ｜ 开标日期：2026-11-04 ｜ 社保要求：2026年8月-10月</div>
+        </div>
+      </section>
+
+      <!-- ════════ 8. 交付中心与审计 Reports ════════ -->
+      <section id="view-reports" class="view-panel">
+        <div class="page-hd">
+          <div>
+            <h1>封标交付中心与安全审计</h1>
+            <div class="sub">导出原位标红投标书、标准 Word 偏离表与人工终核签字单</div>
+          </div>
+        </div>
+        <div class="cra-card">
+          <div>本系统定位于封标前体检辅助工具，正式打印封标前请商务经理结合《人工终核签字单》完成最终复核。</div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<!-- 弹窗：个人模型服务配置 Modal -->
+<div id="modal-model-config" class="cra-modal" onclick="if(event.target===this) closeModal('modal-model-config')">
+  <div class="cra-modal-box">
+    <div class="modal-hd">
+      <span>个人模型服务配置（支持私有化内网模型防标书外泄）</span>
+      <button class="modal-close-btn" onclick="closeModal('modal-model-config')">✕</button>
+    </div>
+    <div class="form-group">
+      <label>预设平台模板</label>
+      <select class="form-input">
+        <option>企业内网私有化模型网关 (vLLM / Ollama / MaaS)</option>
+        <option>智谱开放平台 (BigModel)</option>
+        <option>DeepSeek 官方开放平台</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>接口地址 (Base URL)</label>
+      <input type="text" value="http://10.0.2.81:8000/v1" class="form-input">
+    </div>
+    <div class="form-group">
+      <label>API Key (服务端加密存储)</label>
+      <input type="password" value="sk-bid-private-9918273" class="form-input">
+    </div>
+    <div class="modal-ft">
+      <button class="btn btn-default" onclick="closeModal('modal-model-config')">取消</button>
+      <button class="btn btn-primary" onclick="closeModal('modal-model-config'); alert('模型配置已保存！')">保存配置</button>
+    </div>
+  </div>
+</div>
+
+<div id="modal-create-check" class="cra-modal" onclick="if(event.target===this) closeModal('modal-create-check')">
+  <div class="cra-modal-box">
+    <div class="modal-hd"><span>发起封标前防废标体检</span><button class="modal-close-btn" onclick="closeModal('modal-create-check')">✕</button></div>
+    <div class="form-group"><label>1. 甲方《招标文件》</label><input type="text" class="form-input" value="2026-ZB-089_招标文件.pdf" readonly></div>
+    <div class="form-group"><label>2. 我方《投标文件正本》</label><input type="text" class="form-input" value="我方投标文件正本.docx" readonly></div>
+    <div class="modal-ft"><button class="btn btn-default" onclick="closeModal('modal-create-check')">取消</button><button class="btn btn-primary" onclick="closeModal('modal-create-check'); switchNav('check')">开始体检</button></div>
+  </div>
+</div>
+
+<div id="modal-create-radar" class="cra-modal" onclick="if(event.target===this) closeModal('modal-create-radar')">
+  <div class="cra-modal-box">
+    <div class="modal-hd"><span>投前控标雷达扫描</span><button class="modal-close-btn" onclick="closeModal('modal-create-radar')">✕</button></div>
+    <div class="form-group"><label>上传甲方《招标文件》</label><input type="text" class="form-input" value="2026-ZB-089_招标文件.pdf" readonly></div>
+    <div class="modal-ft"><button class="btn btn-default" onclick="closeModal('modal-create-radar')">取消</button><button class="btn btn-primary" onclick="closeModal('modal-create-radar'); switchNav('radar')">开始扫描</button></div>
+  </div>
+</div>
+
+<div id="modal-change-pwd" class="cra-modal" onclick="if(event.target===this) closeModal('modal-change-pwd')">
+  <div class="cra-modal-box" style="width: 440px;">
+    <div class="modal-hd"><span>修改账户密码</span><button class="modal-close-btn" onclick="closeModal('modal-change-pwd')">✕</button></div>
+    <div class="form-group"><label>原密码</label><input type="password" class="form-input"></div>
+    <div class="form-group"><label>新密码</label><input type="password" class="form-input"></div>
+    <div class="modal-ft"><button class="btn btn-default" onclick="closeModal('modal-change-pwd')">取消</button><button class="btn btn-primary" onclick="closeModal('modal-change-pwd')">保存</button></div>
+  </div>
+</div>
+
+<script>
+  function switchNav(navKey) {
+    document.querySelectorAll('.side-nav-item').forEach(el => el.classList.remove('is-active'));
+    const navEl = document.getElementById('nav-' + navKey);
+    if (navEl) navEl.classList.add('is-active');
+    document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('is-active'));
+    const viewEl = document.getElementById('view-' + navKey);
+    if (viewEl) viewEl.classList.add('is-active');
+    closeAllDropdowns();
+  }
+
+  function changeSidebarTheme(mode, label, el) {
+    document.getElementById('theme-current-label').innerText = label;
+    document.querySelectorAll('#theme-dropdown .dropdown-item').forEach(i => i.classList.remove('is-selected'));
+    el.classList.add('is-selected');
+    const root = document.documentElement;
+    if (mode === 'stone') {
+      root.style.setProperty('--sidebar-bg', '#e2e8f0');
+      root.style.setProperty('--sidebar-hover', '#cbd5e1');
+      root.style.setProperty('--sidebar-text', '#1e293b');
+      root.style.setProperty('--sidebar-muted', '#64748b');
+      root.style.setProperty('--sidebar-foot-bg', '#d5dde7');
+      root.style.setProperty('--sidebar-foot-border', '#bdc8d6');
+      root.style.setProperty('--sidebar-foot-text', '#334155');
+      root.style.setProperty('--sidebar-foot-bold', '#0f172a');
+    } else if (mode === 'warm') {
+      root.style.setProperty('--sidebar-bg', '#262320');
+      root.style.setProperty('--sidebar-hover', '#36322e');
+      root.style.setProperty('--sidebar-text', '#e5e0d8');
+      root.style.setProperty('--sidebar-muted', '#968f85');
+      root.style.setProperty('--sidebar-foot-bg', 'rgba(255, 255, 255, 0.06)');
+      root.style.setProperty('--sidebar-foot-border', 'rgba(255, 255, 255, 0.12)');
+      root.style.setProperty('--sidebar-foot-text', '#d6d3cd');
+      root.style.setProperty('--sidebar-foot-bold', '#ffffff');
+    } else if (mode === 'teal') {
+      root.style.setProperty('--sidebar-bg', '#1e2d2f');
+      root.style.setProperty('--sidebar-hover', '#293d40');
+      root.style.setProperty('--sidebar-text', '#d1dbdc');
+      root.style.setProperty('--sidebar-muted', '#7e9496');
+      root.style.setProperty('--sidebar-foot-bg', 'rgba(255, 255, 255, 0.06)');
+      root.style.setProperty('--sidebar-foot-border', 'rgba(255, 255, 255, 0.12)');
+      root.style.setProperty('--sidebar-foot-text', '#cbd5e1');
+      root.style.setProperty('--sidebar-foot-bold', '#ffffff');
+    }
+    closeAllDropdowns();
+  }
+
+  function changeTenant(name, el) {
+    document.getElementById('tenant-current-label').innerText = name;
+    document.getElementById('dashboard-scope-label').innerText = name;
+    document.querySelectorAll('#tenant-dropdown .dropdown-item').forEach(i => i.classList.remove('is-selected'));
+    el.classList.add('is-selected');
+    closeAllDropdowns();
+  }
+
+  function selectSec(key) {
+    document.querySelectorAll('.clause-item').forEach(el => el.classList.remove('active-clause'));
+    const map = { 'P14/P19': 'sec-box-1', 'P88': 'sec-box-2', 'P46/P51': 'sec-box-3' };
+    const t = document.getElementById(map[key]);
+    if (t) t.classList.add('active-clause');
+  }
+
+  function openModal(id) { document.getElementById(id).classList.add('is-open'); closeAllDropdowns(); }
+  function closeModal(id) { document.getElementById(id).classList.remove('is-open'); }
+  function toggleDropdown(id) {
+    const el = document.getElementById(id);
+    const open = el.classList.contains('is-show');
+    closeAllDropdowns();
+    if (!open) el.classList.add('is-show');
+  }
+  function closeAllDropdowns() { document.querySelectorAll('.dropdown-box').forEach(el => el.classList.remove('is-show')); }
+  document.addEventListener('click', function(e) { if (!e.target.closest('.header-btn')) closeAllDropdowns(); });
+</script>
+</body>
+</html>

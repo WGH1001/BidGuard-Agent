@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>方向二 · 投标书防废标体检与偏离表生成 · 业务流程图 / 1个月功能级工期 / 竞品分析</title>
+  <style>
+    :root {
+      --bg: #f1f5f9;
+      --card: #ffffff;
+      --navy: #0f172a;
+      --txt: #1e293b;
+      --sub: #475569;
+      --mut: #64748b;
+      --line: #e2e8f0;
+      --blue: #2563eb;
+      --blue-soft: #eff6ff;
+      /* 严格还原《智能体业务流程全景图》三色规范 */
+      --det-bg: #e0f2fe;
+      --det-border: #38bdf8;
+      --det-txt: #0c4a6e;
+      --llm-bg: #ede9fe;
+      --llm-border: #8b5cf6;
+      --llm-txt: #4c1d95;
+      --out-bg: #d1fae5;
+      --out-border: #10b981;
+      --out-txt: #064e3b;
+      --src-real-bg: #fef3c7;
+      --src-real-border: #f59e0b;
+      --src-net-bg: #f1f5f9;
+      --src-net-border: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--txt);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 14px;
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* 顶部吸顶栏 */
+    .top-header {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: #0f172a;
+      color: #ffffff;
+      padding: 14px 28px;
+      border-bottom: 2px solid #2563eb;
+      box-shadow: 0 4px 16px rgba(15, 23, 42, 0.18);
+    }
+    .th-inner {
+      max-width: 1240px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .th-title {
+      font-size: 17px;
+      font-weight: 800;
+      color: #f8fafc;
+    }
+    .th-title span {
+      color: #93c5fd;
+      font-size: 13px;
+      font-weight: 600;
+      margin-left: 10px;
+    }
+    .th-badge {
+      padding: 7px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #ffffff;
+      background: #2563eb;
+      box-shadow: 0 2px 8px rgba(37, 99, 235, 0.4);
+    }
+
+    .container {
+      max-width: 1240px;
+      margin: 26px auto 70px;
+      padding: 0 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 40px;
+    }
+
+    .direction-wrapper { display: flex; flex-direction: column; gap: 28px; }
+
+    .sec-card {
+      background: var(--card);
+      border: 1px solid #cbd5e1;
+      border-radius: 14px;
+      padding: 28px 32px;
+      box-shadow: 0 6px 20px -6px rgba(15, 23, 42, 0.07);
+    }
+    .sec-hd {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      border-bottom: 2px solid var(--line);
+      padding-bottom: 12px;
+      margin-bottom: 22px;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .sec-hd h2 {
+      font-size: 21px;
+      font-weight: 800;
+      color: var(--navy);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .sec-hd h2::before {
+      content: "";
+      width: 6px;
+      height: 20px;
+      background: var(--blue);
+      border-radius: 3px;
+    }
+    .sec-hd .sub {
+      font-size: 13px;
+      color: var(--mut);
+      font-weight: 600;
+    }
+
+    /* ══ 模块一：智能体业务流程全景图（1:1 复刻标准三色框图） ══ */
+    .diag-title { font-size: 22px; font-weight: 800; color: var(--navy); margin-bottom: 4px; }
+    .diag-sub { font-size: 13px; color: var(--mut); margin-bottom: 24px; }
+    .row-main-4 {
+      display: grid;
+      grid-template-columns: 1fr 34px 1fr 34px 1fr 34px 1fr;
+      align-items: center;
+    }
+    .branch-connector {
+      position: relative;
+      height: 30px;
+      margin: 0 auto;
+      width: 82%;
+    }
+    .branch-connector svg, .down-connector svg {
+      width: 100%;
+      height: 100%;
+      overflow: visible;
+    }
+    .row-mid-3 {
+      display: grid;
+      grid-template-columns: 1fr 1.15fr 1.15fr;
+      gap: 20px;
+    }
+    .down-connector { height: 32px; position: relative; }
+    .f-node {
+      border-radius: 10px;
+      padding: 13px 12px;
+      text-align: center;
+      border: 1.8px solid transparent;
+      box-shadow: 0 2px 6px rgba(15, 23, 42, 0.04);
+    }
+    .f-node .n-title { font-size: 15px; font-weight: 800; margin-bottom: 4px; line-height: 1.3; }
+    .f-node .n-line { font-size: 12.5px; line-height: 1.45; opacity: 0.92; }
+    .f-node.det { background: var(--det-bg); border-color: var(--det-border); color: var(--det-txt); }
+    .f-node.llm { background: var(--llm-bg); border-color: var(--llm-border); color: var(--llm-txt); }
+    .f-node.out { background: var(--out-bg); border-color: var(--out-border); color: var(--out-txt); }
+    .arrow-cell { text-align: center; font-size: 20px; color: #475569; font-weight: 700; user-select: none; }
+
+    .legend-bar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 34px;
+      margin: 22px 0 18px;
+      flex-wrap: wrap;
+      font-size: 13px;
+      font-weight: 700;
+      color: #334155;
+    }
+    .leg-item { display: flex; align-items: center; gap: 8px; }
+    .leg-swatch { width: 17px; height: 17px; border-radius: 5px; border: 1.8px solid transparent; }
+    .leg-swatch.llm { background: var(--llm-bg); border-color: var(--llm-border); }
+    .leg-swatch.det { background: var(--det-bg); border-color: var(--det-border); }
+    .leg-swatch.out { background: var(--out-bg); border-color: var(--out-border); }
+
+    .source-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .src-box { border-radius: 10px; padding: 13px 16px; font-size: 13px; }
+    .src-box.real { background: var(--src-real-bg); border: 1.5px solid var(--src-real-border); color: #78350f; }
+    .src-box.net { background: var(--src-net-bg); border: 1.5px solid var(--src-net-border); color: #334155; }
+    .src-box b { display: block; font-size: 14px; margin-bottom: 3px; color: var(--navy); }
+
+    /* ══ 模块二：一个月（22个工作日）功能级工期排期表与里程碑 ══ */
+    .milestone-strip {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .ms-card {
+      background: #f8fafc;
+      border: 1px solid var(--line);
+      border-top: 3px solid var(--blue);
+      border-radius: 8px;
+      padding: 12px 14px;
+    }
+    .ms-wk { font-size: 11.5px; font-weight: 800; color: var(--blue); }
+    .ms-title { font-size: 14px; font-weight: 800; color: var(--navy); margin: 3px 0; }
+    .ms-desc { font-size: 12px; color: var(--sub); line-height: 1.45; }
+
+    table.std-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    table.std-table th {
+      background: #f1f5f9;
+      color: var(--navy);
+      text-align: left;
+      padding: 10px 12px;
+      font-weight: 800;
+      border: 1px solid #cbd5e1;
+      white-space: nowrap;
+    }
+    table.std-table td {
+      padding: 10px 12px;
+      border: 1px solid #cbd5e1;
+      vertical-align: middle;
+      color: #334155;
+    }
+    table.std-table tr:nth-child(even) td { background: #fafbfc; }
+
+    .gantt-bar-bg {
+      width: 140px;
+      height: 10px;
+      background: #e2e8f0;
+      border-radius: 99px;
+      position: relative;
+      overflow: hidden;
+    }
+    .gantt-bar-fill {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      background: var(--blue);
+      border-radius: 99px;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11.5px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .p-det { background: #e0f2fe; color: #0369a1; }
+    .p-llm { background: #ede9fe; color: #6d28d9; }
+    .p-out { background: #d1fae5; color: #047857; }
+    .p-base { background: #f1f5f9; color: #475569; }
+
+    /* ══ 模块三：竞品分析矩阵与六大核心优势 ══ */
+    .adv-grid3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+      margin-top: 18px;
+    }
+    .adv-card {
+      background: #f8fafc;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--blue);
+      border-radius: 8px;
+      padding: 12px 14px;
+    }
+    .adv-card h4 { font-size: 13.5px; font-weight: 800; color: var(--navy); margin-bottom: 4px; }
+    .adv-card p { font-size: 12.5px; color: var(--sub); line-height: 1.5; }
+
+    @media (max-width: 960px) {
+      .row-main-4, .milestone-strip, .adv-grid3 { grid-template-columns: 1fr; gap: 10px; }
+      .arrow-cell, .branch-connector, .down-connector { display: none; }
+      .row-mid-3, .source-row-2 { grid-template-columns: 1fr; }
+    }
+    @media print {
+      .top-header { position: static; }
+    }
+  </style>
+</head>
+<body>
+
+<header class="top-header">
+  <div class="th-inner">
+    <div class="th-title">
+      方向二 · 投标书防废标体检与偏离表生成智能体
+      <span>含：业务流程全景图 · 1个月(22工作日)逐功能工期表 · 深度竞品分析</span>
+    </div>
+    <div class="th-badge">2026年11月 新智能体立项方案</div>
+  </div>
+</header>
+
+<main class="container">
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       方向二：投标方标书防废标体检与偏离表生成智能体
+       ════════════════════════════════════════════════════════════════════ -->
+  <div class="direction-wrapper">
+
+    <!-- 1. 方向二：业务流程全景图 -->
+    <section class="sec-card">
+      <div class="sec-hd">
+        <h2>方向二 · 智能体业务流程全景图（投标方标书防废标体检与偏离表生成）</h2>
+        <span class="sub">定位：卖方封标前最后一道安全锁 + 投前控标雷达 · 严守卖方视角不碰买方采购</span>
+      </div>
+
+      <div class="diag-title">智能体业务流程全景图</div>
+      <div class="diag-sub">AI 投标书防废标体检与偏离表自动生成系统 · 大模型调用点与需求来源标注（主流程 + 投前控标辅助流）</div>
+
+      <!-- 第 1 排 -->
+      <div class="row-main-4">
+        <div class="f-node det">
+          <div class="n-title">上传招投标双书</div>
+          <div class="n-line">甲方招标文件(Word/PDF)</div>
+          <div class="n-line">我方投标书正本与证照</div>
+        </div>
+        <div class="arrow-cell">→</div>
+        <div class="f-node det">
+          <div class="n-title">F1 废标红线与★条款提取</div>
+          <div class="n-line">抽取资格项/符合项/★▲参数</div>
+          <div class="n-line">先提取后比对 · ★漏检率=0</div>
+        </div>
+        <div class="arrow-cell">→</div>
+        <div class="f-node det">
+          <div class="n-title">双轨防废标核查</div>
+          <div class="n-line">算术日期引擎 ∥ ★逐条核验</div>
+          <div class="n-line">双文档条款级勾稽</div>
+        </div>
+        <div class="arrow-cell">→</div>
+        <div class="f-node out">
+          <div class="n-title">废标风险分级汇总</div>
+          <div class="n-line">一票否决废标项 / 扣分项</div>
+          <div class="n-line">附双书页码与人工复核栏</div>
+        </div>
+      </div>
+
+      <!-- 虚线分叉 -->
+      <div class="branch-connector">
+        <svg viewBox="0 0 1000 30" preserveAspectRatio="none">
+          <line x1="620" y1="0" x2="620" y2="14" stroke="#94a3b8" stroke-width="2" stroke-dasharray="6,5" />
+          <line x1="160" y1="14" x2="840" y2="14" stroke="#94a3b8" stroke-width="2" stroke-dasharray="6,5" />
+          <line x1="160" y1="14" x2="160" y2="30" stroke="#94a3b8" stroke-width="2" stroke-dasharray="6,5" />
+          <line x1="500" y1="14" x2="500" y2="30" stroke="#94a3b8" stroke-width="2" stroke-dasharray="6,5" />
+          <line x1="840" y1="14" x2="840" y2="30" stroke="#94a3b8" stroke-width="2" stroke-dasharray="6,5" />
+        </svg>
+      </div>
+
+      <!-- 第 2 排 -->
+      <div class="row-mid-3">
+        <div class="f-node det">
+          <div class="n-title">F2 报价沙盒 + F3 证照/串名</div>
+          <div class="n-line">单价×数量·累加=总价·大小写</div>
+          <div class="n-line">证照过期·社保月份·串名100%检出</div>
+        </div>
+        <div class="f-node llm">
+          <div class="n-title">F4 ★条款逐条核验 ★大模型①</div>
+          <div class="n-line">招标要求 ↔ 投标响应逐一比对</div>
+          <div class="n-line">揪出漏应答与缺检测报告页码</div>
+        </div>
+        <div class="f-node llm">
+          <div class="n-title">F4 前后承诺矛盾检测 ★大模型②</div>
+          <div class="n-line">扫描商务写质保3年 vs 售后写1年</div>
+          <div class="n-line">强制附双方原文与页码坐标</div>
+        </div>
+      </div>
+
+      <!-- 向下箭头 -->
+      <div class="down-connector">
+        <svg viewBox="0 0 1000 32" preserveAspectRatio="none">
+          <line x1="160" y1="0" x2="160" y2="15" stroke="#475569" stroke-width="2" />
+          <line x1="160" y1="15" x2="120" y2="15" stroke="#475569" stroke-width="2" />
+          <line x1="120" y1="15" x2="120" y2="29" stroke="#475569" stroke-width="2" />
+          <polyline points="114,23 120,30 126,23" fill="none" stroke="#475569" stroke-width="2" />
+        </svg>
+      </div>
+
+      <!-- 第 3 排 -->
+      <div class="row-main-4">
+        <div class="f-node out">
+          <div class="n-title">投标书原位标红批注</div>
+          <div class="n-line">在投标书 Word/PDF 原位</div>
+          <div class="n-line">插入废标预警批注气泡</div>
+        </div>
+        <div class="arrow-cell">→</div>
+        <div class="f-node out">
+          <div class="n-title">F5 偏离表.docx 一键生成</div>
+          <div class="n-line">填好条款/响应/偏离/页码</div>
+          <div class="n-line">2天制表压缩至 15 分钟</div>
+        </div>
+        <div class="arrow-cell">→</div>
+        <div class="f-node llm">
+          <div class="n-title">F7 标书专家追问 ★大模型③</div>
+          <div class="n-line">ReAct 跨双书检索评分项</div>
+          <div class="n-line">精准定位对应投标书页码</div>
+        </div>
+        <div class="arrow-cell">→</div>
+        <div class="f-node llm">
+          <div class="n-title">F6 投前控标雷达 ★大模型④</div>
+          <div class="n-line">【投前流】识别排他性控标参数</div>
+          <div class="n-line">输出值得投/谨慎投(标注疑似)</div>
+        </div>
+      </div>
+
+      <div class="legend-bar">
+        <div class="leg-item"><span class="leg-swatch llm"></span><span>调用大模型（共 4 处，可配置本地/私有化模型防标书外泄）</span></div>
+        <div class="leg-item"><span class="leg-swatch det"></span><span>本地确定性计算（零大模型：报价求和/大小写/证照效期/串名扫描）</span></div>
+        <div class="leg-item"><span class="leg-swatch out"></span><span>面向投标商务团队的交付物（原位批注标书 + 标准 Word 偏离表）</span></div>
+      </div>
+
+      <div class="source-row-2">
+        <div class="src-box real">
+          <b>需求来源 · 现实痛点与冷启动优势</b>
+          封标前夜熬夜赶稿最易因漏答 1 条 ★ 参数、分项求和差 1 分钱、社保过期或忘删别家甲方名导致废标；本公司自身投标即可作为 1 号种子客户率先使用验证。
+        </div>
+        <div class="src-box net">
+          <b>需求来源 · 网络零成本语料与规则库</b>
+          《政府采购法》法定废标情形 → 规则库；中国政府采购网（ccgp.gov.cn）每日免费公开数万份完整招标文件 Word/PDF → 零成本真实测试集。
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. 方向二：一个月（22个工作日）功能级工期排期表 -->
+    <section class="sec-card">
+      <div class="sec-hd">
+        <h2>方向二 · 1 个月研发工期分解表（共 4 周 / 22 个工作日：2026.11.04 ～ 2026.12.03）</h2>
+        <span class="sub">按 M0 政采网语料验证 → V1 防废标核心闭环 → V2 偏离表与控标雷达 → 封版交付 四阶段推进</span>
+      </div>
+
+      <div class="milestone-strip">
+        <div class="ms-card">
+          <div class="ms-wk">第 1 周 (11.04 - 11.10 · 5天)</div>
+          <div class="ms-title">M0 语料构建 + F1 招标红线提取</div>
+          <div class="ms-desc">下载 5 份政采网真实招标书并构造废标样本；独立建仓摘取对齐引擎；研发 F1 提取器。</div>
+        </div>
+        <div class="ms-card">
+          <div class="ms-wk">第 2 周 (11.11 - 11.18 · 6天)</div>
+          <div class="ms-title">F1 零漏检收口 + F2 报价 + F3 证照</div>
+          <div class="ms-desc">验证 ★ 条款漏检率=0；完成 F2 报价算术沙盒与大小写校验、F3 证照效期与串名扫描。</div>
+        </div>
+        <div class="ms-card">
+          <div class="ms-wk">第 3 周 (11.19 - 11.26 · 6天)</div>
+          <div class="ms-title">V1 闭环 (F4) + V2 偏离表生成 (F5)</div>
+          <div class="ms-desc">完成 F4 ★条款逐条核验与前后矛盾检测；完成 F5 《技术与商务偏离表.docx》一键生成。</div>
+        </div>
+        <div class="ms-card">
+          <div class="ms-wk">第 4 周 (11.27 - 12.03 · 5天)</div>
+          <div class="ms-title">F6 控标雷达 + F7 追问 + 封版交付</div>
+          <div class="ms-desc">完成 F6 投前控标雷达、F7 专家页码追问、Word 原位批注、浅岩灰前端与四容器打包。</div>
+        </div>
+      </div>
+
+      <table class="std-table">
+        <thead>
+          <tr>
+            <th style="width: 85px;">模块代号</th>
+            <th style="width: 230px;">功能模块与研发任务名称</th>
+            <th style="width: 110px;">技术属性</th>
+            <th>核心研发内容与交付验收标准</th>
+            <th style="width: 80px;">工期(天)</th>
+            <th style="width: 115px;">计划起止日期</th>
+            <th style="width: 155px;">月度甘特进度</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><b>M0 / 底座</b></td>
+            <td><b>政采网真实招标书语料构建与模块摘取</b></td>
+            <td><span class="pill p-base">底座迁移</span></td>
+            <td>从 ccgp.gov.cn 下载 5 份真实招标文件并自构造含漏答/算错/过期硬伤的投标书；独立建仓复制适配 <code>contract_diff.py</code>、<code>parser.py</code>、批注与私有 API 配置</td>
+            <td><b>2.0 天</b></td>
+            <td>11.04 - 11.05</td>
+            <td><div class="gantt-bar-bg"><div class="gantt-bar-fill" style="left:0%;width:9%;"></div></div></td>
+          </tr>
+          <tr>
+            <td><b>F1</b></td>
+            <td><b>招标文件废标红线与 ★/▲ 条款提取器</b></td>
+            <td><span class="pill p-llm">规则+大模型</span></td>
+            <td>将 200 页招标文件结构化提取为：资格审查项、符合性审查项、★/▲强制参数、评分细则表（先抽取后比对，确保测试集上 <b>★条款漏检率 = 0%</b>）</td>
+            <td><b>3.5 天</b></td>
+            <td>11.06 - 11.11上午</td>
+            <td><div class="gantt-bar-bg"><div class="gantt-bar-fill" style="left:9%;width:16%;"></div></div></td>
+          </tr>
+          <tr>
+            <td><b>F2</b></td>
+            <td><b>分项与开标一览表报价算术沙盒</b></td>
+            <td><span class="pill p-det">0 Token 纯算术</span></td>
+            <td>核验分项报价表“单价×数量=合价”、“分项累加=一览表总价”、人民币大小写严格一致、未超最高限价（差 1 分钱、大写错 1 字 100% 报警）</td>
+            <td><b>2.5 天</b></td>
+            <td>11.11下午 - 11.13</td>
+            <td><div class="gantt-bar-bg"><div class="gantt-bar-fill" style="left:25%;width:11.5%;"></div></div></td>
+          </tr>
+          <tr>
+            <td><b>F3</b></td>
+            <td><b>证照有效期核验与跨项目串名穿帮扫描</b></td>
+            <td><span class="pill p-det">0 Token 扫描</span></td>
+            <td>核验营业执照/ISO/授权书有效期是否覆盖开标日、社保证明月份是否符合要求；全文扫描残留的其他项目单位名称（证照过期与串名 100% 检出）</td>
+            <td><b>2.0 天</b></td>
+            <td>11.16 - 11.17</td>
+            <td><div class="gantt-bar-bg"><div class="gantt-bar-fill" style="left:36.5%;width:9%;"></div></div></td>
+          </tr>
+          <tr>
+            <td><b>F4</b></td>
+            <td><b>★条款逐条响应核验 + 标书前后矛盾检测</b></td>
+            <td><span class="pill p-llm">★大模型①②</span></td>
+            <td>基于 <code>contract_diff.py</code> 改造双书勾稽：逐一比对招标要求与投标响应，检出漏应答、缺检测报告页码支撑及前后矛盾（如商务质保3年 vs 售后1年），附双方原文+页码</td>
+            <td><b>3.5 天</b></td>
+            <td>11.18 - 11.20上午</td>
+            <td><div class="gantt-bar-bg"><div class="gantt-bar-fill" style="left:45.5%;width:16%;"></div></div></td>
+          </tr>
+          <tr>
+            <td><b>F5</b></td>
+            <td><b>《技术与商务偏离表.docx》一键对齐生成器</b></td>
+            <td><span class="pill p-out">对齐+docx生成</span></td>
+            <td>将招标技术/商务规范与我方响应自动对齐，生成填好条款号/招标要求/投标响应/正无负偏离/说明页码的标准 Word 表格（2天工作量压缩至 15 分钟）</td>
+            <td><b>3.0 天</b></td>
+            <td>11.20下午 - 11.24</td>
+            <td><div class="gantt-bar-bg"><div class="gantt-bar-fill" style="left:61.5%;width:13.5%;"></div></div></td>
+          </tr>
+          <tr>
+            <td><b>F6 & F7</b></td>
+            <td><b>投前控标雷达 (F6) + 标书专家 ReAct 追问 (F7)</b></td>
+            <td><span class="pill p-llm">★大模型③④</span></td>
+            <td>F6 识别招标书排他性控标参数并输出值得投/谨慎投评估（标注“疑似”）；F7 支持提问“某评分项对应标书哪页”并返回精确页码坐标</td>
+            <td><b>2.5 天</b></td>
+            <td>11.25 - 11.27上午</td>
+            <td><div class="gantt-bar-bg"><div class="gantt-bar-fill" style="left:75%;width:11.5%;"></div></div></td>
+          </tr>
+          <tr>
+            <td><b>前端与封版</b></td>
+            <td><b>Word 原位标红批注、前端工作台与四容器封版</b></td>
+            <td><span class="pill p-out">全栈交付</span></td>
+            <td>完成投标书 Word 原位批注回写、浅岩灰侧栏防废标工作台、私有化模型 API 接入验证、M0 测试集 100% 检出回归与 Docker 离线部署包封装</td>
+            <td><b>3.0 天</b></td>
+            <td>11.27下午 - 12.03</td>
+            <td><div class="gantt-bar-bg"><div class="gantt-bar-fill" style="left:86.5%;width:13.5%;background:#10b981;"></div></div></td>
+          </tr>
+          <tr style="background: #eff6ff; font-weight: 800;">
+            <td colspan="4" style="text-align: right; color: var(--navy);">方向二 · 月度研发总工期合计：</td>
+            <td style="color: var(--blue);">22.0 天</td>
+            <td colspan="2" style="color: var(--navy);">1 个自然月（4 完整工作周）</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 3. 方向二：深度竞品分析 -->
+    <section class="sec-card">
+      <div class="sec-hd">
+        <h2>方向二 · 竞品分析与核心差异化壁垒（投标防废标与偏离表生成领域）</h2>
+        <span class="sub">对比投标团队人工熬夜检查、通用大模型/WorkBuddy、市面上泛滥的“AI自动写标书”软件</span>
+      </div>
+
+      <table class="std-table">
+        <thead>
+          <tr>
+            <th style="width: 150px;">对比维度</th>
+            <th style="width: 22%;">投标团队人工交叉检查</th>
+            <th style="width: 23%;">通用大模型 / WorkBuddy 直接提问</th>
+            <th style="width: 22%;">市面上的“AI 自动写标书”工具</th>
+            <th style="width: 25%; background: #eff6ff; color: var(--blue);">本产品（双书对齐防废标 + 偏离表引擎）</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><b>1. 两份 200 页长文档 ★/▲ 条款核对</b></td>
+            <td>封标前夜人工肉眼翻找极易疲劳漏看，漏答 1 条 ★ 参数即废标</td>
+            <td><b>注意力严重衰减</b>：两份 200 页文档直接丢进上下文，必漏中间章节的 ★ 细节</td>
+            <td>重心在“生成水文凑页数”，对招标书实质性 ★ 条款缺乏逐条核销机制</td>
+            <td style="background:#f8fbff;font-weight:700;color:var(--navy);">F1 先结构化抽取全部 ★/▲ 清单（漏检率=0），F4 再逐条比对并附双书页码</td>
+          </tr>
+          <tr>
+            <td><b>2. 分项报价求和与大小写校验</b></td>
+            <td>人工改完某一项单价后常忘记同步更新一览表总价或大写金额</td>
+            <td>大模型对上百行分项报价表做乘加运算经常算错小数位</td>
+            <td>不具备开标一览表与分项报价表跨表等式与人民币大小写核验能力</td>
+            <td style="background:#f8fbff;font-weight:700;color:var(--navy);">F2 0-Token 报价算术沙盒，差 1 分钱或大写错 1 个字 100% 立即报警</td>
+          </tr>
+          <tr>
+            <td><b>3. 证照过期、社保月份与串名穿帮</b></td>
+            <td>常误贴上季度的旧社保图，或复制旧标书忘删上一家甲方单位名称</td>
+            <td>无法批量 OCR 核验数十张证照到期日与开标日的时间差</td>
+            <td>只管生成正文，不核验贴入的证照扫描件有效期与全书串名穿帮</td>
+            <td style="background:#f8fbff;font-weight:700;color:var(--navy);">F3 0-Token 日期与实体排他扫描，证照过期、社保月份不符、串名 100% 检出</td>
+          </tr>
+          <tr>
+            <td><b>4. 《技术与商务偏离表.docx》制作</b></td>
+            <td>人工逐条复制粘贴招标要求、查找投标书页码，耗时整整 1~2 天</td>
+            <td>对话框只能输出零散片段，无法生成完整填好几十页页码的标准 Word 表</td>
+            <td>生成的偏离表无真实投标书页码与检测报告页码支撑，属虚假应答</td>
+            <td style="background:#f8fbff;font-weight:700;color:var(--navy);">F5 双书对齐一键导出填好条款/响应/偏离/真实页码的 Word 偏离表（仅需15分钟）</td>
+          </tr>
+          <tr>
+            <td><b>5. 投前控标识别与商业标书保密性</b></td>
+            <td>销售拿不准招标书是否已被对手控标，盲目写标陪跑浪费两周人力</td>
+            <td>公有云聊天工具上传未公开投标底价与核心方案，存在严重泄密风险</td>
+            <td>纯 SaaS 公有云架构，政企与工程客户不敢上传涉密投标报价</td>
+            <td style="background:#f8fbff;font-weight:700;color:var(--navy);">F6 投前控标雷达辅助立项决策；支持自定义 API 接入本地/私有模型防外泄</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="adv-grid3">
+        <div class="adv-card">
+          <h4>壁垒一：“先抽取 F1、再逐条比对 F4”架构</h4>
+          <p>从工程机制上攻克大模型长文本注意力衰减难题，确保 200 页招标书中的 ★/▲ 强制参数 100% 提取建档、逐一核销并绑定双书页码。</p>
+        </div>
+        <div class="adv-card">
+          <h4>壁垒二：避开“AI写标书”红海，直击废标真痛点</h4>
+          <p>客户不怕标书文采不够，最怕辛苦两周因为算错 500 块钱、漏答 1 条 ★ 参数或忘删别家甲方名字当场废标；精准卡位封标前刚需闸门。</p>
+        </div>
+        <div class="adv-card">
+          <h4>壁垒三：政采网无限零成本语料 + 本司自用冷启动</h4>
+          <p>中国政府采购网每日公开数万份招标书，测试集零成本；且本公司自己投标即可作为 1 号种子客户验证，支持私有模型 API 彻底打消客户泄密顾虑。</p>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+</main>
+
+</body>
+</html>
