@@ -69,6 +69,28 @@ def test_marked_clauses_dual_marker_line():
     assert all(h['start'] == 0 for h in hits)
 
 
+def test_marked_clauses_usage_note_tagged():
+    """标记使用说明语（元说明）必须打 usage_note 标签，与采购要求区分。
+
+    语料实证两类：滁州物业 #10「根据采购需求中标"▲"功能要求…」、
+    无锡梁溪 #2《节能产品政府采购品目清单》「属于清单中打★品目的…」。
+    """
+    text = (
+        '▲1) 残值回收功能\n▲2) 质保金支付方式\n'
+        '根据采购需求中标“▲”功能要求，投标人须提供相关证明材料。\n'
+        '依据财政部发布的《节能产品政府采购品目清单》，属于清单中打★品目的，'
+        '只能选择具有国家认证标识的节能产品。\n'
+        '★1) 系统响应时间不超过 3 秒\n'
+    )
+    hits = extract_marked_clauses(text)
+    notes = [h for h in hits if h['kind'] == 'usage_note']
+    reqs = [h for h in hits if h['kind'] == 'requirement']
+    assert len(notes) == 2, notes          # 两类说明语各命中一条
+    assert any('残值回收' in h['text'] for h in reqs)
+    assert any('响应时间' in h['text'] for h in reqs)
+    assert all(not h['text'].startswith('根据采购需求') for h in reqs)
+
+
 def test_eval_chapter_skips_toc_entry():
     """评标章定位必须跳过目录行（点线引导符+页码），取正文真实章标题。"""
     text = (

@@ -5,7 +5,7 @@
     在 LLM 分段抽取之前，用确定性规则把整本招标文件中的强制条款"圈出来"，
     产出结构化候选清单。三层职责：
     ① ★/▲ 标记条款提取（标记型语料）；
-    ② 无星措辞型强制条款提取（依据 2026-11-04 徐州份人工核验沉淀的两类句式：
+    ② 无标记措辞型强制条款提取（全文无任何 ★/▲ 标记，旧称"无星措辞型"）（依据 2026-11-04 徐州份人工核验沉淀的两类句式：
        模式 A「不允许偏离的实质性要求」模板句 / 模式 B「无效投标处理」触发词）；
     ③ 章节与审查区定位（资格审查 / 符合性审查 / 评标办法·评分细则表），供
        LLM 分段层按区域投喂、防止整本直塞导致注意力衰减（PRD R-01）。
@@ -14,7 +14,7 @@
     load_document(file_path) -> ParsedDoc
     locate_chapters(text) -> list[dict]              # 第X章标题与偏移
     extract_marked_clauses(text) -> list[dict]       # ★/▲ 标记条款
-    extract_invalid_bid_clauses(text) -> list[dict]  # 无星措辞型（模式A/B）
+    extract_invalid_bid_clauses(text) -> list[dict]  # 无标记措辞型（模式A/B）
     locate_keyword_sections(text, keywords) -> list[dict]  # 审查区/评分区定位
     build_review_checklist(file_path) -> dict        # 四类候选汇总（一次成稿）
 
@@ -53,6 +53,15 @@ _PROMISE_DOC_RE = re.compile(r'《([^》]{2,30})》')
 # 模式 B：无效投标触发词（语料实证变体，要求带"处理"落点防误伤泛论）
 _PATTERN_B_RE = re.compile(
     r'无效投标处理|投标无效处理|作无效投标|视为无效投标|按无效投标|无效响应处理'
+)
+
+# 标记使用说明语（元说明，非采购要求本身，F1 输出要求清单时应排除）：
+# 语料实证两类——滁州物业 #10「根据采购需求中标"▲"功能要求，投标人须提供…」、
+# 无锡梁溪 #2《节能产品政府采购品目清单》「属于清单中打★品目的…」。
+# 保守起见只匹配已实证的模板形态，新形态由 ground truth 定稿时人工补。
+_USAGE_NOTE_RE = re.compile(
+    r'品目清单'
+    r'|根据采购需求.{0,8}[“"]?[▲★][”"]?功能要求'
 )
 
 # 章节语义关键词（定位 评标办法 / 资格审查 / 符合性审查 / 评分细则）
@@ -129,7 +138,10 @@ def extract_marked_clauses(text: str) -> list[dict]:
 
     Returns:
         [{'mark': '★'|'▲', 'text': 条款全文, 'start': int, 'end': int,
-          'clause_no': 就近编号头（可空串）}, ...] 按 start 升序。
+          'clause_no': 就近编号头（可空串）,
+          'kind': 'requirement'|'usage_note'}, ...] 按 start 升序。
+        usage_note = 标记使用说明语（如"▲功能要求须提供证明材料"模板语、
+        节能品目清单条款），是元说明而非采购要求，消费方应从要求清单排除。
     """
     lines = []
     offset = 0
@@ -151,19 +163,25 @@ def extract_marked_clauses(text: str) -> list[dict]:
             merged_lines = [line_text.strip()]
             while j + 1 < len(lines):
                 nxt_start, nxt_text = lines[j + 1]
-                if mark in nxt_text and len(nxt_text.strip()) < 300:
+                # 双向防混并：①说明语行不并入要求记录（终止合并，自成 usage_note）；
+                # ②说明语记录也不吞并后续要求行（梁溪★品目清单语后紧跟★参数的形态）
+                if (mark in nxt_text and len(nxt_text.strip()) < 300
+                        and not _USAGE_NOTE_RE.search(nxt_text)
+                        and not _USAGE_NOTE_RE.search('\n'.join(merged_lines))):
                     merged_lines.append(nxt_text.strip())
                     merged_end = nxt_start + len(nxt_text)
                     j += 1
                 else:
                     break
             clause_no = _find_clause_header_before(text, line_start)
+            merged_text = '\n'.join(merged_lines)
             hits.append({
                 'mark': mark,
-                'text': '\n'.join(merged_lines),
+                'text': merged_text,
                 'start': line_start,
                 'end': merged_end,
                 'clause_no': clause_no,
+                'kind': 'usage_note' if _USAGE_NOTE_RE.search(merged_text) else 'requirement',
             })
             i = j + 1
     hits.sort(key=lambda h: h['start'])
@@ -171,7 +189,7 @@ def extract_marked_clauses(text: str) -> list[dict]:
 
 
 def extract_invalid_bid_clauses(text: str) -> list[dict]:
-    """提取无星措辞型强制条款（徐州份核验沉淀的模式 A / 模式 B）。
+    """提取无标记措辞型强制条款（全文无任何 ★/▲ 标记）（徐州份核验沉淀的模式 A / 模式 B）。
 
     Returns:
         [{'pattern': 'A'|'B', 'text': 所在条款全文, 'start': int, 'end': int,
