@@ -8,6 +8,9 @@
     candidates_<项目编号>.json   每份语料的四类候选（含偏移可溯源）
     _summary.md                  人工核对用汇总表（★/▲/模式A/B 计数）
 0 Token，全程无 LLM 调用。候选清单经人工核对定稿后即为 F1 的 ground truth 基准。
+
+⚠️ 本脚本只写 baseline/，严禁触碰 ground_truth/（人工定稿基准，见该目录 _README.md）。
+候选定稿流程：重跑本脚本 → 人工 diff → 更新 ground_truth/（只允许人工编辑）。
 """
 import glob
 import json
