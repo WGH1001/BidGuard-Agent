@@ -105,7 +105,11 @@ def test_upper_match_and_zheng_variant():
                         bid_total_upper='壹佰贰拾捌万陆仟伍佰元整').run() == []
     assert PriceSandbox(bid_total='1286500.00',
                         bid_total_upper='人民币壹佰贰拾捌万陆仟伍佰元正').run() == []
+    # "圆"代"元"（政采/国企标书高频写法）不算错
+    assert PriceSandbox(bid_total='1286500.00',
+                        bid_total_upper='壹佰贰拾捌万陆仟伍佰圆整').run() == []
     assert _normalize_upper('（大写）壹拾元正 ') == '壹拾元整'
+    assert _normalize_upper('壹佰圆整') == '壹佰元整'
 
 
 def test_upper_with_jiao_fen():
