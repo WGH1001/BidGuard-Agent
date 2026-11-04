@@ -56,12 +56,18 @@ _PATTERN_B_RE = re.compile(
 )
 
 # 标记使用说明语（元说明，非采购要求本身，F1 输出要求清单时应排除）：
-# 语料实证两类——滁州物业 #10「根据采购需求中标"▲"功能要求，投标人须提供…」、
-# 无锡梁溪 #2《节能产品政府采购品目清单》「属于清单中打★品目的…」。
+# 语料实证五类——滁州物业 #10「根据采购需求中标"▲"功能要求，投标人须提供…」、
+# 无锡梁溪 #2《节能产品政府采购品目清单》「属于清单中打★品目的…」、
+# 亳州 #8「标有★的参数为实质性参数…」「▲为政府强制采购节能产品…」（2026-11-04
+# 用户独立复核新增）、南京病理 #4 评分说明「打★指标为必须满足项…打▲指标为
+# 重要指标…」（同上）。
 # 保守起见只匹配已实证的模板形态，新形态由 ground truth 定稿时人工补。
 _USAGE_NOTE_RE = re.compile(
     r'品目清单'
     r'|根据采购需求.{0,8}[“"]?[▲★][”"]?功能要求'
+    r'|打[★▲]指标'                      # 评分说明：打★指标为必须满足项 / 打▲指标为重要指标
+    r'|标有\s*[“"]?\s*[★▲]\s*[”"]?\s*的'  # 实质性说明：标有"★"的参数为实质性参数（亳州实证含空格+引号）
+    r'|[★▲]为(政府)?强制采购'           # 节能说明：▲为政府强制采购节能产品
 )
 
 # 章节语义关键词（定位 评标办法 / 资格审查 / 符合性审查 / 评分细则）
@@ -133,15 +139,21 @@ def extract_marked_clauses(text: str) -> list[dict]:
     """提取 ★/▲ 标记条款（标记型语料的确定性主通道）。
 
     按"行"捕获、按标记类型分组合并：连续的同类型标记行合并为一条（★ 参数
-    常跨行续写）；同一行同时含 ★ 与 ▲ 时（语料实测存在）分别产出两条记录，
-    绝不丢标记。
+    常跨行续写）；同一行同时含 ★ 与 ▲ 的**要求行**分别产出两条记录（两类
+    强制要求各自独立跟踪），绝不丢标记。
+
+    **说明语行例外**（2026-11-04 用户独立复核南京病理实测定案）：命中
+    _USAGE_NOTE_RE 的行只产出**一条** usage_note 记录（mark 取行内首个符号），
+    不进双通道——否则"打★指标为必须满足项…打▲指标为重要指标"这类同句
+    双符号说明语会被 ★/▲ 通道各提一条、逐字符守恒被破坏（幽灵符号 +1★+1▲）。
 
     Returns:
         [{'mark': '★'|'▲', 'text': 条款全文, 'start': int, 'end': int,
           'clause_no': 就近编号头（可空串）,
           'kind': 'requirement'|'usage_note'}, ...] 按 start 升序。
-        usage_note = 标记使用说明语（如"▲功能要求须提供证明材料"模板语、
-        节能品目清单条款），是元说明而非采购要求，消费方应从要求清单排除。
+        usage_note = 标记使用说明语（如"▲功能要求须提供证明材料"、节能品目
+        清单条款、"打★指标为必须满足项"评分说明），是元说明而非采购要求，
+        消费方应从要求清单排除。
     """
     lines = []
     offset = 0
@@ -150,12 +162,26 @@ def extract_marked_clauses(text: str) -> list[dict]:
         offset += len(raw_line) + 1
 
     hits = []
+    # 预扫描：说明语行独立成档（每行仅一条），★/▲ 双通道均跳过这些行
+    note_line_idx: set[int] = set()
+    for idx, (line_start, line_text) in enumerate(lines):
+        if _MARK_RE.search(line_text) and _USAGE_NOTE_RE.search(line_text):
+            note_line_idx.add(idx)
+            hits.append({
+                'mark': _MARK_RE.search(line_text).group(),
+                'text': line_text.strip(),
+                'start': line_start,
+                'end': line_start + len(line_text),
+                'clause_no': _find_clause_header_before(text, line_start),
+                'kind': 'usage_note',
+            })
+
     # 按标记类型各自独立扫描合并：★ 与 ▲ 是两类不同强度的强制条款，严禁混并
     for mark in ('★', '▲'):
         i = 0
         while i < len(lines):
             line_start, line_text = lines[i]
-            if mark not in line_text:
+            if mark not in line_text or i in note_line_idx:
                 i += 1
                 continue
             j = i

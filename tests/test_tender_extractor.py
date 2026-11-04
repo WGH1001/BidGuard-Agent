@@ -91,6 +91,33 @@ def test_marked_clauses_usage_note_tagged():
     assert all(not h['text'].startswith('根据采购需求') for h in reqs)
 
 
+def test_marked_clauses_note_line_dual_symbol_single_record():
+    """南京病理实测（2026-11-04 用户独立复核）：评分说明句同句含 ★▲ 两种符号，
+    双通道各提一条 → 幽灵符号 +1★+1▲ 破坏逐字符守恒。修复后说明语行只出
+    一条 usage_note 记录，text 覆盖整句、符号守恒。"""
+    text = ('产品技术参数全部满足或高于招标要求，打★指标为必须满足项，'
+            '打▲指标为重要指标。')
+    hits = extract_marked_clauses(text)
+    assert len(hits) == 1, hits
+    assert hits[0]['kind'] == 'usage_note'
+    assert hits[0]['text'].count('★') == 1 and hits[0]['text'].count('▲') == 1
+
+
+def test_marked_clauses_usage_note_bazhou_templates():
+    """亳州 #8 第 61 页两条说明语（2026-11-04 用户独立复核实证）：
+    与梁溪/滁州物业同类模板，必须同判 usage_note。注意亳州 PDF 实际排版
+    符号带空格和引号：'标有 “★”的参数为实质性参数'。"""
+    text = ('标有 “★”的参数为实质性参数，必须响应或优于响应，否则，其投标无效。\n'
+            '2、标有 “▲”的为政府强制采购节能产品，须具有相关认证。\n'
+            '★1) 平台须支持国产数据库\n')
+    hits = extract_marked_clauses(text)
+    notes = [h for h in hits if h['kind'] == 'usage_note']
+    reqs = [h for h in hits if h['kind'] == 'requirement']
+    assert len(notes) == 2 and len(reqs) == 1, hits
+    assert {h['mark'] for h in notes} == {'★', '▲'}
+    assert '国产数据库' in reqs[0]['text']  # 说明语不得吞并后续要求行
+
+
 def test_eval_chapter_skips_toc_entry():
     """评标章定位必须跳过目录行（点线引导符+页码），取正文真实章标题。"""
     text = (
