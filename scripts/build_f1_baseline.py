@@ -32,22 +32,23 @@ def main() -> None:
         raise SystemExit('未找到语料文件，请确认 data/corpus/m0_samples/')
 
     summary = ['# F1 确定性候选清单汇总（人工核对用）', '',
-               '| # | 文件 | 来源 | ★要求 | ▲要求 | ★▲说明语 | 模式A | 模式B | 资格命中 | 符合命中 | 评标章 |',
-               '|---|---|---|---|---|---|---|---|---|---|---|']
+               '| # | 文件 | 来源 | ★要求 | ▲要求 | 说明语 | 表格碎片 | 模式A | 模式B | 资格命中 | 符合命中 | 评标章 |',
+               '|---|---|---|---|---|---|---|---|---|---|---|---|']
     for i, f in enumerate(files, 1):
         name = os.path.basename(f)
         print(f'[{i}/{len(files)}] {name}')
         result = build_review_checklist(f)
         notes = sum(1 for c in result['marked_clauses'] if c.get('kind') == 'usage_note')
+        tabs = sum(1 for c in result['marked_clauses'] if c.get('kind') == 'table_marker')
         stars = sum(1 for c in result['marked_clauses']
-                    if c['mark'] == '★' and c.get('kind') != 'usage_note')
+                    if c['mark'] == '★' and c.get('kind') == 'requirement')
         tri = sum(1 for c in result['marked_clauses']
-                  if c['mark'] == '▲' and c.get('kind') != 'usage_note')
+                  if c['mark'] == '▲' and c.get('kind') == 'requirement')
         pa = sum(1 for c in result['invalid_bid_clauses'] if c['pattern'] == 'A')
         pb = sum(1 for c in result['invalid_bid_clauses'] if c['pattern'] == 'B')
         ev = (result['eval_chapter'] or {}).get('title', '-')
         summary.append(
-            f"| {i} | {name} | {result['source_type']} | {stars} | {tri} | {notes} "
+            f"| {i} | {name} | {result['source_type']} | {stars} | {tri} | {notes} | {tabs} "
             f"| {pa} | {pb} | {len(result['qualification_hits'])} "
             f"| {len(result['compliance_hits'])} | {ev} |"
         )
@@ -58,10 +59,11 @@ def main() -> None:
     with open(os.path.join(OUT_DIR, '_summary.md'), 'w', encoding='utf-8', newline='\n') as fh:
         fh.write('\n'.join(summary) + '\n')
         fh.write(
-            '\n> 口径说明：★要求/▲要求 列为"条款记录数"（连续同类型标记行合并为一条，'
-            '已剔除标记使用说明语），与原文标记字符数可能不等；★▲说明语列 = usage_note '
-            '（标记使用元说明，非采购要求，如"▲功能要求须提供证明材料"、节能品目清单条款）；'
-            '模式 A/B 列为无标记措辞型候选数（同条款 A 优先去重）。'
+            '\n> 口径说明：★要求/▲要求 列为 requirement 条款记录数（连续同类型标记行'
+            '合并为一条），与原文标记字符数可能不等；说明语列 = usage_note（标记使用'
+            '元说明，如"标注▲的标的为主要标的"、节能品目清单条款）；表格碎片列 = '
+            'table_marker（附表行标记碎片，如划型表行业名"工业★"）；两者均非投标人'
+            '响应要求。模式 A/B 列为无标记措辞型候选数（同条款 A 优先去重）。'
             '人工核对以 JSON 内逐条 text 为准，编辑定稿后即为 F1 ground truth 基准。\n'
         )
     print(f'\n完成：候选 JSON x{len(files)} + _summary.md → {OUT_DIR}')

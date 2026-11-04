@@ -68,7 +68,27 @@ _USAGE_NOTE_RE = re.compile(
     r'|打[★▲]指标'                      # 评分说明：打★指标为必须满足项 / 打▲指标为重要指标
     r'|标有\s*[“"]?\s*[★▲]\s*[”"]?\s*的'  # 实质性说明：标有"★"的参数为实质性参数（亳州实证含空格+引号）
     r'|[★▲]为(政府)?强制采购'           # 节能说明：▲为政府强制采购节能产品
+    r'|标注\s*[“"]?\s*[▲★]\s*[”"]?'     # 标的说明：标注"▲"的标的为主要标的（芜湖 2026-11-04 终审新增）
+    r'|带\s*[★▲]\s*的项'                # 划型说明：带★的项为行业（芜湖中小企业划型附表）
 )
+
+# 表格行标记碎片（kind=table_marker，2026-11-04 用户终审芜湖实测定案）：
+# 中小企业划型附表的行业名"工业★/仓储业★"——标记在**行尾**，真要求行不存在
+# 该形态。注意"标的表碎片▲中共无"（▲+采购人名称断行）与滁州物业真功能项
+# "▲残值回"（表格单元格断行截短）语法同构、无法自动区分，不设长度规则硬判，
+# 留给 ground truth 人工定稿改判。
+_TABLE_TRAILING_RE = re.compile(r'[★▲]\s*$')
+
+
+def _classify_kind(merged_text: str) -> str:
+    """标记条款三分类：usage_note（标记使用元说明）/ table_marker（附表行
+    尾标记碎片）/ requirement（投标人须响应的实质要求）。"""
+    if _USAGE_NOTE_RE.search(merged_text):
+        return 'usage_note'
+    first_line = merged_text.split('\n', 1)[0].strip()
+    if _TABLE_TRAILING_RE.search(first_line):
+        return 'table_marker'
+    return 'requirement'
 
 # 章节语义关键词（定位 评标办法 / 资格审查 / 符合性审查 / 评分细则）
 _EVAL_CHAPTER_KEYS = ('评标办法', '评标方法', '评标标准', '评分细则')
@@ -150,10 +170,12 @@ def extract_marked_clauses(text: str) -> list[dict]:
     Returns:
         [{'mark': '★'|'▲', 'text': 条款全文, 'start': int, 'end': int,
           'clause_no': 就近编号头（可空串）,
-          'kind': 'requirement'|'usage_note'}, ...] 按 start 升序。
+          'kind': 'requirement'|'usage_note'|'table_marker'}, ...] 按 start 升序。
         usage_note = 标记使用说明语（如"▲功能要求须提供证明材料"、节能品目
-        清单条款、"打★指标为必须满足项"评分说明），是元说明而非采购要求，
-        消费方应从要求清单排除。
+        清单条款、"打★指标为必须满足项"评分说明），是元说明而非采购要求；
+        table_marker = 附表行标记碎片（如中小企业划型表行业名"工业★"、标的表
+        碎片"▲中共无"）；两者消费方均应从要求清单排除，仅 requirement 为
+        投标人须逐条响应的实质要求。
     """
     lines = []
     offset = 0
@@ -207,7 +229,7 @@ def extract_marked_clauses(text: str) -> list[dict]:
                 'start': line_start,
                 'end': merged_end,
                 'clause_no': clause_no,
-                'kind': 'usage_note' if _USAGE_NOTE_RE.search(merged_text) else 'requirement',
+                'kind': _classify_kind(merged_text),
             })
             i = j + 1
     hits.sort(key=lambda h: h['start'])

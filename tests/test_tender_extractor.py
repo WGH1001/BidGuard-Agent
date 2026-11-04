@@ -103,6 +103,35 @@ def test_marked_clauses_note_line_dual_symbol_single_record():
     assert hits[0]['text'].count('★') == 1 and hits[0]['text'].count('▲') == 1
 
 
+def test_marked_clauses_table_marker_fragments():
+    """芜湖实测（2026-11-04 用户终审第 4 类边界）：中小企业划型附表的行业名
+    行尾带★（工业★/仓储业★）→ kind=table_marker（真要求行不存在行尾标记
+    形态）；配套两条说明语变体（标注"▲"的标的为主要标的 / 带★的项为行业）
+    归 usage_note。已知留白：标的表碎片"▲中共无"（▲+采购人名称断行）与
+    滁州物业真功能项"▲残值回"语法同构，不硬判，留人工定稿。"""
+    text = (
+        '7.采购需求中标注“▲”的标的为主要标的（包括核心产品）。\n'
+        '编制招标文件时必须将主要标的标注“▲”。\n'
+        '工业★\n'
+        '\n'
+        '仓储业★\n'
+        '\n'
+        '2.附表中各行业的范围以《国民经济行业分类》为准。带★的项为行业。\n'
+        '▲中共无\n'
+        '★1) 数字化加工成果须符合国家相关标准\n'
+    )
+    hits = extract_marked_clauses(text)
+    reqs = [h for h in hits if h['kind'] == 'requirement']
+    notes = [h for h in hits if h['kind'] == 'usage_note']
+    tables = [h for h in hits if h['kind'] == 'table_marker']
+    assert len(reqs) == 2, hits   # 数字化加工要求 + ▲中共无（语法不可分，留人工）
+    assert len(notes) == 3, notes    # 标的说明×2 + 划型说明×1
+    assert len(tables) == 2, tables  # 工业★ + 仓储业★（行尾标记）
+    # 逐字符守恒：记录 text 覆盖原文全部标记
+    assert sum(h['text'].count('★') for h in hits) == text.count('★')
+    assert sum(h['text'].count('▲') for h in hits) == text.count('▲')
+
+
 def test_marked_clauses_usage_note_bazhou_templates():
     """亳州 #8 第 61 页两条说明语（2026-11-04 用户独立复核实证）：
     与梁溪/滁州物业同类模板，必须同判 usage_note。注意亳州 PDF 实际排版
