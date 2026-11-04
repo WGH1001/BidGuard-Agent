@@ -253,8 +253,18 @@ def parse_document(file_path: str) -> ParsedDoc:
                     text_parts.append(text)
 
             for table in doc.tables:
+                # F1 修正（2026-11-04 滁州托育语料实测）：合并单元格的延续行会
+                # 反复返回同一 tc 元素，且 WPS 生成的文件存在"同一内容写多个
+                # vMerge 起点格"的怪结构——按格元素本体去重（引用入集合保持
+                # 存活，严禁用 id()：对象回收后 id 复用会导致去重不稳定）。
+                # 旧项目原件未含此去重，属本项目针对政采语料的适配修复。
+                seen_tcs = set()
                 for row in table.rows:
                     for cell in row.cells:
+                        tc = cell._tc
+                        if tc in seen_tcs:
+                            continue
+                        seen_tcs.add(tc)
                         text = cell.text.strip()
                         if text:
                             text_parts.append(text)
