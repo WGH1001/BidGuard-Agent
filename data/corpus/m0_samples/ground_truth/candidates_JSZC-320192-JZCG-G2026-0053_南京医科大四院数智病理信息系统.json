@@ -92,7 +92,8 @@
    "start": 4481,
    "end": 4557,
    "clause_no": "21.1",
-   "kind": "requirement"
+   "kind": "usage_note",
+   "review_note": "2026-11-04 LLM 分歧人工核定改判：标记使用说明/章节标题，非响应要求（Gemini 裁决：两者都做——正则已扩，GT 同步）"
   },
   {
    "mark": "★",
@@ -276,7 +277,8 @@
    "start": 33621,
    "end": 33629,
    "clause_no": "（29）",
-   "kind": "requirement"
+   "kind": "usage_note",
+   "review_note": "2026-11-04 LLM 分歧人工核定改判：标记使用说明/章节标题，非响应要求（Gemini 裁决：两者都做——正则已扩，GT 同步）"
   },
   {
    "mark": "★",
@@ -284,7 +286,8 @@
    "start": 39055,
    "end": 39101,
    "clause_no": "六、",
-   "kind": "requirement"
+   "kind": "usage_note",
+   "review_note": "2026-11-04 LLM 分歧人工核定改判：标记使用说明/章节标题，非响应要求（Gemini 裁决：两者都做——正则已扩，GT 同步）"
   },
   {
    "mark": "★",
@@ -292,7 +295,8 @@
    "start": 39295,
    "end": 39341,
    "clause_no": "七、",
-   "kind": "requirement"
+   "kind": "usage_note",
+   "review_note": "2026-11-04 LLM 分歧人工核定改判：标记使用说明/章节标题，非响应要求（Gemini 裁决：两者都做——正则已扩，GT 同步）"
   },
   {
    "mark": "★",

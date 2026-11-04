@@ -21,7 +21,12 @@ from typing import Optional
 
 from core.llm_gateway import get_llm_client
 from core.quote_verifier import verify_quote
-from core.tender_extractor import build_review_checklist
+from core.tender_extractor import (
+    build_review_checklist,
+    extract_scoring_tables,
+    locate_keyword_sections,
+    locate_chapters,
+)
 
 # 扩窗半径：向前吸附条款编号头，向后吸附断行续写（PDF 表格单元格断行实测
 # 截短片段仅 3-4 字，其完整条款续行集中在 start 后数百字符内）
@@ -41,12 +46,17 @@ _STRUCTURE_PROMPT = """你是招标文件审查专家。下面是从招标文件
 要求：
 1. is_requirement：该候选是否为投标人须逐条响应的实质要求。标记使用说明语
    （如"标注▲的标的为主要标的"）、附表行标记碎片（如行尾★的行业名）均为 false；
+   ⚠️ 注意：候选文本可能被 PDF 表格断行截短（如候选"▲资金使"实为窗口中
+   "▲资金使用监测——对资金使用的情况进行监测…"功能项的首段），判定前必须
+   先在窗口中向后查找其完整条款行，基于完整内容判定，不要因候选短而误判为碎片；
 2. clause_type：star_param（★强制参数）/ triangle_param（▲重要参数）/
    qualification（资格审查项）/ compliance（符合性审查项）/ scoring（评分项）/ other；
-3. clause_no：条款编号（如 "★1)" "（十四）" "2.1"，窗口中有则逐字抄录，无则空串）；
-4. full_text：该条款在窗口中的**完整原文**——逐字摘录，含标记符号，从条款开头
+3. consequence：违反/满足该条款的评分后果——veto（不满足即投标无效/否决）/
+   deduction（不满足扣分）/ bonus（满足加分）/ none（无评分后果）；
+4. clause_no：条款编号（如 "★1)" "（十四）" "2.1"，窗口中有则逐字抄录，无则空串）；
+5. full_text：该条款在窗口中的**完整原文**——逐字摘录，含标记符号，从条款开头
    到条款结束（窗口截断则以窗口末尾为界），严禁改写、缩写、翻译或补写；
-5. reason：30 字以内判定理由。
+6. reason：30 字以内判定理由。
 
 只输出 JSON，不要任何其他文字。"""
 
@@ -153,3 +163,145 @@ def extract_tender_with_llm(file_path: str, client=None, env: Optional[str] = No
         'usage': usage,
     }
     return result
+
+
+# ── 评分细则结构化（F1 第四张清单，段落式语料的 LLM 兜底通道）──────────────
+_SCORE_WINDOW = 1500          # 评分关键词锚点开窗半径
+_SCORE_REGION_MIN = 1000      # 评标章健康阈值：小于此值视为假章节头，改用锚点开窗
+_SCORE_CHUNK = 4000           # 章节区切块大小
+_SCORE_MAX_WINDOWS = 8        # 单文件窗口上限（防超长语料爆调用）
+
+_SCORING_PROMPT = """你是招标文件评标专家。下面是招标文件【评标办法/评分标准】区段的
+一个原文窗口。请把窗口中所有评分项提取为 JSON 数组，每项一个对象：
+
+【原文窗口】
+{window}
+
+每项字段：
+1. factor：评分因素名称（如"价格分""技术方案"）；
+2. detail：该评分项的评分标准**原文**——逐字摘录自窗口（可跨句），严禁改写缩写；
+3. score：分值或分值范围的原文（如 "20"、"0-5"、"2分"，无则空串）；
+4. score_max：该评分项的最高分值数字（阿拉伯数字，如 20、5；无法确定用 null）；
+5. evidence_material：投标时须提供的证明材料原文（窗口中有则摘录，无则空串）；
+6. consequence：veto / deduction / bonus / none。
+
+注意：窗口可能不含完整评分表（如表格式评分表不在此窗口），此时输出 []。
+只输出 JSON 数组，不要任何其他文字。"""
+
+
+def _merge_spans(spans: list, gap: int = 800) -> list:
+    """区间并集：间距小于 gap 的相邻跨度合并（同一评分表只落进一个窗，
+    从源头消灭跨窗重复提取）。"""
+    if not spans:
+        return []
+    spans = sorted(spans)
+    merged = [list(spans[0])]
+    for lo, hi in spans[1:]:
+        if lo <= merged[-1][1] + gap:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    return [tuple(s) for s in merged]
+
+
+def _scoring_windows(text: str, eval_chapter: Optional[dict],
+                     scoring_hits: list) -> list[str]:
+    """评分区段开窗：章节区健康用章节；失效用关键词锚点 ±开窗半径。
+    所有跨度先并集合并再切块（≤6000 字/窗），杜绝跨窗重复提取。"""
+    spans = []
+    if eval_chapter:
+        start = eval_chapter['start']
+        nxt = re.search(r'\n第[一二三四五六七八九十百零两]+章', text[start + 10:])
+        end = start + 10 + nxt.start() if nxt else len(text)
+        if end - start >= _SCORE_REGION_MIN:
+            spans.append((start, end))
+    if not spans:
+        # 锚点词除评分细则/标准/办法外，加"综合评分法"等评分区段特征词
+        # （语料实证：徐州/芜湖/滁州物业的评标章定位被假章节头截断）
+        for h in locate_keyword_sections(text, (
+                '评分细则', '评分标准', '评分办法', '综合评分法')):
+            spans.append((max(0, h['start'] - _SCORE_WINDOW),
+                          min(len(text), h['start'] + _SCORE_WINDOW)))
+    windows = []
+    for lo, hi in _merge_spans(spans)[:_SCORE_MAX_WINDOWS]:
+        for a in range(lo, hi, _SCORE_CHUNK):
+            windows.append(text[a:min(a + _SCORE_CHUNK, hi)])
+    return windows
+
+
+def _parse_llm_array(content: str) -> list:
+    """宽松解析 LLM 输出中的 JSON 数组。"""
+    if not content:
+        return []
+    m = re.search(r'\[.*\]', content, re.DOTALL)
+    if not m:
+        return []
+    try:
+        arr = json.loads(m.group())
+        return arr if isinstance(arr, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
+def extract_scoring_with_llm(file_path: str, client=None, env: Optional[str] = None) -> dict:
+    """F1 第四张清单：评分细则结构化（表格型 0 Token + 段落型 LLM 兜底）。
+
+    Returns:
+        {'scoring_tables': 表格型解析结果（0 Token，docx 专享）,
+         'scoring_prose': LLM 段落式评分项（含 quote_verified 逐项标记）,
+         'scoring_llm_usage': {'calls': int, 'usage': dict}}
+    """
+    from core.parser import parse_document
+    from core.tender_extractor import locate_chapters as _lc
+
+    tables = extract_scoring_tables(file_path)
+    text = parse_document(file_path).text
+    chapters = _lc(text)
+    eval_real = [c for c in chapters
+                 if '评' in c['title'] and '…' not in c['title']
+                 and not re.search(r'[.·\t]*\d+\s*$', c['title'])]
+    eval_chapter = eval_real[-1] if eval_real else None
+    hits = locate_keyword_sections(text, ('评分细则', '评分标准', '评分办法'))
+    windows = _scoring_windows(text, eval_chapter, hits)
+
+    prose = []
+    calls = 0
+    if windows:
+        if client is None:
+            client = get_llm_client(env)
+        for win in windows:
+            resp = client.chat(
+                [{'role': 'user', 'content': _SCORING_PROMPT.format(window=win)}],
+                model_tier='flash',
+            )
+            calls += 1
+            for item in _parse_llm_array(getattr(resp, 'content', '') or ''):
+                if not isinstance(item, dict):
+                    continue
+                detail = str(item.get('detail', '')).strip()
+                verified = bool(detail) and verify_quote(detail, win)
+                item['quote_verified'] = verified
+                if not verified:
+                    item['detail_raw'] = detail
+                    item['detail'] = ''            # 溯源不过不采信，清空待人工
+                prose.append(item)
+
+        # 评分项跨窗去重：多个锚点窗可能覆盖同一张评分表（滁州物业实测同一
+        # 明细被相邻窗重复提取，295 分虚高），按 detail 归一化前缀去重
+        deduped = []
+        seen_keys = set()
+        for item in prose:
+            key = re.sub(r'\s', '', str(item.get('detail', '')))[:30] \
+                or str(item.get('factor', ''))[:20]
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(item)
+        prose = deduped
+
+    usage = client.total_usage() if hasattr(client, 'total_usage') and calls else {}
+    return {
+        'scoring_tables': tables,
+        'scoring_prose': prose,
+        'scoring_llm_usage': {'calls': calls, 'usage': usage},
+    }

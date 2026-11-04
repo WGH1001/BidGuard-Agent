@@ -1,0 +1,1123 @@
+{
+ "file": "JSZC-320700-JZCG-G2026-0143_连云港数智公积金信息系统.docx",
+ "gt_requirements": 55,
+ "llm_calls": 61,
+ "wording_candidates": 6,
+ "recall": 1.0,
+ "quote_verified_rate": 0.9672,
+ "is_requirement_disagreements": [],
+ "structured": [
+  {
+   "mark": "▲",
+   "text": "▲6、支持卷的IOPS、带宽的上限设置，可设置卷的总IOPS和带宽，也可以设置每单位容量的IOPS与带宽；用户可指定Qos策略的运行周期为单次、每天、每周或始终执行。",
+   "start": 42486,
+   "end": 42569,
+   "clause_no": "三、",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "6",
+    "full_text": "▲6、支持卷的IOPS、带宽的上限设置，可设置卷的总IOPS和带宽，也可以设置每单位容量的IOPS与带宽；用户可指定Qos策略的运行周期为单次、每天、每周或始终执行。",
+    "reason": "▲重要参数，功能要求条款，需逐条响应，不满足扣分。"
+   },
+   "quote_verified": true,
+   "full_text": "▲6、支持卷的IOPS、带宽的上限设置，可设置卷的总IOPS和带宽，也可以设置每单位容量的IOPS与带宽；用户可指定Qos策略的运行周期为单次、每天、每周或始终执行。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲11、单节点故障情况下，IO归零时长小于10秒；当节点故障时，自动调整EC配比。",
+   "start": 42778,
+   "end": 42819,
+   "clause_no": "三、",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "▲11、",
+    "full_text": "▲11、单节点故障情况下，IO归零时长小于10秒；当节点故障时，自动调整EC配比。",
+    "reason": "▲重要参数，技术要求完整，不满足将扣分"
+   },
+   "quote_verified": true,
+   "full_text": "▲11、单节点故障情况下，IO归零时长小于10秒；当节点故障时，自动调整EC配比。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲13、支持慢盘检测，并在磁盘损坏前进行隔离并告警； 支持SSD盘磨损寿命检测，提前告警及隔离处理。",
+   "start": 42857,
+   "end": 42907,
+   "clause_no": "三、",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "▲13",
+    "full_text": "▲13、支持慢盘检测，并在磁盘损坏前进行隔离并告警； 支持SSD盘磨损寿命检测，提前告警及隔离处理。",
+    "reason": "▲标记的重要技术参数，属投标人须响应的完整功能条款。"
+   },
+   "quote_verified": true,
+   "full_text": "▲13、支持慢盘检测，并在磁盘损坏前进行隔离并告警； 支持SSD盘磨损寿命检测，提前告警及隔离处理。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲7、支持克隆重建，当原卷数据变化时，通过重建方式实现克隆卷刷新，以保障数据一致性。\n▲8、支持卷的快照和回滚，单个卷支持的最大快照数量不少于2048个。",
+   "start": 43506,
+   "end": 43583,
+   "clause_no": "3.2",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "▲7、",
+    "full_text": "▲7、支持克隆重建，当原卷数据变化时，通过重建方式实现克隆卷刷新，以保障数据一致性。",
+    "reason": "完整技术功能要求，标记▲为重要参数。"
+   },
+   "quote_verified": true,
+   "full_text": "▲7、支持克隆重建，当原卷数据变化时，通过重建方式实现克隆卷刷新，以保障数据一致性。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲10、支持对产品进行与操作系统无关的远程开机、关机、重新启动等操作。对产品的远程操作，具备必要的用户身份授权和验证以及操作事件记录功能。",
+   "start": 43648,
+   "end": 43717,
+   "clause_no": "3.2",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "▲10、",
+    "full_text": "▲10、支持对产品进行与操作系统无关的远程开机、关机、重新启动等操作。对产品的远程操作，具备必要的用户身份授权和验证以及操作事件记录功能。",
+    "reason": "▲标注的重要技术参数，属逐条响应的实质要求"
+   },
+   "quote_verified": true,
+   "full_text": "▲10、支持对产品进行与操作系统无关的远程开机、关机、重新启动等操作。对产品的远程操作，具备必要的用户身份授权和验证以及操作事件记录功能。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲2、配置快照功能，存储系统支持SAN级联快照，支持对快照创建快照，支持通过快照和级联快照进行数据恢复，快照和级联快照均可以读写。",
+   "start": 58220,
+   "end": 58285,
+   "clause_no": "13.3",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "2、",
+    "full_text": "▲2、配置快照功能，存储系统支持SAN级联快照，支持对快照创建快照，支持通过快照和级联快照进行数据恢复，快照和级联快照均可以读写。",
+    "reason": "标注▲的重要参数，为主要标的实质技术要求"
+   },
+   "quote_verified": true,
+   "full_text": "▲2、配置快照功能，存储系统支持SAN级联快照，支持对快照创建快照，支持通过快照和级联快照进行数据恢复，快照和级联快照均可以读写。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲4、存储系统支持LUN回收站功能，开启回收站功能后，可将删除的LUN移至回收站，并支持还原功能。",
+   "start": 58360,
+   "end": 58409,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "▲4、",
+    "full_text": "▲4、存储系统支持LUN回收站功能，开启回收站功能后，可将删除的LUN移至回收站，并支持还原功能。",
+    "reason": "▲标记重要参数，为投标人须响应的存储功能要求"
+   },
+   "quote_verified": true,
+   "full_text": "▲4、存储系统支持LUN回收站功能，开启回收站功能后，可将删除的LUN移至回收站，并支持还原功能。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲7、存储系统支持SAN和NAS场景的多租户功能，租户资源隔离，客户端通过租户数据逻辑端口只能访问该租户内的共享，并且支持租户自管理。",
+   "start": 58619,
+   "end": 58686,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "7",
+    "full_text": "▲7、存储系统支持SAN和NAS场景的多租户功能，租户资源隔离，客户端通过租户数据逻辑端口只能访问该租户内的共享，并且支持租户自管理。",
+    "reason": "完整条款，▲重要技术参数，需响应"
+   },
+   "quote_verified": true,
+   "full_text": "▲7、存储系统支持SAN和NAS场景的多租户功能，租户资源隔离，客户端通过租户数据逻辑端口只能访问该租户内的共享，并且支持租户自管理。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲10、存储支持LUN和主机为粒度的服务质量控制功能，支持设置IOPS和带宽上限，支持Burst突发流控制。",
+   "start": 58787,
+   "end": 58841,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "10、",
+    "full_text": "▲10、存储支持LUN和主机为粒度的服务质量控制功能，支持设置IOPS和带宽上限，支持Burst突发流控制。",
+    "reason": "▲标记的重要技术参数条款，属实质性响应要求。"
+   },
+   "quote_verified": true,
+   "full_text": "▲10、存储支持LUN和主机为粒度的服务质量控制功能，支持设置IOPS和带宽上限，支持Burst突发流控制。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲3、独立主控引擎≥2，独立业务板槽位≥4个，交换网板槽位数≥8。\n▲4、采用自主可控CPU芯片。\n▲5、要求设备支持模块化风扇框，可热插拔，独立风扇框数≥3。",
+   "start": 62623,
+   "end": 62703,
+   "clause_no": "3.3",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "veto",
+    "clause_no": "▲3、▲4、▲5",
+    "full_text": "▲3、独立主控引擎≥2，独立业务板槽位≥4个，交换网板槽位数≥8。\n▲4、采用自主可控CPU芯片。\n▲5、要求设备支持模块化风扇框，可热插拔，独立风扇框数≥3。",
+    "reason": "核心交换机参数要求，带▲重要参数，投标人须响应。"
+   },
+   "quote_verified": true,
+   "full_text": "▲3、独立主控引擎≥2，独立业务板槽位≥4个，交换网板槽位数≥8。\n▲4、采用自主可控CPU芯片。\n▲5、要求设备支持模块化风扇框，可热插拔，独立风扇框数≥3。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲7、本地库数量庞大，支持基于主流文件协议、邮件协议（SMTP/POP3/iMAP)、共享协议（NFS/SMB）等协议的防病毒功能；",
+   "start": 67338,
+   "end": 67404,
+   "clause_no": "2.0",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "7",
+    "full_text": "▲7、本地库数量庞大，支持基于主流文件协议、邮件协议（SMTP/POP3/iMAP)、共享协议（NFS/SMB）等协议的防病毒功能；",
+    "reason": "▲标记的重要技术参数，须响应，不满足扣分"
+   },
+   "quote_verified": true,
+   "full_text": "▲7、本地库数量庞大，支持基于主流文件协议、邮件协议（SMTP/POP3/iMAP)、共享协议（NFS/SMB）等协议的防病毒功能；"
+  },
+  {
+   "mark": "▲",
+   "text": "▲4、设备采用正交无中板CLOS架构，支持主控、交换网板、业务板独立；",
+   "start": 68320,
+   "end": 68355,
+   "clause_no": "1.36",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "▲4、",
+    "full_text": "▲4、设备采用正交无中板CLOS架构，支持主控、交换网板、业务板独立；",
+    "reason": "▲标记的重要技术参数，属逐条响应要求"
+   },
+   "quote_verified": true,
+   "full_text": "▲4、设备采用正交无中板CLOS架构，支持主控、交换网板、业务板独立；"
+  },
+  {
+   "mark": "▲",
+   "text": "▲6、支持组播over VXLAN，支持基于VXLAN Mapping的DCI功能，支持IPv4/IPv6服务链（Service chain）功能，支持VXLAN OAM ping/tracert；",
+   "start": 68384,
+   "end": 68483,
+   "clause_no": "1.36",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "6",
+    "full_text": "▲6、支持组播over VXLAN，支持基于VXLAN Mapping的DCI功能，支持IPv4/IPv6服务链（Service chain）功能，支持VXLAN OAM ping/tracert；",
+    "reason": "▲重要功能参数，属逐条响应的技术要求"
+   },
+   "quote_verified": true,
+   "full_text": "▲6、支持组播over VXLAN，支持基于VXLAN Mapping的DCI功能，支持IPv4/IPv6服务链（Service chain）功能，支持VXLAN OAM ping/tracert；"
+  },
+  {
+   "mark": "▲",
+   "text": "▲8、支持设备虚拟化技术，支持创建≥16个虚拟交换机，具备虚拟交换机的灵活配置与管理功能，包括但不限于：创建、删除、单板划入、划出等特性；\n▲9、支持TAP功能、 TAP 同源同宿功能、报文截断功能和源端口标识功能。支持 TAP 基于端口的 M:N 模型功能，M 口规格和N口规格≥500；",
+   "start": 68579,
+   "end": 68724,
+   "clause_no": "1.36",
+   "kind": "requirement",
+   "structured": null,
+   "quote_verified": false,
+   "full_text": "▲8、支持设备虚拟化技术，支持创建≥16个虚拟交换机，具备虚拟交换机的灵活配置与管理功能，包括但不限于：创建、删除、单板划入、划出等特性；\n▲9、支持TAP功能、 TAP 同源同宿功能、报文截断功能和源端口标识功能。支持 TAP 基于端口的 M:N 模型功能，M 口规格和N口规格≥500；"
+  },
+  {
+   "mark": "▲",
+   "text": "▲9.网闸设备API管理接口支持访问密钥数字签名验证功能。",
+   "start": 70288,
+   "end": 70317,
+   "clause_no": "9.5",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "9.",
+    "full_text": "▲9.网闸设备API管理接口支持访问密钥数字签名验证功能。",
+    "reason": "▲标记的重要技术参数，投标人须响应。"
+   },
+   "quote_verified": true,
+   "full_text": "▲9.网闸设备API管理接口支持访问密钥数字签名验证功能。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲10.网闸设备支持反向远程管理功能，系统本地管理服务主动注册到远程管理服务器，将本地管理服务端口与远程管理服务端口绑定，实现远程管理服务器通过本地管理服务对系统进行反向远程管理。",
+   "start": 70340,
+   "end": 70430,
+   "clause_no": "9.5",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "▲10.",
+    "full_text": "▲10.网闸设备支持反向远程管理功能，系统本地管理服务主动注册到远程管理服务器，将本地管理服务端口与远程管理服务端口绑定，实现远程管理服务器通过本地管理服务对系统进行反向远程管理。（投标文件中提供功能截图，加盖投标人公章）",
+    "reason": "▲重要功能参数，需提供截图证明，属重要响应条款。"
+   },
+   "quote_verified": true,
+   "full_text": "▲10.网闸设备支持反向远程管理功能，系统本地管理服务主动注册到远程管理服务器，将本地管理服务端口与远程管理服务端口绑定，实现远程管理服务器通过本地管理服务对系统进行反向远程管理。（投标文件中提供功能截图，加盖投标人公章）"
+  },
+  {
+   "mark": "▲",
+   "text": "▲11.支持勒索病毒防护功能，通过对业务进行勒索风险自动化评估，并依据评估结果自动生成防护策略。",
+   "start": 71317,
+   "end": 71365,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "▲11.",
+    "full_text": "▲11.支持勒索病毒防护功能，通过对业务进行勒索风险自动化评估，并依据评估结果自动生成防护策略。",
+    "reason": "▲标记的功能要求条款，投标人须响应，属重要参数。"
+   },
+   "quote_verified": true,
+   "full_text": "▲11.支持勒索病毒防护功能，通过对业务进行勒索风险自动化评估，并依据评估结果自动生成防护策略。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲12. 支持服务器漏洞防扫描功能，并对扫描源IP进行日志记录和联动封锁。",
+   "start": 72203,
+   "end": 72240,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "12.",
+    "full_text": "▲12. 支持服务器漏洞防扫描功能，并对扫描源IP进行日志记录和联动封锁。",
+    "reason": "▲标记的重要功能参数，属投标人须响应的实质要求"
+   },
+   "quote_verified": true,
+   "full_text": "▲12. 支持服务器漏洞防扫描功能，并对扫描源IP进行日志记录和联动封锁。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲9. 堡垒机提供对WEB应用的自动改密功能，并提供相应的脚本生成或配置工具。",
+   "start": 72770,
+   "end": 72809,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "veto",
+    "clause_no": "▲9.",
+    "full_text": "▲9. 堡垒机提供对WEB应用的自动改密功能，并提供相应的脚本生成或配置工具。\n（投标文件中提供功能截图，加盖投标人公章）",
+    "reason": "▲标记的重要参数，需提供截图盖章，须逐条响应。"
+   },
+   "quote_verified": true,
+   "full_text": "▲9. 堡垒机提供对WEB应用的自动改密功能，并提供相应的脚本生成或配置工具。\n（投标文件中提供功能截图，加盖投标人公章）"
+  },
+  {
+   "mark": "▲",
+   "text": "▲10.堡垒机具备自动化编排能力功能，通过编排动作流方式对目标资产进行定时或周期性自动化运维，动作流可包括上传文件、执行命令、下载文件等，按设定顺序执行以快速完成升级、巡检等常见运维工作。",
+   "start": 72832,
+   "end": 72926,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "10.",
+    "full_text": "▲10.堡垒机具备自动化编排能力功能，通过编排动作流方式对目标资产进行定时或周期性自动化运维，动作流可包括上传文件、执行命令、下载文件等，按设定顺序执行以快速完成升级、巡检等常见运维工作。（投标文件中提供功能截图，加盖投标人公章）",
+    "reason": "▲标注重要参数，须提供功能截图并盖章响应"
+   },
+   "quote_verified": true,
+   "full_text": "▲10.堡垒机具备自动化编排能力功能，通过编排动作流方式对目标资产进行定时或周期性自动化运维，动作流可包括上传文件、执行命令、下载文件等，按设定顺序执行以快速完成升级、巡检等常见运维工作。（投标文件中提供功能截图，加盖投标人公章）"
+  },
+  {
+   "mark": "▲",
+   "text": "▲11.支持对不同IP地址的采集对象日志数据生成以及采集验证，避免审计数据缺失。",
+   "start": 73870,
+   "end": 73910,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "11.",
+    "full_text": "▲11.支持对不同IP地址的采集对象日志数据生成以及采集验证，避免审计数据缺失。",
+    "reason": "▲标记的功能要求条款，需提供截图证明响应。"
+   },
+   "quote_verified": true,
+   "full_text": "▲11.支持对不同IP地址的采集对象日志数据生成以及采集验证，避免审计数据缺失。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲9. 系统支持通过手工自定义SQL语句和SQL风险等级，形成可统一管理的高危SQL列表功能，提供从原始审计日志中一键提取高危SQL的功能；一条高危SQL语句可关联同个类型下的多个数据源；支持一键启动、停用高危SQL语句防护。",
+   "start": 74805,
+   "end": 74918,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "▲9.",
+    "full_text": "▲9. 系统支持通过手工自定义SQL语句和SQL风险等级，形成可统一管理的高危SQL列表功能，提供从原始审计日志中一键提取高危SQL的功能；一条高危SQL语句可关联同个类型下的多个数据源；支持一键启动、停用高危SQL语句防护。",
+    "reason": "▲标记的重要功能参数，属主要标的实质要求"
+   },
+   "quote_verified": true,
+   "full_text": "▲9. 系统支持通过手工自定义SQL语句和SQL风险等级，形成可统一管理的高危SQL列表功能，提供从原始审计日志中一键提取高危SQL的功能；一条高危SQL语句可关联同个类型下的多个数据源；支持一键启动、停用高危SQL语句防护。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲10.支持多维度身份识别与鉴别，可结合终端IP、MAC地址、应用名称、数字证书及各类账号等因素组合构建身份鉴别策略，定义唯一的资产访问身份功能。",
+   "start": 74988,
+   "end": 75061,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "▲10.",
+    "full_text": "▲10.支持多维度身份识别与鉴别，可结合终端IP、MAC地址、应用名称、数字证书及各类账号等因素组合构建身份鉴别策略，定义唯一的资产访问身份功能。",
+    "reason": "▲标记的重要功能参数，须提供证明材料逐条响应，不满足扣分。"
+   },
+   "quote_verified": true,
+   "full_text": "▲10.支持多维度身份识别与鉴别，可结合终端IP、MAC地址、应用名称、数字证书及各类账号等因素组合构建身份鉴别策略，定义唯一的资产访问身份功能。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲11.支持数据库漏洞攻击预警，需要满足系统内置数据库漏洞风险检测规则功能，内置漏洞检测规则库，规则覆盖主流数据库漏洞，并支持定期一键下发。",
+   "start": 75131,
+   "end": 75201,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "11.",
+    "full_text": "▲11.支持数据库漏洞攻击预警，需要满足系统内置数据库漏洞风险检测规则功能，内置漏洞检测规则库，规则覆盖主流数据库漏洞，并支持定期一键下发。",
+    "reason": "▲标记的重要功能参数，需提供证明材料逐条响应"
+   },
+   "quote_verified": true,
+   "full_text": "▲11.支持数据库漏洞攻击预警，需要满足系统内置数据库漏洞风险检测规则功能，内置漏洞检测规则库，规则覆盖主流数据库漏洞，并支持定期一键下发。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲8. 支持对勒索主题告警的的统一展示和管理，包括勒索常用端口、勒索常用漏洞、RDP爆破、感染勒索病毒、黑客勒索攻击、勒索C&C通信等维度，并支持通过列表的形式展示勒索事件，包括最近发生时间、威胁描述、威胁定性、受害者IP等信息。",
+   "start": 76074,
+   "end": 76189,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "▲8.",
+    "full_text": "▲8. 支持对勒索主题告警的的统一展示和管理，包括勒索常用端口、勒索常用漏洞、RDP爆破、感染勒索病毒、黑客勒索攻击、勒索C&C通信等维度，并支持通过列表的形式展示勒索事件，包括最近发生时间、威胁描述、威胁定性、受害者IP等信息。（投标文件中提供产品功能截图证明并加盖投标人公章。）",
+    "reason": "▲重要功能参数，需提供截图证明，投标人须响应。"
+   },
+   "quote_verified": true,
+   "full_text": "▲8. 支持对勒索主题告警的的统一展示和管理，包括勒索常用端口、勒索常用漏洞、RDP爆破、感染勒索病毒、黑客勒索攻击、勒索C&C通信等维度，并支持通过列表的形式展示勒索事件，包括最近发生时间、威胁描述、威胁定性、受害者IP等信息。（投标文件中提供产品功能截图证明并加盖投标人公章。）"
+  },
+  {
+   "mark": "▲",
+   "text": "▲9. 支持跨三层取MAC地址，识别资产MAC地址，并能够解决不同资产IP冲突问题，以及DHCP场景IP变更的问题。",
+   "start": 76217,
+   "end": 76275,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "▲9.",
+    "full_text": "▲9. 支持跨三层取MAC地址，识别资产MAC地址，并能够解决不同资产IP冲突问题，以及DHCP场景IP变更的问题。",
+    "reason": "▲重要功能参数，须截图证明并逐条响应，不满足扣分"
+   },
+   "quote_verified": true,
+   "full_text": "▲9. 支持跨三层取MAC地址，识别资产MAC地址，并能够解决不同资产IP冲突问题，以及DHCP场景IP变更的问题。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲10.支持各类Web攻击检测项自定义启用及高检出、低误报模式功能。",
+   "start": 77158,
+   "end": 77192,
+   "clause_no": "1.2",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "10.",
+    "full_text": "▲10.支持各类Web攻击检测项自定义启用及高检出、低误报模式功能。",
+    "reason": "▲标记重要参数，属投标人须响应的功能要求"
+   },
+   "quote_verified": true,
+   "full_text": "▲10.支持各类Web攻击检测项自定义启用及高检出、低误报模式功能。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲12. 支持数据静态脱敏系统直接读取文件脱敏功能，包括RDF、txt、csv、excel、xml、json文件、oracle dump（exp/expdp）、mysql dump（sql文件）等。",
+   "start": 78334,
+   "end": 78433,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "12.",
+    "full_text": "▲12. 支持数据静态脱敏系统直接读取文件脱敏功能，包括RDF、txt、csv、excel、xml、json文件、oracle dump（exp/expdp）、mysql dump（sql文件）等。",
+    "reason": "▲标记的重要功能参数，需附证明材料逐条响应。"
+   },
+   "quote_verified": true,
+   "full_text": "▲12. 支持数据静态脱敏系统直接读取文件脱敏功能，包括RDF、txt、csv、excel、xml、json文件、oracle dump（exp/expdp）、mysql dump（sql文件）等。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲13. 支持针对用户行为维度、敏感发现作业维度的统计报表功能，支持自定义时间段进行报表查询和报表导出；用户行为统计报表包含用户登录总次数、用户登录总时长、脱敏源相关操作、作业调度次数、手动创建脱敏源数量等；敏感发现作业维度包括敏感发现耗时、发现表格数量和敏感表格数量等；同时支持对敏感字段进行统计，支持查询展示与导出。",
+   "start": 78483,
+   "end": 78643,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "▲13.",
+    "full_text": "▲13. 支持针对用户行为维度、敏感发现作业维度的统计报表功能，支持自定义时间段进行报表查询和报表导出；用户行为统计报表包含用户登录总次数、用户登录总时长、脱敏源相关操作、作业调度次数、手动创建脱敏源数量等；敏感发现作业维度包括敏感发现耗时、发现表格数量和敏感表格数量等；同时支持对敏感字段进行统计，支持查询展示与导出。",
+    "reason": "▲标记的重要功能参数，为主要标的需逐条响应"
+   },
+   "quote_verified": true,
+   "full_text": "▲13. 支持针对用户行为维度、敏感发现作业维度的统计报表功能，支持自定义时间段进行报表查询和报表导出；用户行为统计报表包含用户登录总次数、用户登录总时长、脱敏源相关操作、作业调度次数、手动创建脱敏源数量等；敏感发现作业维度包括敏感发现耗时、发现表格数量和敏感表格数量等；同时支持对敏感字段进行统计，支持查询展示与导出。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲11.支持策略生命周期管理功能，包括策略修改的时间、原因、以及变更类型等维度。",
+   "start": 79455,
+   "end": 79495,
+   "clause_no": "一、",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "▲11.",
+    "full_text": "▲11.支持策略生命周期管理功能，包括策略修改的时间、原因、以及变更类型等维度。",
+    "reason": "▲标记的功能要求条款，投标人须逐条响应。"
+   },
+   "quote_verified": true,
+   "full_text": "▲11.支持策略生命周期管理功能，包括策略修改的时间、原因、以及变更类型等维度。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲11.支持基于客户端证书issuer、subject等信息的拒绝连接功能；并支持低于指定密钥长度的低强度终端的重定向功能，可将低强度终端访问请求重定向到自定义网络资源地址。",
+   "start": 80343,
+   "end": 80430,
+   "clause_no": "2.5",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "veto",
+    "clause_no": "11.",
+    "full_text": "▲11.支持基于客户端证书issuer、subject等信息的拒绝连接功能；并支持低于指定密钥长度的低强度终端的重定向功能，可将低强度终端访问请求重定向到自定义网络资源地址。",
+    "reason": "▲标注的重要功能参数，属实质性技术要求，需响应并附证明材料"
+   },
+   "quote_verified": true,
+   "full_text": "▲11.支持基于客户端证书issuer、subject等信息的拒绝连接功能；并支持低于指定密钥长度的低强度终端的重定向功能，可将低强度终端访问请求重定向到自定义网络资源地址。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲11.为保证公积金内部人员接入安全性，公积金外协人员接入管理可控性：应支持配制 PC 端和移动端通过安全码激活客户端为授权客户端，安全码支持共享码和一人一码两种模式，支持短信分发安全码；一人一码模式下，当实际登录用户跟分发 SPA 安全码绑定的用户不一致时，可以产生安全告警。",
+   "start": 81415,
+   "end": 81554,
+   "clause_no": "1.3",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "veto",
+    "clause_no": "▲11.",
+    "full_text": "▲11.为保证公积金内部人员接入安全性，公积金外协人员接入管理可控性：应支持配制 PC 端和移动端通过安全码激活客户端为授权客户端，安全码支持共享码和一人一码两种模式，支持短信分发安全码；一人一码模式下，当实际登录用户跟分发 SPA 安全码绑定的用户不一致时，可以产生安全告警。\n（投标文件中提供功能截图或产品检测报告，并加盖投标人公章）",
+    "reason": "▲重要参数，须提供截图或检测报告响应"
+   },
+   "quote_verified": true,
+   "full_text": "▲11.为保证公积金内部人员接入安全性，公积金外协人员接入管理可控性：应支持配制 PC 端和移动端通过安全码激活客户端为授权客户端，安全码支持共享码和一人一码两种模式，支持短信分发安全码；一人一码模式下，当实际登录用户跟分发 SPA 安全码绑定的用户不一致时，可以产生安全告警。\n（投标文件中提供功能截图或产品检测报告，并加盖投标人公章）"
+  },
+  {
+   "mark": "▲",
+   "text": "▲12.支持数据库字段级细粒度切面加密功能。支持linux等服务器操作系统下文件透明加密能力功能，加密数据自带完整性保护，支持基于用户和应用的白名单访问控制，授权用户和应用同时验证通过即可查看数据明文，实现加密文件细粒度权限管控功能。",
+   "start": 82370,
+   "end": 82487,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "veto",
+    "clause_no": "▲12.",
+    "full_text": "▲12.支持数据库字段级细粒度切面加密功能。支持linux等服务器操作系统下文件透明加密能力功能，加密数据自带完整性保护，支持基于用户和应用的白名单访问控制，授权用户和应用同时验证通过即可查看数据明文，实现加密文件细粒度权限管控功能。（投标文件中提供功能截图或产品检测报告，并加盖投标人公章）",
+    "reason": "▲重要功能参数，属主要标的，须响应并附证明"
+   },
+   "quote_verified": true,
+   "full_text": "▲12.支持数据库字段级细粒度切面加密功能。支持linux等服务器操作系统下文件透明加密能力功能，加密数据自带完整性保护，支持基于用户和应用的白名单访问控制，授权用户和应用同时验证通过即可查看数据明文，实现加密文件细粒度权限管控功能。（投标文件中提供功能截图或产品检测报告，并加盖投标人公章）"
+  },
+  {
+   "mark": "▲",
+   "text": "▲11.支持面向终端的web界面的国密时间戳签名验签功能。支持时间戳服务器关键指标监控及告警能力功能，支持基于CPU使用率、内存使用率、硬盘使用率、数据库容量的告警功能，并可根据需要设置告警阈值。",
+   "start": 83366,
+   "end": 83464,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "11.",
+    "full_text": "▲11.支持面向终端的web界面的国密时间戳签名验签功能。支持时间戳服务器关键指标监控及告警能力功能，支持基于CPU使用率、内存使用率、硬盘使用率、数据库容量的告警功能，并可根据需要设置告警阈值。",
+    "reason": "▲重要功能参数，须响应并附截图或检测报告"
+   },
+   "quote_verified": true,
+   "full_text": "▲11.支持面向终端的web界面的国密时间戳签名验签功能。支持时间戳服务器关键指标监控及告警能力功能，支持基于CPU使用率、内存使用率、硬盘使用率、数据库容量的告警功能，并可根据需要设置告警阈值。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲12.支持对NAS的多种认证安全策略配置功能，包括\"动态密码认证方式\"一次性验证动态密码+静态密码\"以及\"先通过连接AD对用户输入的静态密码验证成功后，再进行动态密码验证\"等多种认证策略。",
+   "start": 84240,
+   "end": 84335,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "veto",
+    "clause_no": "▲12.",
+    "full_text": "▲12.支持对NAS的多种认证安全策略配置功能，包括\"动态密码认证方式\"一次性验证动态密码+静态密码\"以及\"先通过连接AD对用户输入的静态密码验证成功后，再进行动态密码验证\"等多种认证策略。（投标文件中提供功能截图或产品检测报告，并加盖投标人公章）",
+    "reason": "▲重要参数，要求提供截图或检测报告证明，属须响应条款"
+   },
+   "quote_verified": true,
+   "full_text": "▲12.支持对NAS的多种认证安全策略配置功能，包括\"动态密码认证方式\"一次性验证动态密码+静态密码\"以及\"先通过连接AD对用户输入的静态密码验证成功后，再进行动态密码验证\"等多种认证策略。（投标文件中提供功能截图或产品检测报告，并加盖投标人公章）"
+  },
+  {
+   "mark": "▲",
+   "text": "▲8.支持页面水印保护（显水印、隐水印）、可信应用调用、截取保护、清除上网痕迹、文件安全检测、网址云安全等数据安全防护策略。",
+   "start": 84929,
+   "end": 84991,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "8.",
+    "full_text": "▲8.支持页面水印保护（显水印、隐水印）、可信应用调用、截取保护、清除上网痕迹、文件安全检测、网址云安全等数据安全防护策略。（投标文件中提供产品功能截图证明并加盖投标人公章。）",
+    "reason": "▲重要参数功能要求，需提供截图证明逐条响应。"
+   },
+   "quote_verified": true,
+   "full_text": "▲8.支持页面水印保护（显水印、隐水印）、可信应用调用、截取保护、清除上网痕迹、文件安全检测、网址云安全等数据安全防护策略。（投标文件中提供产品功能截图证明并加盖投标人公章。）"
+  },
+  {
+   "mark": "▲",
+   "text": "▲9. 国密浏览器要求支持多语言切换兼容，产品同时支持简体中文、繁体中文、英语等，支持使用内置的英译中翻译引擎，支持切换其他翻译引擎，以满足多场景业务办公场景需求。",
+   "start": 85019,
+   "end": 85101,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "9.",
+    "full_text": "▲9. 国密浏览器要求支持多语言切换兼容，产品同时支持简体中文、繁体中文、英语等，支持使用内置的英译中翻译引擎，支持切换其他翻译引擎，以满足多场景业务办公场景需求。",
+    "reason": "▲标记的重要功能参数，需提供截图证明响应。"
+   },
+   "quote_verified": true,
+   "full_text": "▲9. 国密浏览器要求支持多语言切换兼容，产品同时支持简体中文、繁体中文、英语等，支持使用内置的英译中翻译引擎，支持切换其他翻译引擎，以满足多场景业务办公场景需求。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲8.浏览器支持基于 Chrome 内核的兼容性指标进行多维度全量检测、自动评估与报告输出。",
+   "start": 85722,
+   "end": 85768,
+   "clause_no": "2.0",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "▲8.",
+    "full_text": "▲8.浏览器支持基于 Chrome 内核的兼容性指标进行多维度全量检测、自动评估与报告输出。（投标文件中提供产品功能截图证明并加盖投标人公章。）",
+    "reason": "▲标记的重要技术参数，需提供截图证明响应。"
+   },
+   "quote_verified": true,
+   "full_text": "▲8.浏览器支持基于 Chrome 内核的兼容性指标进行多维度全量检测、自动评估与报告输出。（投标文件中提供产品功能截图证明并加盖投标人公章。）"
+  },
+  {
+   "mark": "▲",
+   "text": "▲4、支持配额管理的同步审计，配额审计定时每天执行，审计每个资源空间上的配额使用量，自动刷新数据库中该资源空间的配额使用量。",
+   "start": 86263,
+   "end": 86325,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "4、",
+    "full_text": "▲4、支持配额管理的同步审计，配额审计定时每天执行，审计每个资源空间上的配额使用量，自动刷新数据库中该资源空间的配额使用量。\n（投标文件中提供功能截图或技术白皮书或所投产品官网技术指标截图或功能测试报告并加盖投标人公章。提供官网技术指标截图的须同时提供官网链接）",
+    "reason": "▲标注的重要参数，要求提供证明材料并响应"
+   },
+   "quote_verified": true,
+   "full_text": "▲4、支持配额管理的同步审计，配额审计定时每天执行，审计每个资源空间上的配额使用量，自动刷新数据库中该资源空间的配额使用量。\n（投标文件中提供功能截图或技术白皮书或所投产品官网技术指标截图或功能测试报告并加盖投标人公章。提供官网技术指标截图的须同时提供官网链接）"
+  },
+  {
+   "mark": "▲",
+   "text": "▲7多云管理：支持通过增加高级管理模块统一管理第三方资源池，支持统一接入VMware、OpenStack、华三私有云、浪潮私有云、阿里公有云、腾讯公有云、华为公有云等多厂商云平台，支持统一云管理平台实现IaaS资源池的生命周期、配额统一管理。",
+   "start": 86516,
+   "end": 86637,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "7",
+    "full_text": "▲7多云管理：支持通过增加高级管理模块统一管理第三方资源池，支持统一接入VMware、OpenStack、华三私有云、浪潮私有云、阿里公有云、腾讯公有云、华为公有云等多厂商云平台，支持统一云管理平台实现IaaS资源池的生命周期、配额统一管理。",
+    "reason": "▲标记的功能要求，属重要技术参数，须响应并提供证明材料。"
+   },
+   "quote_verified": true,
+   "full_text": "▲7多云管理：支持通过增加高级管理模块统一管理第三方资源池，支持统一接入VMware、OpenStack、华三私有云、浪潮私有云、阿里公有云、腾讯公有云、华为公有云等多厂商云平台，支持统一云管理平台实现IaaS资源池的生命周期、配额统一管理。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲9、支持用户将需要申请的多个云服务产品一次性放入购物车，从购物车直接提交批量申请。",
+   "start": 86753,
+   "end": 86795,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "▲9",
+    "full_text": "▲9、支持用户将需要申请的多个云服务产品一次性放入购物车，从购物车直接提交批量申请。",
+    "reason": "▲重要技术参数，具体功能要求，需逐条响应。"
+   },
+   "quote_verified": true,
+   "full_text": "▲9、支持用户将需要申请的多个云服务产品一次性放入购物车，从购物车直接提交批量申请。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲14、支持跨租户代维管理，代维账号可以进入被代维的多个租户进行代维。",
+   "start": 87142,
+   "end": 87177,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "veto",
+    "clause_no": "14",
+    "full_text": "▲14、支持跨租户代维管理，代维账号可以进入被代维的多个租户进行代维。",
+    "reason": "▲标注的重要参数条款，属投标人须响应的实质要求。"
+   },
+   "quote_verified": true,
+   "full_text": "▲14、支持跨租户代维管理，代维账号可以进入被代维的多个租户进行代维。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲4、云主机支持挂载多种存储类型，同时根据自主可控技术路线及业务场景要求，计算服务支持集中式SAN存储和分布式存储，可以通过IPSAN和FCSAN方式进行对接。",
+   "start": 87847,
+   "end": 87927,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "▲4、",
+    "full_text": "▲4、云主机支持挂载多种存储类型，同时根据自主可控技术路线及业务场景要求，计算服务支持集中式SAN存储和分布式存储，可以通过IPSAN和FCSAN方式进行对接。",
+    "reason": "▲重要参数，技术要求条款，须逐条响应"
+   },
+   "quote_verified": true,
+   "full_text": "▲4、云主机支持挂载多种存储类型，同时根据自主可控技术路线及业务场景要求，计算服务支持集中式SAN存储和分布式存储，可以通过IPSAN和FCSAN方式进行对接。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲7、支持租户界面自助设置云主机是否同一存储，在系统盘和数据盘在同一存储的情况下，支持整机容灾、备份。",
+   "start": 88138,
+   "end": 88189,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "veto",
+    "clause_no": "7",
+    "full_text": "▲7、支持租户界面自助设置云主机是否同一存储，在系统盘和数据盘在同一存储的情况下，支持整机容灾、备份。",
+    "reason": "▲标注的重要参数条款，须逐条响应并提供证明材料。"
+   },
+   "quote_verified": true,
+   "full_text": "▲7、支持租户界面自助设置云主机是否同一存储，在系统盘和数据盘在同一存储的情况下，支持整机容灾、备份。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲5、支持裸金属服务基于硬件交换机的增强型网关方案，增强型网关不需要配置网关服务器节点，网关通过交换机进行转发。",
+   "start": 88771,
+   "end": 88827,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "5",
+    "full_text": "▲5、支持裸金属服务基于硬件交换机的增强型网关方案，增强型网关不需要配置网关服务器节点，网关通过交换机进行转发。",
+    "reason": "▲标注的重要功能参数要求，投标人须响应并提供证明材料。"
+   },
+   "quote_verified": true,
+   "full_text": "▲5、支持裸金属服务基于硬件交换机的增强型网关方案，增强型网关不需要配置网关服务器节点，网关通过交换机进行转发。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲77.数据库开源开放，支持产品持续演进。\n▲78.测评自主可控，代码自研率在99%以上。",
+   "start": 95931,
+   "end": 95976,
+   "clause_no": "2.10",
+   "kind": "requirement",
+   "structured": {
+    "clauses": [
+     {
+      "is_requirement": true,
+      "clause_type": "triangle_param",
+      "consequence": "deduction",
+      "clause_no": "▲77.",
+      "full_text": "▲77.数据库开源开放，支持产品持续演进。",
+      "reason": "完整条款，▲重要参数，须响应"
+     },
+     {
+      "is_requirement": true,
+      "clause_type": "triangle_param",
+      "consequence": "deduction",
+      "clause_no": "▲78.",
+      "full_text": "▲78.测评自主可控，代码自研率在99%以上。",
+      "reason": "完整条款，▲重要参数，须响应"
+     }
+    ]
+   },
+   "quote_verified": false,
+   "full_text": "▲77.数据库开源开放，支持产品持续演进。\n▲78.测评自主可控，代码自研率在99%以上。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲2、支持海量小文件备份恢复性能：当海量小文件达到10万级时，备份速度≥100MB、s，恢复速度≥1000MB/s。",
+   "start": 96061,
+   "end": 96119,
+   "clause_no": "2.10",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "▲2、",
+    "full_text": "▲2、支持海量小文件备份恢复性能：当海量小文件达到10万级时，备份速度≥100MB、s，恢复速度≥1000MB/s。",
+    "reason": "▲标注的重要性能参数，须提供证明材料并逐条响应。"
+   },
+   "quote_verified": true,
+   "full_text": "▲2、支持海量小文件备份恢复性能：当海量小文件达到10万级时，备份速度≥100MB、s，恢复速度≥1000MB/s。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲4、支持使用硬件动态令牌自研独立系统，隔离攻击面与网络隔离。",
+   "start": 96272,
+   "end": 96304,
+   "clause_no": "2.10",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "none",
+    "clause_no": "▲4",
+    "full_text": "▲4、支持使用硬件动态令牌自研独立系统，隔离攻击面与网络隔离。",
+    "reason": "▲标记的重要技术参数要求，属实质响应条款。"
+   },
+   "quote_verified": true,
+   "full_text": "▲4、支持使用硬件动态令牌自研独立系统，隔离攻击面与网络隔离。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲5、针对系统的高危操作（如：恢复作业、清理备份集等）前要求输入四位或以上的随机数字验证码，待验证通过后才能执行操作。",
+   "start": 96374,
+   "end": 96433,
+   "clause_no": "2.10",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "veto",
+    "clause_no": "▲5",
+    "full_text": "▲5、针对系统的高危操作（如：恢复作业、清理备份集等）前要求输入四位或以上的随机数字验证码，待验证通过后才能执行操作。（投标文件中提供功能截图或技术白皮书或所投产品官网技术指标截图或功能测试报告并加盖投标人公章。提供官网技术指标截图的须同时提供官网链接）",
+    "reason": "▲标注的重要参数，要求提供证明材料，投标人须逐条响应"
+   },
+   "quote_verified": true,
+   "full_text": "▲5、针对系统的高危操作（如：恢复作业、清理备份集等）前要求输入四位或以上的随机数字验证码，待验证通过后才能执行操作。（投标文件中提供功能截图或技术白皮书或所投产品官网技术指标截图或功能测试报告并加盖投标人公章。提供官网技术指标截图的须同时提供官网链接）"
+  },
+  {
+   "mark": "▲",
+   "text": "▲7、备份软件通过源代码安全审计。",
+   "start": 96526,
+   "end": 96543,
+   "clause_no": "2.10",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "veto",
+    "clause_no": "▲7",
+    "full_text": "▲7、备份软件通过源代码安全审计。\n（投标文件中提供源代码安全审计证书或技术白皮书或所投产品官网技术指标截图并加盖投标人公章。提供官网技术指标截图的须同时提供官网链接）",
+    "reason": "▲重要参数，要求提供证明材料，属实质响应要求"
+   },
+   "quote_verified": true,
+   "full_text": "▲7、备份软件通过源代码安全审计。\n（投标文件中提供源代码安全审计证书或技术白皮书或所投产品官网技术指标截图并加盖投标人公章。提供官网技术指标截图的须同时提供官网链接）"
+  },
+  {
+   "mark": "▲",
+   "text": "▲6、支持直通SSD设备功能，支持直通GPU设备功能。",
+   "start": 96956,
+   "end": 96983,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "veto",
+    "clause_no": "6",
+    "full_text": "▲6、支持直通SSD设备功能，支持直通GPU设备功能。",
+    "reason": "▲标注的重要技术参数，需提供证明材料，属实质响应要求"
+   },
+   "quote_verified": true,
+   "full_text": "▲6、支持直通SSD设备功能，支持直通GPU设备功能。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲9、支持用户针对指定的虚拟机配置检查策略，达到策略定义的阈值后自动扩容虚拟机的CPU或者内存，过程中虚拟机正常运行不需要重启。",
+   "start": 97202,
+   "end": 97266,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "9",
+    "full_text": "▲9、支持用户针对指定的虚拟机配置检查策略，达到策略定义的阈值后自动扩容虚拟机的CPU或者内存，过程中虚拟机正常运行不需要重启。（投标文件中提供功能截图或技术白皮书或所投产品官网技术指标截图或功能测试报告并加盖投标人公章。提供官网技术指标截图的须同时提供官网链接）",
+    "reason": "▲重要技术参数，属投标人须响应的实质要求，不满足通常扣分。"
+   },
+   "quote_verified": true,
+   "full_text": "▲9、支持用户针对指定的虚拟机配置检查策略，达到策略定义的阈值后自动扩容虚拟机的CPU或者内存，过程中虚拟机正常运行不需要重启。（投标文件中提供功能截图或技术白皮书或所投产品官网技术指标截图或功能测试报告并加盖投标人公章。提供官网技术指标截图的须同时提供官网链接）"
+  },
+  {
+   "mark": "▲",
+   "text": "▲10、支持通过文件夹对虚拟机进行分组，不同类型的虚拟机实现逻辑分组管理，文件夹深度最多可以支持≥5层，并可以对分组虚拟机批量进行关闭、启动、重启、迁移操作。",
+   "start": 97336,
+   "end": 97415,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "▲10",
+    "full_text": "▲10、支持通过文件夹对虚拟机进行分组，不同类型的虚拟机实现逻辑分组管理，文件夹深度最多可以支持≥5层，并可以对分组虚拟机批量进行关闭、启动、重启、迁移操作。",
+    "reason": "▲标记重要技术参数，为实质性技术响应要求。"
+   },
+   "quote_verified": true,
+   "full_text": "▲10、支持通过文件夹对虚拟机进行分组，不同类型的虚拟机实现逻辑分组管理，文件夹深度最多可以支持≥5层，并可以对分组虚拟机批量进行关闭、启动、重启、迁移操作。"
+  },
+  {
+   "mark": "▲",
+   "text": "▲2、提供检查策略功能，提供预见式运维，管理员可自定义检查条件，对存储、计算、网络的配置、容量、性能、可用性、低负载、可回收资源进行检查。",
+   "start": 97723,
+   "end": 97792,
+   "clause_no": "",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "2",
+    "full_text": "▲2、提供检查策略功能，提供预见式运维，管理员可自定义检查条件，对存储、计算、网络的配置、容量、性能、可用性、低负载、可回收资源进行检查。\n（投标文件中提供功能截图或技术白皮书或所投产品官网技术指标截图或功能测试报告并加盖投标人公章。提供官网技术指标截图的须同时提供官网链接）",
+    "reason": "▲标记的重要功能参数，须提供证明材料响应，不满足扣分"
+   },
+   "quote_verified": true,
+   "full_text": "▲2、提供检查策略功能，提供预见式运维，管理员可自定义检查条件，对存储、计算、网络的配置、容量、性能、可用性、低负载、可回收资源进行检查。\n（投标文件中提供功能截图或技术白皮书或所投产品官网技术指标截图或功能测试报告并加盖投标人公章。提供官网技术指标截图的须同时提供官网链接）"
+  },
+  {
+   "mark": "▲",
+   "text": "▲10.支持SSH远程登录二次认证功能。",
+   "start": 118012,
+   "end": 118032,
+   "clause_no": "（4）",
+   "kind": "requirement",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "triangle_param",
+    "consequence": "deduction",
+    "clause_no": "10.",
+    "full_text": "▲10.支持SSH远程登录二次认证功能。",
+    "reason": "▲标注的重要功能参数，须响应并附截图证明。"
+   },
+   "quote_verified": true,
+   "full_text": "▲10.支持SSH远程登录二次认证功能。"
+  },
+  {
+   "pattern": "B",
+   "text": "六、其他补充事宜\n1.本次招标不收取投标保证金。\n2.本招标文件中斜体且有下划线部分为实质性要求和条件，由采购人根据实际情况设置，投标人须逐条明确作出满足实质性要求和条件的响应，否则将按无效响应处理。\n3.无论出于何种原因，采购人及其委托的采购代理机构在采购活动开始前可对招标文件进行修改、补充或者变更，其内容作为招标文件的重要组成部分，请各投标人关注江苏政府采购网。若因投标人自身原因未及时关注本项目有关修改、补充或者变更信息，导致投标文件编制或者提交失误，由此造成的一切损失由投标人自行承担。\n4.根据江苏省财政厅《关于更换全省政府采购交易系统C A数字证书和电子签章的通知》（苏财购〔2023〕101号）要求，“苏采云”政府采购交易系统的CA数字证书、电子签章已更换为江苏省电子政务证书认证中心CA和方正国际软件（北京）有限公司电子签章。投标人通过“苏采云”系统参与政府采购项目，需要办理（更换）CA数字证书和电子签章。具体办理指南和操作手册见链接：\nhttp://www.ccgp-jiangsu.gov.cn/jiangsu/zlxz/ee/ee3a4bc5a3454aa2b0d9312230633ce9.html\n请投标人按照《操作手册》要求获取招标文件，制作、递交（上传）电子投标文件，参加开标，澄清、说明或者补正。因投标人未按要求操作原因导致电子投标文件被拒绝、造成无效响应的，自行",
+   "start": 1976,
+   "end": 2576,
+   "clause_no": "六、",
+   "promise_doc": "",
+   "structured": {
+    "is_requirement": false,
+    "clause_type": "other",
+    "consequence": "none",
+    "clause_no": "六",
+    "full_text": "六、其他补充事宜\n1.本次招标不收取投标保证金。\n2.本招标文件中斜体且有下划线部分为实质性要求和条件，由采购人根据实际情况设置，投标人须逐条明确作出满足实质性要求和条件的响应，否则将按无效响应处理。\n3.无论出于何种原因，采购人及其委托的采购代理机构在采购活动开始前可对招标文件进行修改、补充或者变更，其内容作为招标文件的重要组成部分，请各投标人关注江苏政府采购网。若因投标人自身原因未及时关注本项目有关修改、补充或者变更信息，导致投标文件编制或者提交失误，由此造成的一切损失由投标人自行承担。\n4.根据江苏省财政厅《关于更换全省政府采购交易系统C A数字证书和电子签章的通知》（苏财购〔2023〕101号）要求，“苏采云”政府采购交易系统的CA数字证书、电子签章已更换为江苏省电子政务证书认证中心CA和方正国际软件（北京）有限公司电子签章。投标人通过“苏采云”系统参与政府采购项目，需要办理（更换）CA数字证书和电子签章。具体办理指南和操作手册见链接：\nhttp://www.ccgp-jiangsu.gov.cn/jiangsu/zlxz/ee/ee3a4bc5a3454aa2b0d9312230633ce9.html\n请投标人按照《操作手册》要求获取招标文件，制作、递交（上传）电子投标文件，参加开标，澄清、说明或者补正。因投标人未按要求操作原因导致电子投标文件被拒绝、造成无效响应的，自行承担一切损失。",
+    "reason": "属补充说明性条款，非需逐条响应的实质要求"
+   },
+   "quote_verified": true,
+   "full_text": "六、其他补充事宜\n1.本次招标不收取投标保证金。\n2.本招标文件中斜体且有下划线部分为实质性要求和条件，由采购人根据实际情况设置，投标人须逐条明确作出满足实质性要求和条件的响应，否则将按无效响应处理。\n3.无论出于何种原因，采购人及其委托的采购代理机构在采购活动开始前可对招标文件进行修改、补充或者变更，其内容作为招标文件的重要组成部分，请各投标人关注江苏政府采购网。若因投标人自身原因未及时关注本项目有关修改、补充或者变更信息，导致投标文件编制或者提交失误，由此造成的一切损失由投标人自行承担。\n4.根据江苏省财政厅《关于更换全省政府采购交易系统C A数字证书和电子签章的通知》（苏财购〔2023〕101号）要求，“苏采云”政府采购交易系统的CA数字证书、电子签章已更换为江苏省电子政务证书认证中心CA和方正国际软件（北京）有限公司电子签章。投标人通过“苏采云”系统参与政府采购项目，需要办理（更换）CA数字证书和电子签章。具体办理指南和操作手册见链接：\nhttp://www.ccgp-jiangsu.gov.cn/jiangsu/zlxz/ee/ee3a4bc5a3454aa2b0d9312230633ce9.html\n请投标人按照《操作手册》要求获取招标文件，制作、递交（上传）电子投标文件，参加开标，澄清、说明或者补正。因投标人未按要求操作原因导致电子投标文件被拒绝、造成无效响应的，自行承担一切损失。"
+  },
+  {
+   "pattern": "B",
+   "text": "9.1 投标人应当仔细阅读招标文件中所有的事项、格式、条款和规范等要求，在完全了解招标内容、技术性能要求和商务条件后，按照招标文件的要求编制投标文件。投标文件应当对招标文件提出的要求和条件作出明确响应，并保证所提供的全部资料的真实性，否则作无效响应处理。",
+   "start": 3700,
+   "end": 3827,
+   "clause_no": "9.1",
+   "promise_doc": "",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "compliance",
+    "consequence": "veto",
+    "clause_no": "9.1",
+    "full_text": "9.1 投标人应当仔细阅读招标文件中所有的事项、格式、条款和规范等要求，在完全了解招标内容、技术性能要求和商务条件后，按照招标文件的要求编制投标文件。投标文件应当对招标文件提出的要求和条件作出明确响应，并保证所提供的全部资料的真实性，否则作无效响应处理。",
+    "reason": "要求明确响应并保证资料真实性，否则无效响应，属符合性强制要求。"
+   },
+   "quote_verified": true,
+   "full_text": "9.1 投标人应当仔细阅读招标文件中所有的事项、格式、条款和规范等要求，在完全了解招标内容、技术性能要求和商务条件后，按照招标文件的要求编制投标文件。投标文件应当对招标文件提出的要求和条件作出明确响应，并保证所提供的全部资料的真实性，否则作无效响应处理。"
+  },
+  {
+   "pattern": "B",
+   "text": "14.1 投标人应根据投标报价要求在投标分项报价表中列明各项投标单价、总价等，未全部列示的作无效响应处理。",
+   "start": 5007,
+   "end": 5060,
+   "clause_no": "14.1",
+   "promise_doc": "",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "compliance",
+    "consequence": "veto",
+    "clause_no": "14.1",
+    "full_text": "14.1 投标人应根据投标报价要求在投标分项报价表中列明各项投标单价、总价等，未全部列示的作无效响应处理。",
+    "reason": "要求列明分项报价，未全部列示作无效响应，属符合性强制要求。"
+   },
+   "quote_verified": true,
+   "full_text": "14.1 投标人应根据投标报价要求在投标分项报价表中列明各项投标单价、总价等，未全部列示的作无效响应处理。"
+  },
+  {
+   "pattern": "B",
+   "text": "17.2 对于采用货币报价的项目，开标一览表中的投标总报价应与投标分项报价表中的投标总报价一致，如不一致，不作无效投标处理，但评标时以开标一览表中价格为准。",
+   "start": 5559,
+   "end": 5637,
+   "clause_no": "17.2",
+   "promise_doc": "",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "compliance",
+    "consequence": "none",
+    "clause_no": "17.2",
+    "full_text": "17.2 对于采用货币报价的项目，开标一览表中的投标总报价应与投标分项报价表中的投标总报价一致，如不一致，不作无效投标处理，但评标时以开标一览表中价格为准。",
+    "reason": "要求报价一致且明确不一致不作无效处理，仅以开标一览表为准。"
+   },
+   "quote_verified": true,
+   "full_text": "17.2 对于采用货币报价的项目，开标一览表中的投标总报价应与投标分项报价表中的投标总报价一致，如不一致，不作无效投标处理，但评标时以开标一览表中价格为准。"
+  },
+  {
+   "pattern": "B",
+   "text": "27.1条规定作无效投标处理。\n",
+   "start": 6056,
+   "end": 6072,
+   "clause_no": "27.1",
+   "promise_doc": "",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "compliance",
+    "consequence": "veto",
+    "clause_no": "",
+    "full_text": "投标人应充分考虑计算机硬件、软件及网络环境等风险因素，如因投标人自身原因造成电子投标文件递交（上传）不成功的按照本招标文件第二章第27.1条规定作无效投标处理。",
+    "reason": "规定递交不成功按27.1条作无效投标，属实质性要求"
+   },
+   "quote_verified": true,
+   "full_text": "投标人应充分考虑计算机硬件、软件及网络环境等风险因素，如因投标人自身原因造成电子投标文件递交（上传）不成功的按照本招标文件第二章第27.1条规定作无效投标处理。"
+  },
+  {
+   "pattern": "B",
+   "text": "（十五）租赁和商务服务业。从业人员300人以下或资产总额120000万元以下的为中小微型企业。其中，从业人员100人及以上，且资产总额8000万元及以上的为中型企业；从业人员10人及以上，且资产总额100万元及以上的为小型企业；从业人员10人以下或资产总额100万元以下的为微型企业。\n1、根据《政府采购需求管理办法》等有关规定，采购人确定采购需求。\n2、本招标文件中斜体且有下划线部分为实质性要求和条件，由采购人根据实际情况设置，投标人须逐条明确作出满足实质性要求和条件的响应，否则将按无效响应处理。",
+   "start": 19295,
+   "end": 19546,
+   "clause_no": "（十五）",
+   "promise_doc": "",
+   "structured": {
+    "is_requirement": true,
+    "clause_type": "compliance",
+    "consequence": "veto",
+    "clause_no": "2、",
+    "full_text": "2、本招标文件中斜体且有下划线部分为实质性要求和条件，由采购人根据实际情况设置，投标人须逐条明确作出满足实质性要求和条件的响应，否则将按无效响应处理。",
+    "reason": "明确斜体下划线部分为实质性要求，不响应即无效响应。"
+   },
+   "quote_verified": true,
+   "full_text": "2、本招标文件中斜体且有下划线部分为实质性要求和条件，由采购人根据实际情况设置，投标人须逐条明确作出满足实质性要求和条件的响应，否则将按无效响应处理。"
+  }
+ ],
+ "llm_usage": {
+  "calls": 61,
+  "usage": {
+   "prompt_tokens": 124648,
+   "completion_tokens": 19601,
+   "cost": 0.15460120000000002,
+   "calls": 121
+  }
+ }
+}

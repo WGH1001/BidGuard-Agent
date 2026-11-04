@@ -9,9 +9,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from core.tender_llm import (
     _expand_window,
     _parse_llm_json,
+    extract_scoring_with_llm,
     extract_tender_with_llm,
     structure_candidate,
 )
+from core.tender_extractor import extract_scoring_tables
 from tests.test_tender_extractor import SAMPLE
 
 
@@ -57,6 +59,7 @@ def test_structure_candidate_quote_verified():
     reply = json.dumps({
         'is_requirement': True,
         'clause_type': 'star_param',
+        'consequence': 'veto',
         'clause_no': '★1)',
         'full_text': '★1) CPU 核数不低于 32 核，内存不低于 128G',
         'reason': '实质性硬件参数要求',
@@ -65,6 +68,7 @@ def test_structure_candidate_quote_verified():
     assert out['quote_verified'] is True
     assert out['full_text'] == '★1) CPU 核数不低于 32 核，内存不低于 128G'
     assert out['structured']['clause_type'] == 'star_param'
+    assert out['structured']['consequence'] == 'veto'   # 评分后果字段透传
 
 
 def test_structure_candidate_hallucination_rejected():
@@ -135,3 +139,65 @@ def test_extract_tender_no_candidates_skips_llm(tmp_path):
     assert result['llm_structured'] == []
     assert result['llm_usage']['calls'] == 0
     assert client.prompts == []                         # 网关未被触碰
+
+
+def test_extract_scoring_with_llm_prose(tmp_path):
+    """段落式评分抽取（mock 网关）：锚点开窗 → 逐窗提取 → detail 逐项溯源。
+    溯源通过的 detail 采信；编造的 detail 清空待人工。"""
+    body = (
+        '第五章 评标方法与评标标准\n'
+        '评分办法：综合评分法，满分100分。\n'
+        '价格分：满足招标文件要求且投标价格最低的投标报价为评标基准价，其价格分为满分10分。\n'
+        '技术分：技术方案完整可行的得8分，每有一处缺陷扣1分。\n'
+        '业绩分：提供近三年类似合同业绩的每份得2分，须提供合同复印件，最高得6分。\n'
+    )
+    p = tmp_path / 'prose_tender.txt'
+    p.write_text(body, newline='\n', encoding='utf-8')
+
+    def scripted_reply(prompt):
+        window = prompt.split('【原文窗口】\n', 1)[1].split('每项字段', 1)[0]
+        return json.dumps([
+            {'factor': '价格分', 'detail': '价格分：满足招标文件要求且投标价格最低的投标报价为评标基准价，其价格分为满分10分。',
+             'score': '10', 'score_max': 10, 'evidence_material': '', 'consequence': 'none'},
+            {'factor': '业绩分', 'detail': '编造的评分标准不在窗口里', 'score': '6',
+             'score_max': 6, 'evidence_material': '合同复印件', 'consequence': 'none'},
+        ], ensure_ascii=False)
+
+    class FnClient(MockClient):
+        def chat(self, messages, model_tier='flash', **kw):
+            self.prompts.append(messages[0]['content'])
+            return MockResp(scripted_reply(messages[0]['content']))
+
+    client = FnClient([])
+    result = extract_scoring_with_llm(str(p), client=client)
+    prose = result['scoring_prose']
+    assert len(prose) == 2
+    assert prose[0]['quote_verified'] is True and prose[0]['score_max'] == 10
+    assert prose[1]['quote_verified'] is False and prose[1]['detail'] == ''
+    assert prose[1]['detail_raw'].startswith('编造')     # 脏摘录留痕待人工
+    assert result['scoring_tables'] == []                # txt 无表格
+    assert result['scoring_llm_usage']['calls'] >= 1
+
+
+def test_scoring_tables_docx(tmp_path):
+    """表格型评分表 0 Token 解析：分节行归组、分值范围取上限、列名变体兼容。"""
+    from docx import Document
+    doc = Document()
+    tb = doc.add_table(rows=5, cols=4)
+    for i, h in enumerate(('序号', '评审因素', '评分标准', '分值')):
+        tb.rows[0].cells[i].text = h
+    tb.rows[1].cells[0].text = '1.价格'                      # 分节行（单格非空）
+    row = tb.rows[2].cells
+    row[0].text, row[1].text, row[2].text, row[3].text = '1.1', '价格分', '满足要求得满分', '20'
+    tb.rows[3].cells[0].text = '1.2'
+    tb.rows[3].cells[1].text = '偏离扣分'
+    tb.rows[3].cells[2].text = '每有一处负偏离扣1分'
+    tb.rows[3].cells[3].text = '0-5'                          # 分值范围 → 取上限 5
+    p = tmp_path / 'tbl_tender.docx'
+    doc.save(str(p))
+    items = extract_scoring_tables(str(p))
+    assert len(items) == 2
+    assert items[0]['section'] == '1.价格' and items[1]['section'] == '1.价格'
+    assert items[0]['score_max'] == 20
+    assert items[1]['score_max'] == 5                         # 范围取上限
+    assert '负偏离' in items[1]['detail']

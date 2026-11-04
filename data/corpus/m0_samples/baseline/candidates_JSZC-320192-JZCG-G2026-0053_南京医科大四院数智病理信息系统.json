@@ -92,7 +92,7 @@
    "start": 4481,
    "end": 4557,
    "clause_no": "21.1",
-   "kind": "requirement"
+   "kind": "usage_note"
   },
   {
    "mark": "★",
@@ -284,7 +284,7 @@
    "start": 39055,
    "end": 39101,
    "clause_no": "六、",
-   "kind": "requirement"
+   "kind": "usage_note"
   },
   {
    "mark": "★",
@@ -292,7 +292,7 @@
    "start": 39295,
    "end": 39341,
    "clause_no": "七、",
-   "kind": "requirement"
+   "kind": "usage_note"
   },
   {
    "mark": "★",

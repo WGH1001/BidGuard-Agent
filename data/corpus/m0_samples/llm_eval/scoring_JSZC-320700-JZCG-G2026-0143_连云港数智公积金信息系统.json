@@ -1,0 +1,142 @@
+{
+ "scoring_tables": [],
+ "scoring_prose": [
+  {
+   "factor": "价格分",
+   "detail": "",
+   "score": "10分",
+   "score_max": 10,
+   "evidence_material": "",
+   "consequence": "none",
+   "quote_verified": false,
+   "detail_raw": "采用低价优先法计算，即满足招标文件要求且投标价格最低的投标报价为评标基准价，其价格分为满分。其他投标人的价格分统一按照下列公式计算：投标报价得分=（评标基准价／投标报价）×10分。因落实政府采购政策进行价格调整的，以调整后的价格计算评标基准价和投标报价，小数点后保留两位。"
+  },
+  {
+   "factor": "技术分",
+   "detail": "",
+   "score": "35分",
+   "score_max": 35,
+   "evidence_material": "",
+   "consequence": "deduction",
+   "quote_verified": false,
+   "detail_raw": "本项目评标标准中的技术分中总体设计方案、项目实施方案、数据移植方案、培训方案、售后服务方案、运维服务方案（共35分）采用暗标方式进行评审。方案内容、文字、各类型图表、框图均不得出现供应商名称、相关人员姓名和其他可识别供应商身份的字符、徽标、人员名称、投标人独享的企业标准或编号等内容；未按要求编制的本项（所有暗标部分）不得分。"
+  },
+  {
+   "factor": "商务分",
+   "detail": "联合体参与投标的，招标文件中要求投标人具有相关认证、业绩、人员等，联合体成员中任意一方具有并提供即为满足评审要求，要求加盖投标人公章的加盖牵头人公章即可。",
+   "score": "55分",
+   "score_max": 55,
+   "evidence_material": "",
+   "consequence": "none",
+   "quote_verified": true
+  },
+  {
+   "factor": "产品认证-AI处理器商用密码产品认证",
+   "detail": "投标人所投的AI算力节点满足GM/T 0008《安全芯片密码检测准则》第一级要求的AI处理器商用密码产品认证的，得4分。",
+   "score": "4分",
+   "score_max": 4,
+   "evidence_material": "投标文件中提供有效证书复印件或扫描件或电子件并加盖投标人公章，否则不得分",
+   "consequence": "none",
+   "quote_verified": true
+  },
+  {
+   "factor": "产品认证-软件产品可信评估证书",
+   "detail": "投标人所投一体化云管平台具有软件产品可信评估证书的，得4分。",
+   "score": "4分",
+   "score_max": 4,
+   "evidence_material": "投标文件中提供有效证书复印件或扫描件或电子件并加盖投标人公章，否则不得分。",
+   "consequence": "none",
+   "quote_verified": true
+  },
+  {
+   "factor": "产品认证-态势感知系统功能模块软件著作权",
+   "detail": "投标人承诺所投态势感知系统同时具有挖矿检测和第三方应用联动相关功能模块，且功能模块具有软件著作权证书的，得4分。",
+   "score": "4分",
+   "score_max": 4,
+   "evidence_material": "投标文件中同时提供：①软件著作权证书复印件或扫描件或电子件并加盖投标人公章；②加盖投标人公章的承诺函，承诺函中须承诺同时具有挖矿检测和第三方应用联动相关功能模块并承诺该模块应用于投标人所投态势感知系统；否则不得分。",
+   "consequence": "none",
+   "quote_verified": true
+  },
+  {
+   "factor": "人员配置-项目负责人高级工程师",
+   "detail": "投标人拟派的1名实施阶段项目负责人具有电子信息类高级工程师证书的，得2分。",
+   "score": "2分",
+   "score_max": 2,
+   "evidence_material": "投标文件中提供有效证书扫描件或复印件或电子件及2026年1月（含）以来任意一个月由投标人为其缴纳的社保证明材料复印件或扫描件并加盖投标人公章",
+   "consequence": "none",
+   "quote_verified": true
+  },
+  {
+   "factor": "人员配置-项目组成员软件设计师或电子信息类工程师",
+   "detail": "投标人拟派实施阶段项目组成员（项目负责人除外）具有软件设计师证书或电子信息类工程师证书的，每提供一类证书得2分，本项最高得4分。",
+   "score": "2分/类，最高4分",
+   "score_max": 4,
+   "evidence_material": "投标文件中提供有效证书扫描件或复印件或电子件及2026年1月（含）以来任意一个月由投标人为其缴纳的社保证明材料复印件或扫描件并加盖投标人公章，一人具有多项证书或者多人具有相同证书不重复计分；否则不得分。",
+   "consequence": "none",
+   "quote_verified": true
+  },
+  {
+   "factor": "人员配置-网络安全工程师",
+   "detail": "投标人拟派实施阶段项目组成员（项目负责人除外）具有网络安全工程师证书的，得1分。",
+   "score": "1分",
+   "score_max": 1,
+   "evidence_material": "投标文件中提供有效证书扫描件或复印件或电子件及2026年1月（含）以来任意一个月由投标人为其缴纳的社保证明材料复印件或扫描件并加盖投标人公章",
+   "consequence": "none",
+   "quote_verified": true
+  },
+  {
+   "factor": "履约能力-业务连续性管理体系认证",
+   "detail": "投标人具有有效期内的业务连续性管理体系认证证书得 1分。",
+   "score": "1分",
+   "score_max": 1,
+   "evidence_material": "投标文件中提供证书复印件或扫描件或电子件并加盖投标人公章，否则不得分。",
+   "consequence": "none",
+   "quote_verified": true
+  },
+  {
+   "factor": "履约能力-隐私信息管理体系认证",
+   "detail": "投标人具有有效期内的隐私信息管理体系认证证书得 1分。",
+   "score": "1分",
+   "score_max": 1,
+   "evidence_material": "投标文件中提供证书复印件或扫描件或电子件并加盖投标人公章，否则不得分。",
+   "consequence": "none",
+   "quote_verified": true
+  },
+  {
+   "factor": "履约能力-诚信管理体系认证",
+   "detail": "投标人具有有效期内的诚信管理体系认证证书得 1分。",
+   "score": "1分",
+   "score_max": 1,
+   "evidence_material": "投标文件中提供证书复印件或扫描件或电子件并加盖投标人公章，否则不得分。",
+   "consequence": "none",
+   "quote_verified": true
+  },
+  {
+   "factor": "业绩-类似项目业绩",
+   "detail": "投标人提供自2024年1月1日（含）以来签订的类似项目业绩（合同内容至少包含服务器、网络设备或软件开发中的任意一项），每提供1个得1分，最高得2分。",
+   "score": "每提供1个得1分，最高得2分",
+   "score_max": 2,
+   "evidence_material": "投标文件中提供合同复印件或扫描件或电子件并加盖投标人公章，否则不得分",
+   "consequence": "none",
+   "quote_verified": true
+  },
+  {
+   "factor": "环保要求-环境标志产品认证",
+   "detail": "投标标的（不包含租赁设备）属于财政部、生态环境部公布的“环境标志产品政府采购品目清单”范围内的，投标人提供国家确定的认证机构出具的、处于有效期内的该环境标志产品认证证书扫描件的，有1个得0.5分，最多得1分。",
+   "score": "有1个得0.5分，最多得1分",
+   "score_max": 1,
+   "evidence_material": "国家确定的认证机构出具的、处于有效期内的该环境标志产品认证证书扫描件",
+   "consequence": "none",
+   "quote_verified": true
+  }
+ ],
+ "scoring_llm_usage": {
+  "calls": 5,
+  "usage": {
+   "prompt_tokens": 9075,
+   "completion_tokens": 1680,
+   "cost": 0.011964000000000002,
+   "calls": 5
+  }
+ }
+}

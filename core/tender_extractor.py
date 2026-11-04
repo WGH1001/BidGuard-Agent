@@ -70,6 +70,12 @@ _USAGE_NOTE_RE = re.compile(
     r'|[★▲]为(政府)?强制采购'           # 节能说明：▲为政府强制采购节能产品
     r'|标注\s*[“"]?\s*[▲★]\s*[”"]?'     # 标的说明：标注"▲"的标的为主要标的（芜湖 2026-11-04 终审新增）
     r'|带\s*[★▲]\s*的项'                # 划型说明：带★的项为行业（芜湖中小企业划型附表）
+    # —— 2026-11-04 LLM 分歧人工核定新增（第三轮收口，均为全国通用政采模板）——
+    r'|打\s*[“"]?\s*[★▲]\s*[”"]?\s*内容'      # 偏离表填写说明：实质性要求（打"★"内容）作出明确响应
+    r'|[“"]?★[”"]?内容为实质性要求'           # 符合性说明：本文件中的"★"内容为实质性要求
+    r'|每有一项不满足扣'                       # 扣分规则：标"▲"项每有一项不满足扣0.5分
+    r'|项加\d+分'                              # 加分规则：每1个"▲"项加2分
+    r'|未标\s*[“"]?\s*[★▲]\s*[”"]?\s*的'      # 一般参数说明：未标"▲"的为一般参数
 )
 
 # 表格行标记碎片（kind=table_marker，2026-11-04 用户终审芜湖实测定案）：
@@ -328,4 +334,95 @@ def build_review_checklist(file_path: str) -> dict:
         'compliance_hits': locate_keyword_sections(text, _COMPLIANCE_KEYS),
         'eval_chapter': eval_chapter,
         'scoring_hits': locate_keyword_sections(text, ('评分细则', '评分标准', '评分办法')),
+        'scoring_tables': extract_scoring_tables(file_path),
     }
+
+
+# ── 评分细则表结构化（0 Token，docx 表格型）────────────────────────────────
+# 表头识别键（语料实证四套变体：评审因素/评标内容/评分内容 × 评审细则/评分标准/
+# 评标标准 × 分值/分值范围，2026-11-04 全库扫描）
+_SCORE_TABLE_SCORE_KEYS = ('分值', '分数', '得分', '标准分', '满分')
+_SCORE_TABLE_FACTOR_KEYS = ('评审因素', '评分内容', '评标内容', '评审内容', '评分因素')
+_SCORE_TABLE_DETAIL_KEYS = ('评审细则', '评分标准', '评标标准', '评审标准')
+_SCORE_NUM_RE = re.compile(r'\d+(?:\.\d+)?')
+
+
+def _dedup_row_cells(row) -> list:
+    """按 tc 元素本体去重取一行单元格（vMerge 延续格重复返回，与 parser 同款修复）。"""
+    seen = set()
+    cells = []
+    for cell in row.cells:
+        if id(cell._tc) in seen:
+            continue
+        seen.add(id(cell._tc))
+        cells.append(cell)
+    return cells
+
+
+def _map_score_columns(header_texts: list) -> dict:
+    """按表头关键字映射列号：{'no':i,'factor':i,'detail':i,'score':i,'type':i}。"""
+    col = {}
+    for i, h in enumerate(header_texts):
+        if col.get('score') is None and any(k in h for k in _SCORE_TABLE_SCORE_KEYS):
+            col['score'] = i
+        elif col.get('factor') is None and any(k in h for k in _SCORE_TABLE_FACTOR_KEYS):
+            col['factor'] = i
+        elif col.get('detail') is None and any(k in h for k in _SCORE_TABLE_DETAIL_KEYS):
+            col['detail'] = i
+        elif col.get('no') is None and h.strip() in ('序号', '编号'):
+            col['no'] = i
+        elif col.get('type') is None and '类型' in h:
+            col['type'] = i
+    return col
+
+
+def extract_scoring_tables(file_path: str) -> list[dict]:
+    """结构化 docx 评分细则表（表格型语料 0 Token 主通道）。
+
+    仅处理 docx（PDF 无表格对象，段落式评分由 LLM 评分区段层兜底）。
+    表格识别：首行表头同时含分值列键与（评审因素或评分标准）键。
+    行分两类：分节行（去重后仅 1 格，如"1.价格"）记为当前 section；
+    明细行按列映射产出评分项。
+
+    Returns:
+        [{'table_index': int, 'no': str, 'section': str, 'factor': str,
+          'detail': str, 'score': str, 'score_max': float|None, 'type': str}, ...]
+    """
+    if not file_path.lower().endswith('.docx'):
+        return []
+    from docx import Document
+    doc = Document(file_path)
+    items = []
+    for ti, table in enumerate(doc.tables):
+        if not table.rows:
+            continue
+        header_cells = _dedup_row_cells(table.rows[0])
+        header_texts = [c.text.strip() for c in header_cells]
+        col = _map_score_columns(header_texts)
+        if col.get('score') is None or (col.get('factor') is None and col.get('detail') is None):
+            continue
+        section = ''
+        for ri, row in enumerate(table.rows[1:], start=1):
+            cells = _dedup_row_cells(row)
+            texts = [c.text.strip() for c in cells]
+            nonempty = [t for t in texts if t]
+            if len(nonempty) <= 1:               # 分节行：如 "1.价格" / "2.技术"
+                section = nonempty[0] if nonempty else section
+                continue
+            def _cell(key):
+                i = col.get(key)
+                return texts[i] if i is not None and i < len(texts) else ''
+            score_raw = _cell('score')
+            nums = _SCORE_NUM_RE.findall(score_raw)
+            items.append({
+                'table_index': ti,
+                'row_index': ri,
+                'no': _cell('no'),
+                'section': section,
+                'factor': _cell('factor'),
+                'detail': _cell('detail'),
+                'score': score_raw,
+                'score_max': max((float(n) for n in nums), default=None),
+                'type': _cell('type'),
+            })
+    return items

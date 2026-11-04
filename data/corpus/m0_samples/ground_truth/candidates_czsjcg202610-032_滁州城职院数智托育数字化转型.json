@@ -346,7 +346,8 @@
    "start": 50099,
    "end": 50166,
    "clause_no": "（1）",
-   "kind": "requirement"
+   "kind": "usage_note",
+   "review_note": "2026-11-04 LLM 分歧人工核定改判：标记使用说明/章节标题，非响应要求（Gemini 裁决：两者都做——正则已扩，GT 同步）"
   },
   {
    "mark": "▲",
@@ -354,7 +355,8 @@
    "start": 50194,
    "end": 50286,
    "clause_no": "（1）",
-   "kind": "requirement"
+   "kind": "usage_note",
+   "review_note": "2026-11-04 LLM 分歧人工核定改判：标记使用说明/章节标题，非响应要求（Gemini 裁决：两者都做——正则已扩，GT 同步）"
   },
   {
    "mark": "▲",

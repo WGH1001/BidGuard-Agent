@@ -346,7 +346,7 @@
    "start": 50099,
    "end": 50166,
    "clause_no": "（1）",
-   "kind": "requirement"
+   "kind": "usage_note"
   },
   {
    "mark": "▲",
@@ -354,7 +354,7 @@
    "start": 50194,
    "end": 50286,
    "clause_no": "（1）",
-   "kind": "requirement"
+   "kind": "usage_note"
   },
   {
    "mark": "▲",
