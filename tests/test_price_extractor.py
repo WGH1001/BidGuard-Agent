@@ -246,3 +246,16 @@ def test_price_sandbox_accepts_yuan_variant():
     r = PriceSandbox(bid_total='1286500.00',
                      bid_total_upper='壹佰贰拾捌万陆仟伍佰圆整').run()
     assert r == []
+
+
+def test_blank_format_table_lineno_sequence_not_misread():
+    """空白投标格式的表头词+行号序列（1 2 3）严禁被解析成假报价行（亳州语料实测坑）。"""
+    text = (
+        "序 号 分项名称 服务费用报价依据 单价（元） 金额（元） 1 2 3 …\n"
+        "数量 单价（元） 金额（元） 1 2 3\n"
+        "备注 1 2 3\n"
+        "证书有效期 1 2 3\n"
+    )
+    res = extract_price_from_text(text)
+    assert res['items'] == []
+    assert res['status'] == 'NEED_MANUAL'

@@ -394,6 +394,16 @@ def _extract_from_docx_tables(doc) -> dict:
     }
 
 
+# 空白格式表防线：PDF 展平文本会把空白投标格式的表头词与行号序列
+# （"…单价（元） 金额（元） 1 2 3…"）拼成假报价行，行号被金额格式化成
+# "2.00"/"3.00" 等原文中不存在的值。分项名称恰为列头词的一律不是真实报价行。
+_HEADER_NAME_BLACKLIST = frozenset({
+    '金额（元）', '金额(元)', '单价（元）', '单价(元)', '数量', '备注',
+    '证书有效期', '服务费用报价依据', '分项名称', '证书名称', '发证单位',
+    '证书等级', '从事专业', '技术参数', '响应情况', '投标文件响应部分',
+})
+
+
 def extract_price_from_text(text: str) -> dict:
     """从纯文本（或 PDF 解析出的文本行）提取报价要素。"""
     price_cap = extract_price_cap(text)
@@ -433,6 +443,8 @@ def extract_price_from_text(text: str) -> dict:
         for m in line_item_re.finditer(text):
             name = m.group(1).strip()
             if _SUMMARY_ROW_RE.match(name):
+                continue
+            if any(k in name for k in _HEADER_NAME_BLACKLIST):
                 continue
             qty = _parse_qty_str(m.group(2))
             u_p = _parse_money_str(m.group(3))

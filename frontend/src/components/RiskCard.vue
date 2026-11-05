@@ -174,6 +174,7 @@ async function submitFeedback(item: BidFindingOut, fb: FeedbackType): Promise<vo
           <span class="sq-label">原文逐字溯源摘录：</span>
           <span class="sq-text">“{{ item.quote || item.bid_quote }}”</span>
           <span v-if="item.quote_verified" class="verified-tick">✓ 已通过原文溯源</span>
+          <span v-else class="unverified-tick">未经溯源校验（规则引擎计算类风险）</span>
         </div>
 
         <div v-if="item.suggestion" class="fc-suggestion">
@@ -409,6 +410,10 @@ async function submitFeedback(item: BidFindingOut, fb: FeedbackType): Promise<vo
   color: var(--txt-strong);
 }
 
+.unverified-tick {
+  color: var(--color-text-tertiary, #888780);
+  font-size: 12px;
+}
 .verified-tick {
   margin-left: 8px;
   font-size: 11px;

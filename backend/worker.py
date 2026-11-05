@@ -272,8 +272,10 @@ class BidTaskWorker:
                         severity=str(f2_item.get('severity') or 'error'),
                         category='报价算术核验',
                         clause_no='开标一览表/分项报价表',
-                        quote=str(f2_item.get('actual') or ''),
-                        quote_verified=True,
+                        # F2 是整表算术核验：actual 是解析数值而非原文摘录，
+                        # 严禁伪装成 quote 并盖"已通过原文溯源"章（铁律 4）
+                        quote=None,
+                        quote_verified=False,
                         message=str(f2_item.get('message') or '报价算术不一致'),
                         suggestion='请核对分项单价×数量、合计及大小写金额使之完全一致',
                         consequence='veto',
@@ -291,9 +293,10 @@ class BidTaskWorker:
                         severity=str(f3_item.get('severity') or 'error'),
                         category='证照效期与串名扫描',
                         clause_no='资格证明文件',
-                        quote=str(f3_item.get('quote') or ''),
+                        quote=str(f3_item.get('quote') or '') or None,
                         quote_offset=f3_item.get('offset'),
-                        quote_verified=True,
+                        # F3 为规则引擎产出，摘录未经 verify_quote 校验，不得盖溯源章
+                        quote_verified=False,
                         message=str(f3_item.get('message') or ''),
                         suggestion='请替换有效期内证照或清理外部项目单位名称',
                         consequence='veto' if f3_item.get('severity') == 'error' else 'deduction',
