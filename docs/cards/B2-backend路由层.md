@@ -42,10 +42,12 @@
 3. **降级优先**：LLM client 按"用户自定义配置 → 全局 env 配置 → None（0 Token 确定性降级）"三级获取；任何一层失败不得 500，必须走降级并在响应标注 llm_status。
 4. **SSE 纪律**：按 `INTERFACE.md §3.3` 三种事件；任务在后台线程跑，客户端断连不中断；docx 页码输出 null 不编造。
 5. **F1 降级特例**：`extract_tender_with_llm` 的 `client=None` 是"自动加载全局网关"而非 0 Token 降级（未配 Key 会抛 RuntimeError，见 `INTERFACE.md §1` 开头分列声明）——/api/extract 与流水线在无模型降级模式下必须**显式直调 `build_review_checklist()`** 确定性层，严禁触发 tender_llm 的隐式联网加载。
-6. **redline 回写适配**：`inject_word_comments` / `inject_pdf_highlights` 按对象属性访问 finding（`getattr(finding,'quote')`），且认的是老契约字段（severity 取 high/medium/low、需 rule_name/legal_basis）——调用前必须把查库结果**逐条构造轻量适配对象**（severity 枚举映射 error→high / warning→medium / info→low，detail_json 补 rule_name/legal_basis），**严禁裸传 dict**（不会报错而是静默取空、全部退化为"全篇/低风险"），也不建议裸传 ORM 对象（枚举与字段错位）。
-7. 金额 Decimal：price_cap 等金额用 `Numeric`/`Decimal` 传递，路由层禁 float 运算。
-8. **不动别人的东西**：不修改 core/ 任何文件、不修改 backend/models.py / database.py / auth.py 的既有签名（发现契约冲突停下来报错，不要自行改契约）；不建 frontend/。
-9. 库模块静默、`encoding='utf-8'`、PowerShell 5.1 命令逐行执行。
+6. **redline 回写适配**：`inject_word_comments` / `inject_pdf_highlights` 按对象属性访问 finding（`getattr(finding,'quote')` 等，详见 `INTERFACE.md §1.8`）。BidFinding ORM 已内置 `.rule_name` / `.legal_basis` 只读属性可直接用；但 **severity 枚举必须先映射**（BidFinding 的 error/warning/info → redline 认的 high/medium/low），逐条包装成含全部所需属性的轻量对象再传入。**严禁裸传 dict**（不会报错而是静默取空、全部退化为"全篇/低风险"）。
+7. **测试 mock docx 构造纪律**（B1 已验证的既有模式，照抄）：`Document()` 逐段 `add_paragraph` 后 `tempfile.mkstemp(suffix='.docx')` 保存；**★行之间必须插非标记中性行**（如"上述为运行环境基线要求。"），否则连续 ★ 行会被解析层合并成一条记录；投标书段落须含与招标 ★ 条款同文的关键句以构造响应命中。
+8. 金额 Decimal：price_cap 等金额用 `Numeric`/`Decimal` 传递，路由层禁 float 运算。
+9. **不动别人的东西**：不修改 core/ 任何文件、不修改 backend/models.py / database.py / auth.py / utils/crypto.py（B1 产物，只读复用；发现契约冲突停下来报错，不要自行改契约）；不建 frontend/。
+10. 库模块静默、`encoding='utf-8'`、PowerShell 5.1 命令逐行执行。
+11. **core 调用只认契约**：执行环境读不到 core/ 源码，一切入口签名与返回结构以 `INTERFACE.md §1` 为准，严禁凭想象补参数或字段。
 
 ## 5. 验收标准（一卡一验，全绿入库）
 
@@ -59,15 +61,15 @@
 2. 全量 `pytest tests/ -q` 零回归（基线 ≥ B1 完成后总数）。
 3. commit message 首行：`feat(B2): backend routers - 10 API groups + SSE pipeline + main assembly`。
 
-## 6. 本卡涉及文件清单（实现前先逐个读取原文）
+## 6. 本卡涉及文件清单（实现前先逐个读取原文，执行环境以随卡附件为准）
 
 ```text
-INTERFACE.md                        # 契约全文（必读）
-backend/main.py                     # 重写
-backend/database.py / models.py / auth.py   # B1 产物，只读复用（禁止改签名）
-backend/utils/crypto.py             # 只读复用
-E:\agent\Contract-Review-Agent\backend\schemas.py   # 蓝本（只读参考）
-E:\agent\Contract-Review-Agent\backend\routers\     # 蓝本（只读参考）
-E:\agent\Contract-Review-Agent\backend\worker.py / cache.py / pathing.py   # 蓝本（只读参考）
-core/ 各模块                        # 按需自行读取对应源码看返回结构细节，禁止修改
+INTERFACE.md                              # 契约全文（必读，§1 签名/§2 表/§3 横切约定）
+backend/main.py                           # 重写（当前 2 行空壳）
+backend/database.py / models.py / auth.py # B1 产物，只读复用（禁止改签名）
+backend/utils/crypto.py                   # 只读复用
+蓝本_schemas.py / 蓝本_main.py / 蓝本_worker.py            # 老项目蓝本（只读参考）
+蓝本路由_auth / dashboard / tasks / qa / qa_sessions /    # 老项目蓝本（只读参考，
+rules / reports / model_config / audit）                    # BidGuard 无 knowledge/diff，已剔除）
+core/ 各模块                              # 读不到源码，一律按 INTERFACE.md §1 契约调用，禁止修改
 ```

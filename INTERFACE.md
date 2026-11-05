@@ -127,8 +127,14 @@ ask_bid_expert(tender_path: str | Path, bid_path: str | Path, question: str,
 parse_document(file_path: str) -> ParsedDoc          # .text / .source_type / .pages
 
 # core/redline.py —— 原位标红批注（交付中心 ZIP 用）
-inject_word_comments(src_docx_path: str, findings: list, ...)   # 签名详见源码 docstring
-inject_pdf_highlights(src_pdf_path: str, findings: list, ...)
+inject_word_comments(src_docx_path: str, findings: list,
+                     out_docx_path: str = None, author: str = 'AI法务初审员') -> bytes
+inject_pdf_highlights(src_pdf_path: str, findings: list,
+                      out_pdf_path: str = None, author: str = 'AI法务初审员') -> bytes
+# 两个函数均按对象属性访问 finding（getattr(finding,'quote') 等），认老契约字段：
+# severity(high/medium/low)、rule_name、message、suggestion、legal_basis、clause_no、quote。
+# BidFinding ORM 已提供 .rule_name/.legal_basis 只读属性；severity 枚举映射
+# error→high / warning→medium / info→low 由调用方完成（详见 B2 卡铁律）。
 ```
 
 ### 1.9 模型网关（含用户级自定义 Key）
