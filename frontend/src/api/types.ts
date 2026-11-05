@@ -484,7 +484,8 @@ export interface SSEProgressFrame {
 
 /**
  * FRONTEND.md 铁律：docx 页码恒为 null，仅 PDF 有真实页码。
- * 有页码显示 "第 X 页"，page 为 null 时一律显示 "字符偏移 @N"。
+ * 有页码显示 "第 X 页"；无页码但有字符偏移显示 "字符偏移 @N"；
+ * 两者皆无（如 F2 报价整表算术核验、无定位的全篇性风险）显示 "—"，严禁显示假偏移 @0。
  */
 export function formatPageOrOffset(page?: number | null, offset?: number | null): string {
   if (typeof page === 'number' && page > 0) {
@@ -493,7 +494,7 @@ export function formatPageOrOffset(page?: number | null, offset?: number | null)
   if (typeof offset === 'number' && offset >= 0) {
     return `字符偏移 @${offset}`
   }
-  return '字符偏移 @0'
+  return '—'
 }
 
 /**

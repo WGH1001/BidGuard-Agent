@@ -12,3 +12,10 @@ data/uploads/
 frontend/node_modules/
 frontend/dist/
 .workbuddy/
+output/
+data/*.db-shm
+data/*.db-wal
+C1派发附件/
+C1派发附件_第二轮/
+C1蓝本汇总.txt
+C2蓝本汇总.txt
