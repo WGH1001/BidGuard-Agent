@@ -1,0 +1,448 @@
+# -*- coding: utf-8 -*-
+"""B2 · 进程内线程池任务执行器 + SSE 进度广播总线 + 三级 LLM 客户端降级解析器。
+
+严格遵循 INTERFACE.md §1 与 §3.3：
+1. 状态机五态推进：created -> extracting -> checking -> grading -> delivered（异常转 failed）；
+2. SSE 三种标准事件：event: progress / event: done / event: error；
+3. 三级 LLM 客户端获取：用户自定义配置 -> 全局 env 配置 -> None（0 Token 确定性降级）；
+4. F1 降级特例（铁律 5）：无模型降级模式下显式直调 build_review_checklist()，绝不调 extract_tender_with_llm。
+"""
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import queue
+import threading
+import time
+from typing import Any, Optional
+
+from sqlalchemy.orm import Session
+
+from backend.database import PROJECT_ROOT, get_session_factory
+from backend.models import BidCheckTask, BidFinding, BidRuleConfig, UserModelConfig
+from backend.utils.crypto import decrypt_api_key
+from core.llm_gateway import build_client_from_user_config, get_llm_client
+from core.parser import parse_document
+from core.price_extractor import run_price_check
+from core.qualification_scanner import scan_qualifications
+from core.response_checker import run_response_check
+from core.tender_extractor import build_review_checklist
+from core.tender_llm import extract_tender_with_llm
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def resolve_project_path(rel_or_abs: Optional[str | Path]) -> Path:
+    """将数据库存储的相对路径还原为基于 PROJECT_ROOT 的绝对路径。"""
+    if not rel_or_abs:
+        return Path('')
+    p = Path(str(rel_or_abs))
+    if p.is_absolute():
+        return p
+    return (PROJECT_ROOT / p).resolve()
+
+
+def resolve_effective_llm_client(session: Session, user_id: Optional[int] = None) -> tuple[Any, str]:
+    """按'用户自定义配置 -> 全局 env 配置 -> None（0 Token 确定性降级）'三级获取 LLM 客户端。
+
+    Returns:
+        (client_or_none, llm_status_str)  # llm_status_str: 'done' | 'skipped'
+    """
+    # Force 0-Token fallback when BidGuard is running in offline test mode
+    if os.environ.get('BIDGUARD_FORCE_ZERO_TOKEN', '').strip() == '1':
+        return None, 'skipped'
+
+    # 1. 用户级自定义配置
+    if user_id is not None:
+        try:
+            cfg = session.query(UserModelConfig).filter_by(user_id=int(user_id)).first()
+            if cfg is not None and cfg.base_url and cfg.api_key_encrypted and cfg.model_flash:
+                plain_key = decrypt_api_key(cfg.api_key_encrypted)
+                client = build_client_from_user_config(
+                    base_url=cfg.base_url,
+                    api_key=plain_key,
+                    model_flash=cfg.model_flash,
+                    model_flagship=cfg.model_flagship or cfg.model_flash,
+                    supports_reasoning_effort=bool(cfg.supports_reasoning_effort),
+                )
+                return client, 'done'
+        except Exception:
+            pass
+
+    # 2. 全局 env 配置（仅当真实配置了非占位符 Key 时启用，否则安全降级为 None）
+    zhipu_key = os.environ.get('ZHIPU_API_KEY', '').strip()
+    priv_key = os.environ.get('PRIVATE_API_KEY', '').strip()
+    has_valid_env_key = (
+        (zhipu_key and zhipu_key != 'your_api_key_here')
+        or bool(priv_key)
+    )
+    if has_valid_env_key:
+        try:
+            env_name = os.environ.get('MODEL_ENV', '').strip() or None
+            client = get_llm_client(env_name)
+            return client, 'done'
+        except Exception:
+            pass
+
+    # 3. 0 Token 确定性降级
+    return None, 'skipped'
+
+
+class SSEBroadcaster:
+    """线程安全 SSE 进度广播总线（按 INTERFACE.md §3.3 推送 progress / done / error 事件）。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._subscribers: dict[int, set[queue.Queue]] = {}
+        self._latest: dict[int, tuple[str, dict[str, Any]]] = {}
+
+    def subscribe(self, task_id: int) -> queue.Queue:
+        q: queue.Queue = queue.Queue(maxsize=128)
+        tid = int(task_id)
+        with self._lock:
+            self._subscribers.setdefault(tid, set()).add(q)
+        return q
+
+    def unsubscribe(self, task_id: int, q: queue.Queue) -> None:
+        tid = int(task_id)
+        with self._lock:
+            subs = self._subscribers.get(tid)
+            if subs:
+                subs.discard(q)
+                if not subs:
+                    self._subscribers.pop(tid, None)
+
+    def publish(self, task_id: int, event_name: str, data: dict[str, Any]) -> None:
+        tid = int(task_id)
+        frame = (event_name, dict(data))
+        with self._lock:
+            self._latest[tid] = frame
+            subs = list(self._subscribers.get(tid, ()))
+        for q in subs:
+            try:
+                q.put_nowait(frame)
+            except queue.Full:
+                pass
+
+    def latest(self, task_id: int) -> Optional[tuple[str, dict[str, Any]]]:
+        with self._lock:
+            return self._latest.get(int(task_id))
+
+
+class BidTaskWorker:
+    """后台线程池核验流水线执行器。"""
+
+    def __init__(self, session_factory=None, max_workers: int = 4) -> None:
+        self.session_factory = session_factory or get_session_factory()
+        self.broadcaster = SSEBroadcaster()
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='bidguard_worker')
+        self._lock = threading.Condition(threading.Lock())
+        self._in_flight: set[int] = set()
+        self._shutdown = False
+
+    def submit_check_task(self, task_id: int, sync: bool = False) -> None:
+        tid = int(task_id)
+        if sync:
+            self._run_pipeline(tid)
+            return
+        with self._lock:
+            if self._shutdown or tid in self._in_flight:
+                return
+            self._in_flight.add(tid)
+        try:
+            self._executor.submit(self._run_pipeline, tid)
+        except Exception:
+            with self._lock:
+                self._in_flight.discard(tid)
+                self._lock.notify_all()
+            raise
+
+    def _emit_stage(self, session: Session, task: BidCheckTask, status: str, progress: int, detail: str) -> None:
+        task.status = status
+        task.progress = int(progress)
+        task.stage_detail = detail
+        task.updated_at = _utc_now()
+        session.commit()
+        self.broadcaster.publish(
+            task.id,
+            'progress',
+            {
+                'task_id': task.id,
+                'status': status,
+                'progress': int(progress),
+                'stage_detail': detail,
+            },
+        )
+
+    def _run_pipeline(self, task_id: int) -> None:
+        session: Session = self.session_factory()
+        try:
+            task = session.query(BidCheckTask).filter_by(id=task_id).first()
+            if task is None:
+                return
+
+            tender_abs = resolve_project_path(task.tender_path)
+            bid_abs = resolve_project_path(task.bid_path)
+            if not tender_abs.is_file() or not bid_abs.is_file():
+                raise FileNotFoundError("招标文件或投标文件不存在，无法执行体检流水线")
+
+            client, llm_status = resolve_effective_llm_client(session, task.user_id)
+
+            # 读取任务快照配置或租户默认 BidRuleConfig
+            cfg_snap = dict(task.config_json or {})
+            rule_cfg = (
+                session.query(BidRuleConfig)
+                .filter_by(tenant_id=task.tenant_id, is_default=True)
+                .first()
+            )
+            open_date_str = str(
+                cfg_snap.get('open_date')
+                or (rule_cfg.open_date.isoformat() if (rule_cfg and rule_cfg.open_date) else '2026-11-05')
+            )
+            social_months = list(
+                cfg_snap.get('required_social_months')
+                or (rule_cfg.required_social_months_json if rule_cfg else None)
+                or []
+            )
+            buyer_name = str(
+                cfg_snap.get('buyer_name')
+                or (rule_cfg.buyer_name if rule_cfg else '')
+                or ''
+            )
+            forbidden_names = list(cfg_snap.get('forbidden_names') or [])
+            custom_redlines = list(
+                cfg_snap.get('custom_redlines')
+                or (rule_cfg.custom_redlines_json if rule_cfg else None)
+                or []
+            )
+
+            # ── 阶段 1：extracting（F1 招标红线与 ★/▲ 条款提取）──
+            self._emit_stage(session, task, 'extracting', 20, 'F1 正在提取招标文件废标红线与 ★/▲ 实质性条款')
+            if client is not None:
+                try:
+                    f1_res = extract_tender_with_llm(str(tender_abs), client=client)
+                except Exception:
+                    f1_res = build_review_checklist(str(tender_abs))
+                    llm_status = 'skipped'
+            else:
+                # 铁律 5：无模型降级模式显式直调确定性层 build_review_checklist
+                f1_res = build_review_checklist(str(tender_abs))
+
+            marked_clauses = list(f1_res.get('marked_clauses') or [])
+            invalid_bid_clauses = list(f1_res.get('invalid_bid_clauses') or [])
+            f1_requirements = marked_clauses + invalid_bid_clauses
+
+            # ── 阶段 2：checking（F2 报价沙盒 + F3 证照/串名 + F4 双书逐条响应核验）──
+            self._emit_stage(session, task, 'checking', 55, 'F2/F3/F4 正在并行执行报价算术、证照效期与 ★ 条款逐条核验')
+
+            f2_res = run_price_check(bid_abs, tender_path=tender_abs)
+            bid_parsed = parse_document(str(bid_abs))
+            f3_findings = scan_qualifications(
+                text=bid_parsed.text,
+                open_date=open_date_str,
+                required_social_months=social_months,
+                forbidden_names=forbidden_names,
+                target_buyer=buyer_name,
+            )
+            f4_res = run_response_check(
+                tender_path=tender_abs,
+                bid_path=bid_abs,
+                requirements=f1_requirements,
+                client=client,
+            )
+
+            # ── 阶段 3：grading（风险分级汇总与自定义红线扫描）──
+            self._emit_stage(session, task, 'grading', 85, '正在汇总一票否决废标项与扣分项分级')
+
+            session.query(BidFinding).filter_by(task_id=task.id).delete()
+            new_findings: list[BidFinding] = []
+
+            # (a) F2 报价算术发现
+            for f2_item in f2_res.get('findings') or []:
+                new_findings.append(
+                    BidFinding(
+                        task_id=task.id,
+                        source_module='F2',
+                        code=str(f2_item.get('code') or 'PRICE_ERROR'),
+                        severity=str(f2_item.get('severity') or 'error'),
+                        category='报价算术核验',
+                        clause_no='开标一览表/分项报价表',
+                        quote=str(f2_item.get('actual') or ''),
+                        quote_verified=True,
+                        message=str(f2_item.get('message') or '报价算术不一致'),
+                        suggestion='请核对分项单价×数量、合计及大小写金额使之完全一致',
+                        consequence='veto',
+                        detail_json=f2_item,
+                    )
+                )
+
+            # (b) F3 证照效期与串名穿帮发现
+            for f3_item in f3_findings or []:
+                new_findings.append(
+                    BidFinding(
+                        task_id=task.id,
+                        source_module='F3',
+                        code=str(f3_item.get('code') or 'QUAL_ERROR'),
+                        severity=str(f3_item.get('severity') or 'error'),
+                        category='证照效期与串名扫描',
+                        clause_no='资格证明文件',
+                        quote=str(f3_item.get('quote') or ''),
+                        quote_offset=f3_item.get('offset'),
+                        quote_verified=True,
+                        message=str(f3_item.get('message') or ''),
+                        suggestion='请替换有效期内证照或清理外部项目单位名称',
+                        consequence='veto' if f3_item.get('severity') == 'error' else 'deduction',
+                        detail_json=f3_item,
+                    )
+                )
+
+            # (c) F4 ★条款响应核验与标书前后矛盾发现
+            for f4_item in f4_res.get('findings') or []:
+                code_str = str(f4_item.get('code') or 'MISSING_RESPONSE')
+                new_findings.append(
+                    BidFinding(
+                        task_id=task.id,
+                        source_module='F4',
+                        code=code_str,
+                        severity=str(f4_item.get('severity') or 'error'),
+                        category='★条款响应核验' if code_str == 'MISSING_RESPONSE' else '前后承诺矛盾检测',
+                        clause_no=str(f4_item.get('clause_no') or f4_item.get('mark') or ''),
+                        quote=str(f4_item.get('tender_quote') or ''),
+                        bid_quote=str(f4_item.get('bid_quote') or ''),
+                        quote_offset=f4_item.get('bid_start') if f4_item.get('bid_start') is not None else f4_item.get('tender_start'),
+                        quote_verified=bool(f4_item.get('quote_verified', True)),
+                        page=f4_item.get('bid_page') if f4_item.get('bid_page') is not None else f4_item.get('tender_page'),
+                        message=str(f4_item.get('message') or ''),
+                        suggestion='请在投标书中补齐对该 ★ 条款的明确正面响应与证明材料，并统一前后章节承诺参数',
+                        consequence='veto',
+                        detail_json=f4_item,
+                    )
+                )
+
+            # (d) 部门自定义关键词红线扫描
+            for cr in custom_redlines:
+                kw = str((cr.get('keyword') if isinstance(cr, dict) else '') or '').strip()
+                if kw and kw in bid_parsed.text:
+                    pos = bid_parsed.text.find(kw)
+                    lo = max(0, pos - 25)
+                    hi = min(len(bid_parsed.text), pos + len(kw) + 25)
+                    new_findings.append(
+                        BidFinding(
+                            task_id=task.id,
+                            source_module='F3',
+                            code='CUSTOM_REDLINE_HIT',
+                            severity=str(cr.get('severity') or 'error'),
+                            category='部门自定义红线',
+                            clause_no='全文扫描',
+                            quote=bid_parsed.text[lo:hi],
+                            quote_offset=pos,
+                            quote_verified=True,
+                            message=f"命中部门自定义禁用红线词：「{kw}」",
+                            suggestion=f"请排查并清理标书中出现的禁用词「{kw}」",
+                            consequence=str(cr.get('consequence') or 'veto'),
+                            detail_json=cr,
+                        )
+                    )
+
+            session.add_all(new_findings)
+            session.flush()
+
+            err_cnt = sum(1 for f in new_findings if f.severity == 'error')
+            warn_cnt = sum(1 for f in new_findings if f.severity == 'warning')
+            align_sum = f4_res.get('alignment_summary') or {}
+
+            stats_payload = {
+                'total_findings': len(new_findings),
+                'error_count': err_cnt,
+                'warning_count': warn_cnt,
+                'total_requirements': int(align_sum.get('total_requirements', 0)),
+                'aligned_hits': int(align_sum.get('aligned_hits', 0)),
+                'hit_rate': float(align_sum.get('hit_rate', 1.0)),
+                'price_status': str(f2_res.get('status') or 'NEED_MANUAL'),
+                'price_cap': f2_res.get('price_cap'),
+                'bid_total': f2_res.get('bid_total'),
+                'llm_status': llm_status,
+            }
+
+            # ── 阶段 4：delivered（核验完成）──
+            task.stats_json = stats_payload
+            task.llm_usage_json = {'llm_status': llm_status}
+            task.status = 'delivered'
+            task.progress = 100
+            task.stage_detail = f"体检完成：检出 {err_cnt} 处一票否决项、{warn_cnt} 处预警项"
+            task.delivered_at = _utc_now()
+            task.updated_at = _utc_now()
+            session.commit()
+
+            self.broadcaster.publish(
+                task.id,
+                'done',
+                {
+                    'task_id': task.id,
+                    'status': 'delivered',
+                    'stats': stats_payload,
+                },
+            )
+        except Exception as exc:
+            session.rollback()
+            err_msg = f"{type(exc).__name__}: {exc}"
+            try:
+                task = session.query(BidCheckTask).filter_by(id=task_id).first()
+                if task is not None:
+                    task.status = 'failed'
+                    task.error_msg = err_msg
+                    task.stage_detail = f"核验异常中断：{err_msg}"
+                    task.updated_at = _utc_now()
+                    session.commit()
+            except Exception:
+                session.rollback()
+            self.broadcaster.publish(
+                task_id,
+                'error',
+                {
+                    'task_id': task_id,
+                    'status': 'failed',
+                    'error_msg': err_msg,
+                },
+            )
+        finally:
+            session.close()
+            with self._lock:
+                self._in_flight.discard(task_id)
+                self._lock.notify_all()
+
+    def wait_all(self, timeout: float = 30.0) -> bool:
+        deadline = time.monotonic() + float(timeout)
+        with self._lock:
+            while self._in_flight:
+                rem = deadline - time.monotonic()
+                if rem <= 0:
+                    return False
+                self._lock.wait(timeout=min(0.1, rem))
+            return True
+
+    def shutdown(self, wait: bool = False) -> None:
+        with self._lock:
+            self._shutdown = True
+        if wait:
+            self.wait_all(timeout=15.0)
+        self._executor.shutdown(wait=wait)
+
+
+_worker_instance: Optional[BidTaskWorker] = None
+_worker_lock = threading.Lock()
+
+
+def get_worker(session_factory=None) -> BidTaskWorker:
+    global _worker_instance
+    with _worker_lock:
+        if _worker_instance is None:
+            _worker_instance = BidTaskWorker(session_factory=session_factory)
+        elif session_factory is not None:
+            _worker_instance.session_factory = session_factory
+        return _worker_instance
