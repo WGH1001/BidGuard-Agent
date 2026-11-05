@@ -33,6 +33,31 @@ import type {
   UserProfileOut,
 } from './types'
 
+export const ALLOWED_DOC_EXTS = ['.docx', '.pdf', '.txt'] as const
+export const MAX_UPLOAD_SIZE_BYTES = 100 * 1024 * 1024 // 100MB
+
+/**
+ * 上传文件前端预校验（铁律：仅允许 .docx/.pdf/.txt 且大小 <= 100MB）
+ */
+export function validateUploadFile(file: File): { valid: boolean; message: string } {
+  const name = (file.name || '').trim()
+  const dotIdx = name.lastIndexOf('.')
+  const ext = dotIdx >= 0 ? name.slice(dotIdx).toLowerCase() : ''
+  if (!ALLOWED_DOC_EXTS.includes(ext as (typeof ALLOWED_DOC_EXTS)[number])) {
+    return {
+      valid: false,
+      message: `不支持的文件格式「${ext || '未知'}」，仅允许上传 .docx / .pdf / .txt 文件`,
+    }
+  }
+  if (file.size <= 0) {
+    return { valid: false, message: `文件「${name}」内容为空` }
+  }
+  if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+    return { valid: false, message: `文件「${name}」超过 100MB 大小上限` }
+  }
+  return { valid: true, message: '' }
+}
+
 export const authApi = {
   health(): Promise<HealthOut> {
     return get<HealthOut>('/auth/health')
@@ -55,8 +80,28 @@ export const dashboardApi = {
 }
 
 export const checksApi = {
-  create(formData: FormData): Promise<BidTaskOut> {
-    return post<BidTaskOut>('/checks', formData, {
+  create(payload: {
+    tenderFile: File
+    bidFile: File
+    title?: string
+    openDate?: string
+    buyerName?: string
+    autoRun?: boolean
+  }): Promise<BidTaskOut> {
+    const fd = new FormData()
+    fd.append('tender_file', payload.tenderFile, payload.tenderFile.name)
+    fd.append('bid_file', payload.bidFile, payload.bidFile.name)
+    if (payload.title && payload.title.trim()) {
+      fd.append('title', payload.title.trim())
+    }
+    if (payload.openDate && payload.openDate.trim()) {
+      fd.append('open_date', payload.openDate.trim())
+    }
+    if (payload.buyerName && payload.buyerName.trim()) {
+      fd.append('buyer_name', payload.buyerName.trim())
+    }
+    fd.append('auto_run', payload.autoRun ? 'true' : 'false')
+    return post<BidTaskOut>('/checks', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
   },
@@ -95,12 +140,15 @@ export const checksApi = {
   remove(taskId: number): Promise<OkResponse> {
     return del<OkResponse>(`/checks/${taskId}`)
   },
+  downloadStoredFile(fileUrl: string, fallbackName: string): Promise<string> {
+    return downloadFromApi(fileUrl, fallbackName)
+  },
 }
 
 export const extractApi = {
   extract(file: File): Promise<ExtractChecklistOut> {
     const fd = new FormData()
-    fd.append('file', file)
+    fd.append('file', file, file.name)
     return post<ExtractChecklistOut>('/extract', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
@@ -111,7 +159,10 @@ export const deviationApi = {
   generate(taskId: number): Promise<DeviationExportOut> {
     return post<DeviationExportOut>(`/deviation/${taskId}`)
   },
-  download(taskId: number, fallbackName = `偏离表_${taskId}.docx`): Promise<string> {
+  downloadByUrl(downloadUrl: string, fallbackName = '技术与商务偏离表.docx'): Promise<string> {
+    return downloadFromApi(downloadUrl, fallbackName)
+  },
+  download(taskId: number, fallbackName = `${taskId}_偏离表.docx`): Promise<string> {
     return downloadFromApi(`/deviation/${taskId}/download`, fallbackName)
   },
 }
@@ -119,8 +170,10 @@ export const deviationApi = {
 export const radarApi = {
   scan(tenderFile: File, title?: string): Promise<RadarScanOut> {
     const fd = new FormData()
-    fd.append('tender_file', tenderFile)
-    if (title) fd.append('title', title)
+    fd.append('tender_file', tenderFile, tenderFile.name)
+    if (title && title.trim()) {
+      fd.append('title', title.trim())
+    }
     return post<RadarScanOut>('/radar', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
     })

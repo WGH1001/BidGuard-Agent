@@ -108,9 +108,9 @@ async function loadDashboard(): Promise<void> {
   }
 }
 
-async function handleExportDeviation(task: BidTaskOut): Promise<void> {
+async function handleExportDeviation(task: { id?: number | string; title?: string }): Promise<void> {
   try {
-    await deviationApi.download(task.id, `${task.title}_偏离表.docx`)
+    await deviationApi.download(Number(task.id), `${task.title ?? '体检任务'}_偏离表.docx`)
     ElMessage.success('已触发《技术与商务偏离表.docx》下载')
   } catch {
     // 拦截器已提示

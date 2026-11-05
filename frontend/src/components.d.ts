@@ -11,15 +11,29 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    CheckTaskList: typeof import('./components/CheckTaskList.vue')['default']
     ElButton: typeof import('element-plus/es/components/button/index')['ElButton']
+    ElCheckbox: typeof import('element-plus/es/components/checkbox/index')['ElCheckbox']
+    ElDialog: typeof import('element-plus/es/components/dialog/index')['ElDialog']
     ElEmpty: typeof import('element-plus/es/components/empty/index')['ElEmpty']
     ElForm: typeof import('element-plus/es/components/form/index')['ElForm']
     ElFormItem: typeof import('element-plus/es/components/form/index')['ElFormItem']
     ElInput: typeof import('element-plus/es/components/input/index')['ElInput']
+    ElOption: typeof import('element-plus/es/components/select/index')['ElOption']
+    ElPagination: typeof import('element-plus/es/components/pagination/index')['ElPagination']
+    ElProgress: typeof import('element-plus/es/components/progress/index')['ElProgress']
+    ElRadioButton: typeof import('element-plus/es/components/radio/index')['ElRadioButton']
+    ElRadioGroup: typeof import('element-plus/es/components/radio/index')['ElRadioGroup']
+    ElSelect: typeof import('element-plus/es/components/select/index')['ElSelect']
     ElSwitch: typeof import('element-plus/es/components/switch/index')['ElSwitch']
     ElTable: typeof import('element-plus/es/components/table/index')['ElTable']
     ElTableColumn: typeof import('element-plus/es/components/table/index')['ElTableColumn']
+    ElTabPane: typeof import('element-plus/es/components/tabs/index')['ElTabPane']
+    ElTabs: typeof import('element-plus/es/components/tabs/index')['ElTabs']
+    PriceManualDialog: typeof import('./components/PriceManualDialog.vue')['default']
+    RiskCard: typeof import('./components/RiskCard.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    SseProgress: typeof import('./components/SseProgress.vue')['default']
   }
 }

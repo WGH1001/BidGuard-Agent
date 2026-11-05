@@ -3,6 +3,10 @@ import { useAuthStore } from '@/stores/auth'
 
 import LoginView from '@/views/LoginView.vue'
 import DashboardView from '@/views/DashboardView.vue'
+import ExtractView from '@/views/ExtractView.vue'
+import CheckDetailView from '@/views/CheckDetailView.vue'
+import DeviationView from '@/views/DeviationView.vue'
+import RadarView from '@/views/RadarView.vue'
 import ChangePasswordView from '@/views/ChangePasswordView.vue'
 import ModelSettingsView from '@/views/ModelSettingsView.vue'
 import PlaceholderView from '@/views/PlaceholderView.vue'
@@ -27,41 +31,37 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/extract',
     name: 'extract',
-    component: PlaceholderView,
+    component: ExtractView,
     meta: {
       title: 'F1 招标红线与★条款提取',
       moduleCode: 'F1',
-      desc: '上传招标文件结构化拆解资格项、符合项、★/▲强制参数与评分细则表（C2 卡接入）',
     },
   },
   {
     path: '/checks',
     name: 'checks',
-    component: PlaceholderView,
+    component: CheckDetailView,
     meta: {
       title: '封标前防废标体检台',
-      moduleCode: 'F2/F3/F4',
-      desc: '双书上传、6 步流水线 SSE 实时核验、报价人工回填与风险项分级处置（C2 卡接入）',
+      moduleCode: 'F2-F4',
     },
   },
   {
     path: '/deviation',
     name: 'deviation',
-    component: PlaceholderView,
+    component: DeviationView,
     meta: {
       title: 'F5 偏离表一键生成',
       moduleCode: 'F5',
-      desc: '招标要求与我方投标响应逐条对齐预览，一键导出标准六列 Word 偏离表（C2 卡接入）',
     },
   },
   {
     path: '/radar',
     name: 'radar',
-    component: PlaceholderView,
+    component: RadarView,
     meta: {
       title: 'F6 投前控标雷达',
       moduleCode: 'F6',
-      desc: '立项前扫描招标文件疑似品牌绑定、原厂授权与排他性控标参数（C2 卡接入）',
     },
   },
   {

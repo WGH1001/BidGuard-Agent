@@ -1,0 +1,435 @@
+<script setup lang="ts">
+import { reactive, ref } from 'vue'
+import { ElMessage } from 'element-plus/es/components/message/index'
+import { checksApi, validateUploadFile } from '@/api'
+import type { BidTaskOut } from '@/api/types'
+
+const props = defineProps<{
+  tasks: BidTaskOut[]
+  total: number
+  page: number
+  pageSize: number
+  selectedTaskId: number | null
+  loading: boolean
+}>()
+
+const emit = defineEmits<{
+  (e: 'select', task: BidTaskOut): void
+  (e: 'page-change', page: number): void
+  (e: 'created', task: BidTaskOut, autoRun: boolean): void
+  (e: 'refresh'): void
+}>()
+
+const dialogVisible = ref(false)
+const creating = ref(false)
+const tenderFile = ref<File | null>(null)
+const bidFile = ref<File | null>(null)
+
+const form = reactive({
+  title: '',
+  openDate: '2026-11-05',
+  buyerName: '',
+  autoRun: true,
+})
+
+function statusMeta(st: string): { label: string; cls: string } {
+  const map: Record<string, { label: string; cls: string }> = {
+    created: { label: '待启动', cls: 'info' },
+    extracting: { label: 'F1提取中', cls: 'info' },
+    checking: { label: '双轨核查', cls: 'warning' },
+    grading: { label: '定级汇总', cls: 'warning' },
+    delivered: { label: '已完成', cls: 'ok' },
+    need_manual: { label: '待回填报价', cls: 'warning' },
+    failed: { label: '执行失败', cls: 'error' },
+  }
+  return map[st] || { label: st, cls: 'info' }
+}
+
+function openCreateModal(): void {
+  tenderFile.value = null
+  bidFile.value = null
+  form.title = ''
+  form.openDate = '2026-11-05'
+  form.buyerName = ''
+  form.autoRun = true
+  dialogVisible.value = true
+}
+
+function onSelectTenderFile(ev: Event): void {
+  const input = ev.target as HTMLInputElement
+  const f = input.files?.[0]
+  if (!f) return
+  const v = validateUploadFile(f)
+  if (!v.valid) {
+    ElMessage.warning(v.message)
+    input.value = ''
+    return
+  }
+  tenderFile.value = f
+}
+
+function onSelectBidFile(ev: Event): void {
+  const input = ev.target as HTMLInputElement
+  const f = input.files?.[0]
+  if (!f) return
+  const v = validateUploadFile(f)
+  if (!v.valid) {
+    ElMessage.warning(v.message)
+    input.value = ''
+    return
+  }
+  bidFile.value = f
+  if (!form.title.trim()) {
+    form.title = f.name.replace(/\.[^.]+$/, '')
+  }
+}
+
+async function handleCreateSubmit(): Promise<void> {
+  if (!tenderFile.value) {
+    ElMessage.warning('请先选择招标文件（.docx / .pdf / .txt）')
+    return
+  }
+  if (!bidFile.value) {
+    ElMessage.warning('请先选择我方投标文件（.docx / .pdf / .txt）')
+    return
+  }
+  creating.value = true
+  try {
+    const created = await checksApi.create({
+      tenderFile: tenderFile.value,
+      bidFile: bidFile.value,
+      title: form.title,
+      openDate: form.openDate,
+      buyerName: form.buyerName,
+      autoRun: false,
+    })
+    dialogVisible.value = false
+    ElMessage.success(`防废标体检任务 #${created.id} 创建成功`)
+    emit('created', created, form.autoRun)
+  } finally {
+    creating.value = false
+  }
+}
+
+defineExpose({
+  openCreateModal,
+})
+</script>
+
+<template>
+  <aside class="task-rail bg-panel">
+    <div class="rail-hd">
+      <div>
+        <div class="rail-title">封标体检任务台账</div>
+        <div class="rail-sub">共 {{ props.total }} 个项目</div>
+      </div>
+      <div class="rail-actions">
+        <el-button size="small" @click="emit('refresh')">刷新</el-button>
+        <el-button type="primary" size="small" @click="openCreateModal">+ 新建体检</el-button>
+      </div>
+    </div>
+
+    <div v-loading="props.loading" class="rail-scroll">
+      <div
+        v-for="item in props.tasks"
+        :key="item.id"
+        class="rail-item"
+        :class="{ active: item.id === props.selectedTaskId }"
+        @click="emit('select', item)"
+      >
+        <div class="ri-row1">
+          <span class="ri-id mono-num">#{{ item.id }}</span>
+          <span class="sev-pill" :class="statusMeta(item.status).cls">
+            {{ statusMeta(item.status).label }}
+          </span>
+        </div>
+
+        <div class="ri-title" :title="item.title">{{ item.title }}</div>
+
+        <div class="ri-files">
+          <div>招：{{ item.tender_filename || '—' }}</div>
+          <div>投：{{ item.bid_filename || '—' }}</div>
+        </div>
+
+        <div class="ri-prog-row">
+          <el-progress
+            :percentage="item.progress || 0"
+            :stroke-width="5"
+            :status="item.status === 'failed' ? 'exception' : item.status === 'delivered' ? 'success' : undefined"
+          />
+        </div>
+
+        <div v-if="item.stats_json" class="ri-stats-bar">
+          <span class="stat-chip err">否决 {{ item.stats_json.error_count ?? 0 }}</span>
+          <span class="stat-chip warn">预警 {{ item.stats_json.warning_count ?? 0 }}</span>
+          <span v-if="item.stats_json.price_status === 'NEED_MANUAL'" class="stat-chip manual">
+            待回填报价
+          </span>
+        </div>
+      </div>
+
+      <el-empty
+        v-if="!props.loading && props.tasks.length === 0"
+        description="暂无体检任务，点击上方「+ 新建体检」上传双书"
+        :image-size="64"
+      />
+    </div>
+
+    <div v-if="props.total > props.pageSize" class="rail-pager">
+      <el-pagination
+        small
+        background
+        layout="prev, pager, next"
+        :total="props.total"
+        :page-size="props.pageSize"
+        :current-page="props.page"
+        @current-change="(p: number) => emit('page-change', p)"
+      />
+    </div>
+
+    <!-- 新建防废标体检上传弹窗 -->
+    <el-dialog
+      v-model="dialogVisible"
+      title="新建封标前防废标体检任务"
+      width="560px"
+      :close-on-click-modal="false"
+      destroy-on-close
+    >
+      <div class="create-form">
+        <div class="upload-box">
+          <label class="ub-label">1. 上传招标文件（必传 · 支持 .docx / .pdf / .txt，≤100MB）</label>
+          <input
+            type="file"
+            accept=".docx,.pdf,.txt"
+            class="file-native-input"
+            @change="onSelectTenderFile"
+          />
+          <div v-if="tenderFile" class="file-picked-tag">
+            已选招标文件：<b>{{ tenderFile.name }}</b>
+            <span class="mono-num">({{ (tenderFile.size / 1024).toFixed(1) }} KB)</span>
+          </div>
+        </div>
+
+        <div class="upload-box">
+          <label class="ub-label">2. 上传我方投标文件正本（必传 · 支持 .docx / .pdf / .txt，≤100MB）</label>
+          <input
+            type="file"
+            accept=".docx,.pdf,.txt"
+            class="file-native-input"
+            @change="onSelectBidFile"
+          />
+          <div v-if="bidFile" class="file-picked-tag">
+            已选投标文件：<b>{{ bidFile.name }}</b>
+            <span class="mono-num">({{ (bidFile.size / 1024).toFixed(1) }} KB)</span>
+          </div>
+        </div>
+
+        <el-form label-position="top">
+          <el-form-item label="投标项目名称（可选，留空自动取投标文件名）">
+            <el-input v-model.trim="form.title" placeholder="例如：某省政务云安全态势感知项目" />
+          </el-form-item>
+
+          <div class="two-cols">
+            <el-form-item label="计划开标日期（用于 F3 证照有效期核验）">
+              <el-input v-model.trim="form.openDate" placeholder="YYYY-MM-DD，如 2026-11-05" />
+            </el-form-item>
+
+            <el-form-item label="采购人/招标单位全称（防串名自伤）">
+              <el-input v-model.trim="form.buyerName" placeholder="例如：某省大数据管理中心" />
+            </el-form-item>
+          </div>
+
+          <el-form-item>
+            <el-checkbox v-model="form.autoRun">
+              上传完成后立即启动 F1~F4 防废标核验流水线并连接 SSE 实时进度
+            </el-checkbox>
+          </el-form-item>
+        </el-form>
+      </div>
+
+      <template #footer>
+        <el-button @click="dialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="creating" @click="handleCreateSubmit">
+          创建任务{{ form.autoRun ? '并开始体检' : '' }}
+        </el-button>
+      </template>
+    </el-dialog>
+  </aside>
+</template>
+
+<style scoped>
+.task-rail {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 110px);
+  min-height: 620px;
+  padding: 16px;
+}
+
+.rail-hd {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-line);
+  margin-bottom: 12px;
+}
+
+.rail-title {
+  font-size: 14.5px;
+  font-weight: 900;
+  color: var(--txt-strong);
+}
+
+.rail-sub {
+  font-size: 11.5px;
+  color: var(--txt-muted);
+}
+
+.rail-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.rail-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding-right: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rail-item {
+  padding: 12px 13px;
+  border-radius: 8px;
+  border: 1px solid var(--border-line);
+  background: var(--bg-subtle);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.rail-item:hover {
+  border-color: var(--brand);
+  background: #ffffff;
+}
+
+.rail-item.active {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+  box-shadow: 0 0 0 2px rgba(29, 78, 216, 0.12);
+}
+
+.ri-row1 {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.ri-id {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--txt-muted);
+}
+
+.ri-title {
+  font-size: 13.5px;
+  font-weight: 800;
+  color: var(--txt-strong);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ri-files {
+  font-size: 11.5px;
+  color: var(--txt-sec);
+  line-height: 1.45;
+  margin-bottom: 8px;
+}
+
+.ri-files div {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ri-prog-row {
+  margin-bottom: 8px;
+}
+
+.ri-stats-bar {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.stat-chip {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 4px;
+}
+
+.stat-chip.err {
+  background: var(--sev-error-bg);
+  color: var(--sev-error);
+}
+
+.stat-chip.warn {
+  background: var(--sev-warning-bg);
+  color: var(--sev-warning);
+}
+
+.stat-chip.manual {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.rail-pager {
+  padding-top: 10px;
+  border-top: 1px solid var(--border-line);
+  display: flex;
+  justify-content: center;
+}
+
+.create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.upload-box {
+  padding: 12px 14px;
+  background: var(--bg-subtle);
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+}
+
+.ub-label {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 800;
+  color: var(--txt-strong);
+  margin-bottom: 8px;
+}
+
+.file-native-input {
+  font-size: 12.5px;
+  width: 100%;
+}
+
+.file-picked-tag {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--sev-ok);
+}
+
+.two-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+</style>

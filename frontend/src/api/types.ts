@@ -1,5 +1,6 @@
 /**
- * BidGuard-Agent 前端 TypeScript 类型定义（严格逐字段对齐 FRONTEND.md §2 与 backend/schemas.py）
+ * BidGuard-Agent 前端全局 TypeScript 契约类型定义（完整覆盖版）
+ * 严格逐字段对齐 FRONTEND.md §2 与 backend/schemas.py
  */
 
 export type UserRole = 'admin' | 'member'
@@ -198,22 +199,68 @@ export interface DashboardStatsOut {
 }
 
 // ── 4. F1 招标红线提取 (/api/extract) ────────────────────────────────────
+export interface LlmStructuredClause {
+  is_requirement?: boolean
+  clause_type?: string
+  consequence?: ConsequenceType | string
+  clause_no?: string
+  full_text?: string
+  reason?: string
+}
+
 export interface MarkedClauseItem {
   mark: '★' | '▲' | string
   text: string
+  full_text?: string
   start: number
   end: number
   clause_no: string
   kind: 'requirement' | 'usage_note' | 'table_marker' | string
+  consequence?: ConsequenceType | string
+  quote_verified?: boolean
+  structured?: LlmStructuredClause | null
 }
 
 export interface InvalidBidClauseItem {
   pattern: 'A' | 'B' | string
   text: string
+  full_text?: string
   start: number
   end: number
   clause_no: string
   promise_doc?: string
+  consequence?: ConsequenceType | string
+  quote_verified?: boolean
+  structured?: LlmStructuredClause | null
+}
+
+export interface KeywordSectionHitItem {
+  keyword: string
+  start: number
+  excerpt: string
+}
+
+export interface ScoringTableItem {
+  table_index?: number
+  row_index?: number
+  no?: string
+  section?: string
+  factor?: string
+  detail?: string
+  score?: string
+  score_max?: number | null
+  type?: string
+}
+
+export interface ScoringProseItem {
+  factor?: string
+  detail?: string
+  detail_raw?: string
+  score?: string
+  score_max?: number | null
+  evidence_material?: string
+  consequence?: ConsequenceType | string
+  quote_verified?: boolean
 }
 
 export interface ExtractChecklistOut {
@@ -225,12 +272,12 @@ export interface ExtractChecklistOut {
   chapters: Array<{ index: string; title: string; start: number }>
   marked_clauses: MarkedClauseItem[]
   invalid_bid_clauses: InvalidBidClauseItem[]
-  qualification_hits: Array<{ keyword: string; start: number; excerpt: string }>
-  compliance_hits: Array<{ keyword: string; start: number; excerpt: string }>
+  qualification_hits: KeywordSectionHitItem[]
+  compliance_hits: KeywordSectionHitItem[]
   eval_chapter?: { index: string; title: string; start: number } | null
-  scoring_tables: Array<Record<string, unknown>>
-  scoring_prose: Array<Record<string, unknown>>
-  llm_structured: Array<Record<string, unknown>>
+  scoring_tables: ScoringTableItem[]
+  scoring_prose: ScoringProseItem[]
+  llm_structured: MarkedClauseItem[]
 }
 
 // ── 5. F5 偏离表导出 (/api/deviation) ────────────────────────────────────
@@ -242,7 +289,7 @@ export interface DeviationRowItem {
   deviation: string
   location: string
   is_negative: boolean
-  status: string
+  status: 'RESPONSE_OK' | 'MISSING_RESPONSE' | 'CONTRADICTION' | string
 }
 
 export interface DeviationExportOut {
@@ -261,11 +308,11 @@ export interface DeviationExportOut {
 export interface SuspiciousParamOut {
   quote: string
   offset: number
-  exclusive_type: string
+  exclusive_type: '品牌绑定' | '资质定向' | '业绩定向' | '参数定向' | string
   confidence: number
   reason: string
   quote_verified: boolean
-  llm_status: string
+  llm_status: 'done' | 'skipped' | string
 }
 
 export interface RadarConclusionOut {
@@ -276,7 +323,7 @@ export interface RadarConclusionOut {
 export interface RadarScanOut {
   task_id: number
   title: string
-  llm_status: string
+  llm_status: 'done' | 'skipped' | string
   suspicious_params: SuspiciousParamOut[]
   conclusion: RadarConclusionOut
 }
@@ -425,7 +472,7 @@ export interface ModelConfigTestOut {
   message: string
 }
 
-// ── 11. SSE 进度帧类型与页码/偏移格式化工具函数 ─────────────────────────
+// ── 11. SSE 进度帧与通用格式化工具函数 ───────────────────────────────────
 export interface SSEProgressFrame {
   task_id: number
   status: TaskStatus | string
@@ -436,8 +483,8 @@ export interface SSEProgressFrame {
 }
 
 /**
- * FRONTEND.md 铁律 3：docx 页码恒为 null，仅 PDF 有真实页码。
- * 统一格式化位置展示：有页码显示 "第 X 页"，page 为 null 时显示 "字符偏移 @N"。
+ * FRONTEND.md 铁律：docx 页码恒为 null，仅 PDF 有真实页码。
+ * 有页码显示 "第 X 页"，page 为 null 时一律显示 "字符偏移 @N"。
  */
 export function formatPageOrOffset(page?: number | null, offset?: number | null): string {
   if (typeof page === 'number' && page > 0) {
@@ -446,5 +493,19 @@ export function formatPageOrOffset(page?: number | null, offset?: number | null)
   if (typeof offset === 'number' && offset >= 0) {
     return `字符偏移 @${offset}`
   }
-  return '位置待定位'
+  return '字符偏移 @0'
+}
+
+/**
+ * 金额展示格式化：两位小数 + 千分位分隔符（仅用于 UI 展示，提交后端一律传纯数字字符串）
+ */
+export function formatMoneyDisplay(val?: string | number | null): string {
+  if (val === null || val === undefined || val === '') return '—'
+  const cleaned = String(val).replace(/,/g, '').trim()
+  const num = Number(cleaned)
+  if (!Number.isFinite(num)) return String(val)
+  return num.toLocaleString('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
 }
