@@ -210,6 +210,20 @@ def create_app(
         def serve_index():
             return FileResponse(str(DIST_DIR / 'index.html'))
 
+        # SPA history 路由回退：刷新 /checks 等前端路径时返回 index.html，
+        # 而不是落到 API 的 404 JSON。/api/* 与 /assets/* 不受影响（先注册/挂载优先）。
+        @app.get('/{spa_path:path}', include_in_schema=False)
+        def spa_history_fallback(spa_path: str):
+            if spa_path.startswith('api/') or spa_path.startswith('assets/'):
+                raise HTTPException(
+                    status_code=404,
+                    detail={'code': 'NOT_FOUND', 'message': '资源不存在'},
+                )
+            candidate = (DIST_DIR / spa_path).resolve()
+            if candidate.is_file() and candidate.is_relative_to(DIST_DIR.resolve()):
+                return FileResponse(str(candidate))
+            return FileResponse(str(DIST_DIR / 'index.html'))
+
     return app
 
 
