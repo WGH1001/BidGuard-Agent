@@ -33,7 +33,7 @@ interface EndpointPreset {
 
 const PRESETS: EndpointPreset[] = [
   {
-    label: '企业内网私有化模型网关（推荐 · 标书数据不出域）',
+    label: '自定义 / 企业内网（vLLM · Ollama · MaaS，推荐 · 标书数据不出域）',
     base_url: 'http://10.0.2.81:3000/v1',
     model_flash: 'GLM-5.3-Flash',
     model_flagship: 'GLM-5.3-Flash',
@@ -170,6 +170,10 @@ onMounted(() => {
         </span>
       </div>
 
+      <div class="preset-note">
+        任何提供 OpenAI 兼容接口的厂商（通义千问 / Kimi / OpenRouter / 本地 Ollama 等）均可直接手动填写
+        Base URL 与模型名；配置未生效或调用失败时，系统自动回退系统默认网关（右上角徽标实时显示当前生效层）。
+      </div>
       <div class="preset-bar">
         <span class="preset-lbl">快捷填充模板：</span>
         <el-button
@@ -268,6 +272,12 @@ onMounted(() => {
   line-height: 1.6;
 }
 
+.preset-note {
+  font-size: 12px;
+  color: var(--color-text-tertiary, #888780);
+  line-height: 1.6;
+  margin-bottom: 8px;
+}
 .preset-bar {
   display: flex;
   align-items: center;

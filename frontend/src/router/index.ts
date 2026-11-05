@@ -7,9 +7,11 @@ import ExtractView from '@/views/ExtractView.vue'
 import CheckDetailView from '@/views/CheckDetailView.vue'
 import DeviationView from '@/views/DeviationView.vue'
 import RadarView from '@/views/RadarView.vue'
+import QaChatView from '@/views/QaChatView.vue'
+import RulesAndCertsView from '@/views/RulesAndCertsView.vue'
+import ReportsAndAuditView from '@/views/ReportsAndAuditView.vue'
 import ChangePasswordView from '@/views/ChangePasswordView.vue'
 import ModelSettingsView from '@/views/ModelSettingsView.vue'
-import PlaceholderView from '@/views/PlaceholderView.vue'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -67,31 +69,28 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/qa',
     name: 'qa',
-    component: PlaceholderView,
+    component: QaChatView,
     meta: {
       title: 'F7 标书专家追问',
       moduleCode: 'F7',
-      desc: '跨招投标双书多轮 ReAct 检索问答，强制附带原文摘录与页码/字符偏移（C3 卡接入）',
     },
   },
   {
     path: '/rules',
     name: 'rules',
-    component: PlaceholderView,
+    component: RulesAndCertsView,
     meta: {
       title: '废标规则与证照底表',
       moduleCode: 'RULES',
-      desc: '配置开标日、最高限价、社保月份、自定义禁用词与企业投标证照到期预警台账（C3 卡接入）',
     },
   },
   {
     path: '/reports',
     name: 'reports',
-    component: PlaceholderView,
+    component: ReportsAndAuditView,
     meta: {
       title: '封标交付中心与审计',
       moduleCode: 'DELIVER',
-      desc: '一键打包下载投标书原位标红件、偏离表与人工终核签字单 ZIP，及管理员安全审计日志（C3 卡接入）',
     },
   },
   {

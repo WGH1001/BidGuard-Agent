@@ -31,6 +31,8 @@ declare module 'vue' {
     ElTabPane: typeof import('element-plus/es/components/tabs/index')['ElTabPane']
     ElTabs: typeof import('element-plus/es/components/tabs/index')['ElTabs']
     PriceManualDialog: typeof import('./components/PriceManualDialog.vue')['default']
+    QaMessageList: typeof import('./components/QaMessageList.vue')['default']
+    ReActSteps: typeof import('./components/ReActSteps.vue')['default']
     RiskCard: typeof import('./components/RiskCard.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']

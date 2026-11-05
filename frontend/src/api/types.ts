@@ -1,6 +1,6 @@
 /**
- * BidGuard-Agent 前端全局 TypeScript 契约类型定义（完整覆盖版）
- * 严格逐字段对齐 FRONTEND.md §2 与 backend/schemas.py
+ * BidGuard-Agent 前端全局 TypeScript 契约类型定义（C3 完整覆盖版）
+ * 严格逐字段对齐 FRONTEND.md §2、backend/schemas.py 与 C1C2 架构侧修订版
  */
 
 export type UserRole = 'admin' | 'member'
@@ -329,6 +329,15 @@ export interface RadarScanOut {
 }
 
 // ── 7. F7 标书专家追问 (/api/qa) ─────────────────────────────────────────
+export interface ReActStepTraceItem {
+  round?: number
+  step_no?: number
+  thought?: string
+  action?: string
+  action_input?: unknown
+  observation?: unknown
+}
+
 export interface QaQuoteOut {
   source: 'tender' | 'bid' | string
   quote: string
@@ -341,9 +350,17 @@ export interface QaQuoteOut {
 export interface QaMessageItem {
   role: 'user' | 'assistant'
   content: string
-  mode?: string
+  mode?: 'react' | 'keyword_fallback' | string
   quotes?: QaQuoteOut[]
-  steps?: Array<Record<string, unknown>>
+  steps?: ReActStepTraceItem[]
+  loading?: boolean
+}
+
+export interface QaSessionCreatePayload {
+  task_id?: number
+  title?: string
+  tender_path?: string
+  bid_path?: string
 }
 
 export interface QaSessionOut {
@@ -370,7 +387,7 @@ export interface QaAskResponseOut {
   question: string
   answer: string
   quotes: QaQuoteOut[]
-  steps: Array<Record<string, unknown>>
+  steps: ReActStepTraceItem[]
   rounds_used: number
   terminated_by_max_rounds: boolean
 }
@@ -483,7 +500,7 @@ export interface SSEProgressFrame {
 }
 
 /**
- * FRONTEND.md 铁律：docx 页码恒为 null，仅 PDF 有真实页码。
+ * FRONTEND.md 铁律（架构侧修订三分支版）：
  * 有页码显示 "第 X 页"；无页码但有字符偏移显示 "字符偏移 @N"；
  * 两者皆无（如 F2 报价整表算术核验、无定位的全篇性风险）显示 "—"，严禁显示假偏移 @0。
  */

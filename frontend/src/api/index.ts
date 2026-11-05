@@ -27,6 +27,7 @@ import type {
   PriceManualBackfillRequest,
   QaAskRequest,
   QaAskResponseOut,
+  QaSessionCreatePayload,
   QaSessionOut,
   RadarScanOut,
   RunTaskTriggerOut,
@@ -186,12 +187,7 @@ export const radarApi = {
 }
 
 export const qaApi = {
-  createSession(payload: {
-    task_id?: number
-    title?: string
-    tender_path?: string
-    bid_path?: string
-  }): Promise<QaSessionOut> {
+  createSession(payload: QaSessionCreatePayload): Promise<QaSessionOut> {
     return post<QaSessionOut>('/qa/sessions', payload)
   },
   listSessions(taskId?: number): Promise<QaSessionOut[]> {
@@ -246,6 +242,16 @@ export const reportsApi = {
     page_size?: number
   }): Promise<AuditLogListOut> {
     return get<AuditLogListOut>('/reports/audit-logs', { params })
+  },
+}
+
+export const auditApi = {
+  listLogs(params?: {
+    action?: string
+    page?: number
+    page_size?: number
+  }): Promise<AuditLogListOut> {
+    return reportsApi.listAuditLogs(params)
   },
 }
 
