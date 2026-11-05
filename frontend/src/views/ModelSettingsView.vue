@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { modelConfigApi } from '@/api'
 
@@ -24,7 +24,11 @@ const form = reactive({
 })
 
 interface EndpointPreset {
+  /** 模板标识：仅前端用于选中高亮与回显匹配，不提交后端 */
+  key: string
   label: string
+  /** 服务商显示名：仅前端展示（后端契约无此字段），按 base_url 匹配回显 */
+  provider_name: string
   base_url: string
   model_flash: string
   model_flagship: string
@@ -33,29 +37,72 @@ interface EndpointPreset {
 
 const PRESETS: EndpointPreset[] = [
   {
+    key: 'custom-intranet',
     label: '自定义 / 企业内网（vLLM · Ollama · MaaS，推荐 · 标书数据不出域）',
+    provider_name: '企业内网 / 自定义',
     base_url: 'http://10.0.2.81:3000/v1',
     model_flash: 'GLM-5.3-Flash',
     model_flagship: 'GLM-5.3-Flash',
     supports_reasoning_effort: true,
   },
   {
+    key: 'zhipu',
     label: '智谱开放平台 (BigModel OpenAI 兼容端点)',
+    provider_name: '智谱开放平台',
     base_url: 'https://open.bigmodel.cn/api/paas/v4',
     model_flash: 'glm-5.3-flash',
     model_flagship: 'glm-5.3-flash',
     supports_reasoning_effort: true,
   },
   {
+    key: 'deepseek',
     label: 'DeepSeek 官方开放平台',
+    provider_name: 'DeepSeek',
     base_url: 'https://api.deepseek.com',
     model_flash: 'deepseek-chat',
     model_flagship: 'deepseek-reasoner',
     supports_reasoning_effort: false,
   },
+  {
+    key: 'kimi',
+    label: 'Kimi (月之暗面 Moonshot)',
+    provider_name: 'Kimi (月之暗面)',
+    base_url: 'https://api.moonshot.cn/v1',
+    model_flash: 'kimi-k3.1-pro-highspeed',
+    model_flagship: 'kimi-k3.1-pro',
+    supports_reasoning_effort: false,
+  },
+ {
+    key: 'qwen',
+    label: '通义千问 (阿里云百炼 DashScope)',
+    provider_name: '通义千问 (阿里云百炼)',
+    base_url: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
+    model_flash: 'qwen3.8-flash',
+    model_flagship: 'qwen3.8-max',
+    supports_reasoning_effort: false,
+  },
+  {
+    key: 'siliconflow',
+    label: 'SiliconFlow (硅基流动)',
+    provider_name: 'SiliconFlow (硅基流动)',
+    base_url: 'https://api.siliconflow.cn/v1',
+    model_flash: 'deepseek-ai/DeepSeek-V4-Flash',
+    model_flagship: 'deepseek-ai/DeepSeek-V4-Pro',
+    supports_reasoning_effort: false,
+  },
+
 ]
 
+const selectedKey = ref<string>('custom')
+
+/** 按 base_url 反查当前服务商名：匹配到模板用其 provider_name，否则视为自定义 */
+const currentProviderName = computed<string>(() => {
+  const matched = PRESETS.find((p) => p.base_url === form.base_url.trim())
+  return matched ? matched.provider_name : '自定义 / 手动填写'
+})
+
 function applyPreset(p: EndpointPreset): void {
+  selectedKey.value = p.key
   form.base_url = p.base_url
   form.model_flash = p.model_flash
   form.model_flagship = p.model_flagship
@@ -76,6 +123,9 @@ async function fetchConfig(): Promise<void> {
       form.model_flash = res.model_flash
       form.model_flagship = res.model_flagship || res.model_flash
       form.supports_reasoning_effort = res.supports_reasoning_effort
+      // 按已存 base_url 反查匹配模板，命中则高亮，否则归为自定义
+      const matched = PRESETS.find((p) => p.base_url === res.base_url)
+      selectedKey.value = matched ? matched.key : 'custom'
     }
   } finally {
     loading.value = false
@@ -178,12 +228,15 @@ onMounted(() => {
         <span class="preset-lbl">快捷填充模板：</span>
         <el-button
           v-for="p in PRESETS"
-          :key="p.label"
+          :key="p.key"
           size="small"
+          :type="selectedKey === p.key ? 'primary' : ''"
+          :plain="selectedKey !== p.key"
           @click="applyPreset(p)"
         >
           {{ p.label }}
         </el-button>
+        <span class="provider-tag">当前服务商：{{ currentProviderName }}</span>
       </div>
 
       <el-form label-position="top" class="ms-form">
@@ -294,6 +347,14 @@ onMounted(() => {
   font-size: 12px;
   font-weight: 700;
   color: var(--txt-sec);
+}
+
+.provider-tag {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--txt-sec);
+  white-space: nowrap;
 }
 
 .two-col {
