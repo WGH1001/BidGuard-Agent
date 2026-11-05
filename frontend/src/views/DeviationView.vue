@@ -33,13 +33,25 @@ async function loadAvailableTasks(): Promise<void> {
     }
 
     if (selectedTaskId.value) {
-      await handleGenerateDeviation()
+      await handleLoadDeviation()
     }
   } finally {
     loadingTasks.value = false
   }
 }
 
+/** 进页面/切换任务：调 GET，产物已存在时后端秒回复用 */
+async function handleLoadDeviation(): Promise<void> {
+  if (!selectedTaskId.value) return
+  generating.value = true
+  try {
+    devResult.value = await deviationApi.get(selectedTaskId.value)
+  } finally {
+    generating.value = false
+  }
+}
+
+/** 仅"重新生成"按钮：强制全量重算 */
 async function handleGenerateDeviation(): Promise<void> {
   if (!selectedTaskId.value) {
     ElMessage.warning('请先选择一个防废标体检任务')
@@ -95,7 +107,7 @@ onMounted(() => {
           :loading="loadingTasks"
           placeholder="选择已上传双书的体检任务"
           style="width: 320px"
-          @change="handleGenerateDeviation"
+          @change="handleLoadDeviation"
         >
           <el-option
             v-for="t in tasks"

@@ -22,14 +22,92 @@ _DEVIATION_OUT_DIR = (PROJECT_ROOT / 'output' / 'deviation').resolve()
 _DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 
 
+def _stats_sidecar_path(task_id: int) -> Path:
+    """偏离表统计快照（sidecar JSON）：产物 docx 旁，供 GET 复用秒回。"""
+    return _DEVIATION_OUT_DIR / f"{task_id}_stats.json"
+
+
+def _generate_deviation_and_cache(
+    task: BidCheckTask,
+    tender_abs: Path,
+    bid_abs: Path,
+    client,
+    db: Session,
+    tenant_id: int,
+    user_id=None,
+) -> DeviationExportOut:
+    """全量生成偏离表：解析双书 → F4 对齐 → 写 docx + 统计快照 sidecar。"""
+    _DEVIATION_OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_filename = f"{task.id}_偏离表.docx"
+    out_abs = (_DEVIATION_OUT_DIR / out_filename).resolve()
+
+    # 铁律 1：F1 抽取结果显式传入 requirements=，避免内部重复解析
+    checklist = build_review_checklist(str(tender_abs))
+    reqs = list(checklist.get('marked_clauses') or []) + list(checklist.get('invalid_bid_clauses') or [])
+
+    res = export_deviation_table(
+        tender_path=tender_abs,
+        bid_path=bid_abs,
+        output_path=out_abs,
+        requirements=reqs,
+        client=client,
+    )
+
+    out = DeviationExportOut(
+        task_id=task.id,
+        download_url=f"/api/files/{out_abs.relative_to(PROJECT_ROOT.resolve()).as_posix()}",
+        output_filename=out_filename,
+        total_rows=int(res.get('total_rows', 0)),
+        no_deviation_count=int(res.get('no_deviation_count', 0)),
+        negative_deviation_count=int(res.get('negative_deviation_count', 0)),
+        missing_count=int(res.get('missing_count', 0)),
+        contradiction_count=int(res.get('contradiction_count', 0)),
+        rows=list(res.get('rows') or []),
+    )
+
+    # 写统计快照（含 rows），GET 复用零重算
+    import json
+    _stats_sidecar_path(task.id).write_text(
+        json.dumps(out.model_dump(), ensure_ascii=False), encoding='utf-8')
+
+    record_audit(
+        db,
+        action='export_deviation_table',
+        tenant_id=tenant_id,
+        user_id=user_id,
+        target=f"task:{task.id}",
+        detail_json={'total_rows': out.total_rows, 'output': out.download_url},
+    )
+    return out
+
+
 @router.post('/{task_id}', response_model=DeviationExportOut)
-@router.get('/{task_id}', response_model=DeviationExportOut)
-def generate_deviation_for_task(
+def regenerate_deviation_for_task(
     task_id: int,
     current_user: AuthUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> DeviationExportOut:
-    """基于已有任务调用 export_deviation_table 生成《技术与商务偏离表.docx》，落盘 output/deviation/。"""
+    """强制重新生成偏离表（用户显式点击"重新生成"时调用）。"""
+    return _deviation_entry(task_id, current_user, db, force_rebuild=True)
+
+
+@router.get('/{task_id}', response_model=DeviationExportOut)
+def get_deviation_for_task(
+    task_id: int,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> DeviationExportOut:
+    """获取偏离表：产物与统计快照已存在时直接复用（秒回，零重算）；不存在时才首次生成。"""
+    return _deviation_entry(task_id, current_user, db, force_rebuild=False)
+
+
+def _deviation_entry(
+    task_id: int,
+    current_user: AuthUser,
+    db: Session,
+    *,
+    force_rebuild: bool,
+) -> DeviationExportOut:
     tenant_id = int(current_user.tenant_id)
     task = db.query(BidCheckTask).filter_by(id=task_id, tenant_id=tenant_id).first()
     if task is None:
@@ -46,43 +124,21 @@ def generate_deviation_for_task(
             detail={'code': 'SOURCE_FILES_MISSING', 'message': '任务的招投标源文件缺失，无法生成偏离表'},
         )
 
-    _DEVIATION_OUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_filename = f"{task.id}_偏离表.docx"
-    out_abs = (_DEVIATION_OUT_DIR / out_filename).resolve()
+    # 复用通道：非强制重建且产物 docx 与统计快照均在 → 直接返回快照（零重算）
+    out_abs = (_DEVIATION_OUT_DIR / f"{task.id}_偏离表.docx").resolve()
+    sidecar = _stats_sidecar_path(task.id)
+    if not force_rebuild and out_abs.is_file() and sidecar.is_file():
+        try:
+            import json
+            cached = json.loads(sidecar.read_text(encoding='utf-8'))
+            return DeviationExportOut(**cached)
+        except Exception:
+            pass  # 快照损坏则走重新生成兜底
 
-    # 铁律 1：F1 抽取结果显式传入 requirements=，避免内部重复解析
-    checklist = build_review_checklist(str(tender_abs))
-    reqs = list(checklist.get('marked_clauses') or []) + list(checklist.get('invalid_bid_clauses') or [])
     client, _ = resolve_effective_llm_client(db, current_user.get('id'))
-
-    res = export_deviation_table(
-        tender_path=tender_abs,
-        bid_path=bid_abs,
-        output_path=out_abs,
-        requirements=reqs,
-        client=client,
-    )
-
-    rel_out = out_abs.relative_to(PROJECT_ROOT.resolve()).as_posix()
-    record_audit(
-        db,
-        action='export_deviation_table',
-        tenant_id=tenant_id,
+    return _generate_deviation_and_cache(
+        task, tender_abs, bid_abs, client, db, tenant_id,
         user_id=current_user.get('id'),
-        target=f"task:{task.id}",
-        detail_json={'total_rows': res['total_rows'], 'output': rel_out},
-    )
-
-    return DeviationExportOut(
-        task_id=task.id,
-        download_url=f"/api/files/{rel_out}",
-        output_filename=out_filename,
-        total_rows=int(res.get('total_rows', 0)),
-        no_deviation_count=int(res.get('no_deviation_count', 0)),
-        negative_deviation_count=int(res.get('negative_deviation_count', 0)),
-        missing_count=int(res.get('missing_count', 0)),
-        contradiction_count=int(res.get('contradiction_count', 0)),
-        rows=list(res.get('rows') or []),
     )
 
 
@@ -102,7 +158,7 @@ def download_deviation_docx(
         )
     out_abs = (_DEVIATION_OUT_DIR / f"{task.id}_偏离表.docx").resolve()
     if not out_abs.is_file():
-        generate_deviation_for_task(task_id=task_id, current_user=current_user, db=db)
+        _deviation_entry(task_id=task_id, current_user=current_user, db=db, force_rebuild=True)
     return FileResponse(
         str(out_abs),
         media_type=_DOCX_MIME,

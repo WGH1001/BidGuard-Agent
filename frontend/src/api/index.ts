@@ -156,6 +156,11 @@ export const extractApi = {
 }
 
 export const deviationApi = {
+  /** 获取偏离表：产物已存在时后端直接复用（秒回），首次才生成 */
+  get(taskId: number): Promise<DeviationExportOut> {
+    return get<DeviationExportOut>(`/deviation/${taskId}`)
+  },
+  /** 强制重新生成（全量重算，仅在用户显式点击"重新生成"时调用） */
   generate(taskId: number): Promise<DeviationExportOut> {
     return post<DeviationExportOut>(`/deviation/${taskId}`)
   },
