@@ -31,6 +31,6 @@ bcrypt==4.*
 # -- tests --
 pytest>=8.0
 
-# -- optional: enable together with production DB / queue selection --
-# psycopg2-binary==2.9.9
-# redis==5.*
+# -- 生产部署依赖: PostgreSQL 16 驱动与 Redis 7 客户端 --
+psycopg2-binary==2.9.9
+redis==5.*

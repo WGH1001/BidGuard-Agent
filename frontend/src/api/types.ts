@@ -1,5 +1,5 @@
 /**
- * BidGuard-Agent 前端全局 TypeScript 契约类型定义（C3 完整覆盖版）
+ * BidGuard-Agent 前端全局 TypeScript 契约类型定义（C3 / D1 完整覆盖版）
  * 严格逐字段对齐 FRONTEND.md §2、backend/schemas.py 与 C1C2 架构侧修订版
  */
 
@@ -485,6 +485,7 @@ export interface ModelConfigOut {
 
 export interface ModelConfigTestOut {
   ok: boolean
+  latency_ms?: number
   model: string
   message: string
 }

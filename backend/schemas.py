@@ -384,6 +384,7 @@ class ModelConfigOut(BaseModel):
 
 class ModelConfigTestOut(BaseModel):
     ok: bool
+    latency_ms: int = 0
     model: str
     message: str
 

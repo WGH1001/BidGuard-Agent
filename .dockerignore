@@ -1,0 +1,86 @@
+# ==============================================================================
+# BidGuard-Agent · Docker 构建上下文忽略规则 (.dockerignore)
+# 用途：隔离本地虚拟环境、前端 node_modules、敏感标书数据与缓存，加速镜像构建并防数据外泄。
+# 分组逻辑：1.版本库与IDE -> 2.Python环境与字节码 -> 3.前端源码与依赖(保留dist)
+#           -> 4.敏感业务数据与测试文档 -> 5.根目录杂项 -> 6.核心白名单反选锁死
+# ==============================================================================
+
+# ── 1. 版本控制、IDE 与本地 AI 协作目录 ──
+.git
+.gitignore
+.idea
+.vscode
+.workbuddy
+.claude
+
+# ── 2. Python 虚拟环境、测试缓存与字节码 ──
+.venv
+venv
+env
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+**/__pycache__
+backend/**/__pycache__/
+core/**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+
+# ── 3. 前端依赖与源码（排除约 9000 个 node_modules 文件，仅保留构建产物 frontend/dist/）──
+node_modules
+frontend/node_modules
+frontend/src
+frontend/public
+frontend/index.html
+frontend/package.json
+frontend/package-lock.json
+frontend/tsconfig.json
+frontend/tsconfig.*.json
+frontend/vite.config.ts
+
+# ── 4. 敏感业务数据、输出产物、数据库文件、测试与归档目录 ──
+data/
+output/
+tests/
+docs/
+scripts/
+deploy/
+派发归档/
+*.db
+*.db-shm
+*.db-wal
+**/*.db
+**/*.db-shm
+**/*.db-wal
+
+# ── 5. 环境变量、密钥文件、日志与根目录文档/原型图 ──
+.env
+.env.*
+*.log
+**/*.log
+/*.md
+/*.html
+/*.docx
+/*.pdf
+/*.txt
+
+# ── 6. Dockerfile COPY 核心白名单强制保留（防上方规则误伤）──
+!requirements.txt
+!core/
+!core/**
+!backend/
+!backend/**
+!config/
+!config/**
+!frontend/dist/
+!frontend/dist/**
+
+# ── 7. 最终底线：确保白名单目录内的字节码缓存依然被剔除（最后匹配规则优先）──
+backend/**/__pycache__/
+core/**/__pycache__/
+**/__pycache__/
+**/*.pyc
+**/*.pyo

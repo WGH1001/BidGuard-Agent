@@ -72,7 +72,7 @@ const PRESETS: EndpointPreset[] = [
     model_flagship: 'kimi-k3.1-pro',
     supports_reasoning_effort: false,
   },
- {
+  {
     key: 'qwen',
     label: '通义千问 (阿里云百炼 DashScope)',
     provider_name: '通义千问 (阿里云百炼)',
@@ -90,7 +90,6 @@ const PRESETS: EndpointPreset[] = [
     model_flagship: 'deepseek-ai/DeepSeek-V4-Pro',
     supports_reasoning_effort: false,
   },
-
 ]
 
 const selectedKey = ref<string>('custom')
@@ -176,9 +175,9 @@ async function handleTest(): Promise<void> {
       supports_reasoning_effort: form.supports_reasoning_effort,
     })
     if (res.ok) {
-      ElMessage.success(res.message || '模型连通性校验通过')
+      ElMessage.success(res.message || `配置校验通过（${res.latency_ms ?? 0}ms）`)
     } else {
-      ElMessage.warning(res.message || '模型连通性异常')
+      ElMessage.warning(res.message || `模型连通性异常（${res.latency_ms ?? 0}ms）`)
     }
   } finally {
     testing.value = false

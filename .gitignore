@@ -16,3 +16,6 @@ output/
 data/*.db-shm
 data/*.db-wal
 派发归档/
+.slidep/
+E1派发汇总.txt
+E2派发汇总.txt
