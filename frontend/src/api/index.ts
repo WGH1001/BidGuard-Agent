@@ -30,8 +30,13 @@ import type {
   QaSessionCreatePayload,
   QaSessionOut,
   RadarScanOut,
+  RegulationCrawlOut,
+  RegulationImportOut,
+  RegulationLawDetailOut,
+  RegulationLawOut,
   RunTaskTriggerOut,
   UserProfileOut,
+  VerifyArticleOut,
 } from './types'
 
 export const ALLOWED_DOC_EXTS = ['.docx', '.pdf', '.txt'] as const
@@ -267,5 +272,33 @@ export const modelConfigApi = {
   },
   test(payload: ModelConfigUpsertRequest): Promise<ModelConfigTestOut> {
     return post<ModelConfigTestOut>('/model-config/test', payload)
+  },
+}
+/** E4 招投标法规库与法条核验 API (/api/regulations) */
+export const regulationsApi = {
+  listLaws(): Promise<RegulationLawOut[]> {
+    return get<RegulationLawOut[]>('/regulations/laws')
+  },
+  getLawDetail(
+    lawId: number,
+    params?: { keyword?: string; page?: number; page_size?: number },
+  ): Promise<RegulationLawDetailOut> {
+    return get<RegulationLawDetailOut>(`/regulations/laws/${lawId}`, { params })
+  },
+  verifyArticle(text: string): Promise<VerifyArticleOut> {
+    return post<VerifyArticleOut>('/regulations/verify', { text })
+  },
+  importFile(file: File, lawName?: string): Promise<RegulationImportOut> {
+    const fd = new FormData()
+    fd.append('file', file, file.name)
+    if (lawName && lawName.trim()) {
+      fd.append('law_name', lawName.trim())
+    }
+    return post<RegulationImportOut>('/regulations/import', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
+  crawlUpdates(): Promise<RegulationCrawlOut> {
+    return post<RegulationCrawlOut>('/regulations/crawl')
   },
 }

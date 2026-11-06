@@ -1,6 +1,6 @@
 /**
- * BidGuard-Agent 前端全局 TypeScript 契约类型定义（C3 / D1 完整覆盖版）
- * 严格逐字段对齐 FRONTEND.md §2、backend/schemas.py 与 C1C2 架构侧修订版
+ * BidGuard-Agent 前端全局 TypeScript 契约类型定义（E4 完整覆盖版）
+ * 严格逐字段对齐 FRONTEND.md §2、backend/schemas.py 与 E4 法规库契约
  */
 
 export type UserRole = 'admin' | 'member'
@@ -504,11 +504,80 @@ export interface SSEProgressFrame {
   error_msg?: string
 }
 
-/**
- * FRONTEND.md 铁律（架构侧修订三分支版）：
- * 有页码显示 "第 X 页"；无页码但有字符偏移显示 "字符偏移 @N"；
- * 两者皆无（如 F2 报价整表算术核验、无定位的全篇性风险）显示 "—"，严禁显示假偏移 @0。
- */
+// ── 12. E4 招投标法规库与法条三态真伪核验 (/api/regulations) ─────────────
+export type ArticleVerifyStatus = 'exact_match' | 'fuzzy_hint' | 'unverifiable'
+
+export interface RegulationLawOut {
+  id: number
+  name: string
+  issuing_body?: string | null
+  effective_date?: string | null
+  source_url?: string | null
+  article_count: number
+  content_hash: string
+  is_seed: boolean
+  fetched_at?: string | null
+  updated_at?: string | null
+}
+
+export interface RegulationArticleOut {
+  id: number
+  law_id: number
+  article_no: string
+  article_title?: string | null
+  content: string
+  content_hash: string
+}
+
+export interface RegulationLawDetailOut {
+  law: RegulationLawOut
+  total_articles: number
+  page: number
+  page_size: number
+  articles: RegulationArticleOut[]
+}
+
+export interface VerifyArticleOut {
+  status: ArticleVerifyStatus | string
+  verified: boolean
+  law?: string | null
+  article_no?: string | null
+  official_content?: string | null
+  similarity: number
+  badge: string
+  message: string
+  llm_diff_hint?: string | null
+}
+
+export interface RegulationImportOut {
+  law_id: number
+  law_name: string
+  article_count: number
+  content_hash: string
+  added_count: number
+  modified_count: number
+  unchanged_count: number
+}
+
+export interface CrawlSourceResultItem {
+  name: string
+  url: string
+  status: string
+  updated: boolean
+  article_count: number
+  added_count: number
+  modified_count: number
+  unchanged_count: number
+  message: string
+}
+
+export interface RegulationCrawlOut {
+  total_sources: number
+  updated_laws_count: number
+  unconfigured_count: number
+  results: CrawlSourceResultItem[]
+}
+
 export function formatPageOrOffset(page?: number | null, offset?: number | null): string {
   if (typeof page === 'number' && page > 0) {
     return `第 ${page} 页`
@@ -519,9 +588,6 @@ export function formatPageOrOffset(page?: number | null, offset?: number | null)
   return '—'
 }
 
-/**
- * 金额展示格式化：两位小数 + 千分位分隔符（仅用于 UI 展示，提交后端一律传纯数字字符串）
- */
 export function formatMoneyDisplay(val?: string | number | null): string {
   if (val === null || val === undefined || val === '') return '—'
   const cleaned = String(val).replace(/,/g, '').trim()

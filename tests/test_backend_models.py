@@ -77,6 +77,7 @@ def test_nine_tables_created_and_schema_matches_interface(db_session):
     eng, session = db_session
     inspector = inspect(eng)
     actual_tables = set(inspector.get_table_names())
+    # E4 起扩容为 11 张表：B1 原有 9 张 + 法规库 2 张（regulation_laws / regulation_articles）
     expected_tables = {
         'tenants',
         'users',
@@ -87,9 +88,11 @@ def test_nine_tables_created_and_schema_matches_interface(db_session):
         'qa_sessions',
         'audit_logs',
         'user_model_configs',
+        'regulation_laws',
+        'regulation_articles',
     }
     assert actual_tables == expected_tables
-    assert len(actual_tables) == 9
+    assert len(actual_tables) == 11
 
     # 逐表核对 INTERFACE.md §2 关键字段
     expected_cols = {

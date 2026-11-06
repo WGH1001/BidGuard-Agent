@@ -1,8 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-"""B2 · FastAPI 主应用装配入口（CORS、10 组路由挂载、启动建表与演示种子、静态托管 frontend/dist、统一错误格式）。
-
-契约依据：INTERFACE.md §3.1 ~ §3.5 与 B2-backend路由层.md。
-"""
+"""B2 / E4 · FastAPI 主应用装配入口（CORS、11 组路由挂载、启动建表与法规/演示种子、静态托管 frontend/dist、统一错误格式）。"""
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
@@ -30,6 +27,7 @@ from backend.routers import (
     model_config as model_config_router_mod,
     qa as qa_router_mod,
     radar as radar_router_mod,
+    regulations as regulations_router_mod,
     reports as reports_router_mod,
     rules as rules_router_mod,
 )
@@ -84,7 +82,6 @@ def create_app(
         allow_headers=['*'],
     )
 
-    # ── 全局异常处理器：统一收敛为 INTERFACE.md §3.5 格式 {"detail": {"code": ..., "message": ...}} ──
     @app.exception_handler(HTTPException)
     async def unified_http_exception_handler(_request: Request, exc: HTTPException):
         detail = exc.detail
@@ -130,7 +127,7 @@ def create_app(
             },
         )
 
-    # ── 挂载 10 组核心业务路由 ──────────────────────────────────────────────
+    # ── 挂载全部业务路由（含 E4 新增 regulations 路由）────────────────────────
     app.include_router(auth_router_mod.router)
     app.include_router(dashboard_router_mod.router)
     app.include_router(checks_router_mod.router)
@@ -141,6 +138,7 @@ def create_app(
     app.include_router(rules_router_mod.router)
     app.include_router(reports_router_mod.router)
     app.include_router(model_config_router_mod.router)
+    app.include_router(regulations_router_mod.router)
 
     @app.get('/api/health', response_model=HealthOut)
     def root_health() -> HealthOut:
@@ -152,13 +150,7 @@ def create_app(
         current_user: AuthUser = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
-        """INTERFACE.md §3.4 统一文件下载端点。
-
-        限制在 data/uploads 与 output 目录内（防路径穿越），且强制租户归属校验（§3.2）：
-        - data/uploads/{tenant_id}/... ：路径第一段必须等于当前用户租户 id；
-        - output/{deviation|redline|deliver}/{task_id}_... ：按文件名 task_id 前缀查任务归属。
-        非本租户资源一律 404（防探测，与业务路由口径一致）。
-        """
+        """INTERFACE.md §3.4 统一文件下载端点（带路径穿越与租户归属双重校验）。"""
         tenant_id = int(current_user.tenant_id)
         uploads_root = (PROJECT_ROOT / 'data' / 'uploads').resolve()
         output_root = (PROJECT_ROOT / 'output').resolve()
@@ -200,7 +192,6 @@ def create_app(
             )
         return FileResponse(str(candidate), filename=candidate.name)
 
-    # ── 静态托管 frontend/dist（存在时才挂载）────────────────────────────────
     if DIST_DIR.is_dir() and (DIST_DIR / 'index.html').is_file():
         assets_dir = DIST_DIR / 'assets'
         if assets_dir.is_dir():
@@ -210,8 +201,6 @@ def create_app(
         def serve_index():
             return FileResponse(str(DIST_DIR / 'index.html'))
 
-        # SPA history 路由回退：刷新 /checks 等前端路径时返回 index.html，
-        # 而不是落到 API 的 404 JSON。/api/* 与 /assets/* 不受影响（先注册/挂载优先）。
         @app.get('/{spa_path:path}', include_in_schema=False)
         def spa_history_fallback(spa_path: str):
             if spa_path.startswith('api/') or spa_path.startswith('assets/'):

@@ -1,16 +1,23 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
-import { rulesApi } from '@/api'
+import { regulationsApi, rulesApi } from '@/api'
 import {
   formatMoneyDisplay,
   type CertificateOut,
   type CustomRedlineItem,
+  type RegulationArticleOut,
+  type RegulationCrawlOut,
+  type RegulationLawOut,
+  type VerifyArticleOut,
 } from '@/api/types'
+import { useAuthStore } from '@/stores/auth'
 
 defineOptions({ name: 'RulesAndCertsView' })
 
-const activeTab = ref<'rules' | 'certs'>('rules')
+const authStore = useAuthStore()
+
+const activeTab = ref<'rules' | 'certs' | 'regulations'>('rules')
 const loadingRules = ref(false)
 const savingRules = ref(false)
 const loadingCerts = ref(false)
@@ -178,12 +185,143 @@ function certRowClassName({ row }: { row: CertificateOut }): string {
   return ''
 }
 
+// ── 页签 ③：E4 法规库浏览、关键词检索、法条三态真伪核验与官网更新状态 ─────
+const loadingLaws = ref(false)
+const loadingArticles = ref(false)
+const laws = ref<RegulationLawOut[]>([])
+const selectedLawId = ref<number | null>(null)
+const selectedLaw = ref<RegulationLawOut | null>(null)
+const articles = ref<RegulationArticleOut[]>([])
+const totalArticles = ref(0)
+const articlePage = ref(1)
+const articlePageSize = ref(30)
+const articleKeyword = ref('')
+
+// 法条真伪核验状态
+const verifyInputText = ref('')
+const verifying = ref(false)
+const verifyResult = ref<VerifyArticleOut | null>(null)
+
+// 官网更新与手动导入状态（admin）
+const crawling = ref(false)
+const crawlReport = ref<RegulationCrawlOut | null>(null)
+const importingFile = ref(false)
+const importLawNameHint = ref('')
+
+async function fetchLaws(autoSelectFirst = true): Promise<void> {
+  loadingLaws.value = true
+  try {
+    laws.value = await regulationsApi.listLaws()
+    if (autoSelectFirst && laws.value.length > 0 && selectedLawId.value === null) {
+      await handleSelectLaw(laws.value[0])
+    } else if (selectedLawId.value !== null) {
+      const matched = laws.value.find((l) => l.id === selectedLawId.value)
+      if (matched) {
+        selectedLaw.value = matched
+        await fetchLawArticles()
+      }
+    }
+  } finally {
+    loadingLaws.value = false
+  }
+}
+
+async function handleSelectLaw(law: RegulationLawOut): Promise<void> {
+  selectedLawId.value = law.id
+  selectedLaw.value = law
+  articlePage.value = 1
+  await fetchLawArticles()
+}
+
+async function fetchLawArticles(): Promise<void> {
+  if (selectedLawId.value === null) return
+  loadingArticles.value = true
+  try {
+    const detail = await regulationsApi.getLawDetail(selectedLawId.value, {
+      keyword: articleKeyword.value.trim() || undefined,
+      page: articlePage.value,
+      page_size: articlePageSize.value,
+    })
+    selectedLaw.value = detail.law
+    articles.value = detail.articles || []
+    totalArticles.value = detail.total_articles || 0
+  } finally {
+    loadingArticles.value = false
+  }
+}
+
+function handleSearchArticles(): void {
+  articlePage.value = 1
+  void fetchLawArticles()
+}
+
+function handleArticlePageChange(p: number): void {
+  articlePage.value = p
+  void fetchLawArticles()
+}
+
+async function handleVerifyArticle(): Promise<void> {
+  const clean = verifyInputText.value.trim()
+  if (!clean) {
+    ElMessage.warning('请粘贴或输入待核验的法条文本')
+    return
+  }
+  verifying.value = true
+  try {
+    verifyResult.value = await regulationsApi.verifyArticle(clean)
+  } finally {
+    verifying.value = false
+  }
+}
+
+function fillSampleForVerify(art: RegulationArticleOut): void {
+  const lawTitle = selectedLaw.value?.name || ''
+  verifyInputText.value = `${lawTitle}${art.article_no} ${art.content}`
+  void handleVerifyArticle()
+}
+
+async function handleCrawlUpdates(): Promise<void> {
+  crawling.value = true
+  try {
+    crawlReport.value = await regulationsApi.crawlUpdates()
+    await fetchLaws(false)
+    ElMessage.info(
+      `官网更新检查完成：共检查 ${crawlReport.value.total_sources} 个源，` +
+        `更新 ${crawlReport.value.updated_laws_count} 部，未配置占位源 ${crawlReport.value.unconfigured_count} 个`,
+    )
+  } finally {
+    crawling.value = false
+  }
+}
+
+async function handleImportLawFile(ev: Event): Promise<void> {
+  const input = ev.target as HTMLInputElement
+  const f = input.files?.[0]
+  if (!f) return
+  importingFile.value = true
+  try {
+    const res = await regulationsApi.importFile(f, importLawNameHint.value)
+    ElMessage.success(
+      `成功导入 ${res.law_name}：共 ${res.article_count} 条（新增 ${res.added_count} 条，修订 ${res.modified_count} 条）`,
+    )
+    importLawNameHint.value = ''
+    await fetchLaws(false)
+    const found = laws.value.find((l) => l.id === res.law_id)
+    if (found) {
+      await handleSelectLaw(found)
+    }
+  } finally {
+    importingFile.value = false
+    input.value = ''
+  }
+}
+
 onMounted(() => {
   void fetchRuleConfig()
   void fetchCerts()
+  void fetchLaws(true)
 })
 </script>
-
 <template>
   <div class="rules-certs-view">
     <div class="bg-panel rc-main-card">
@@ -241,7 +379,7 @@ onMounted(() => {
               </el-select>
             </div>
 
-            <!-- 自定义红线动态行编辑（keyword + severity + consequence 增删行） -->
+            <!-- 自定义红线动态行编辑 -->
             <div class="custom-redlines-section">
               <div class="crs-hd">
                 <div>
@@ -378,6 +516,224 @@ onMounted(() => {
             </el-table>
           </div>
         </el-tab-pane>
+
+        <!-- 页签 ③：E4 法规库浏览、法条三态真伪核验与官网更新 -->
+        <el-tab-pane label="③ 法规库与法条核验" name="regulations">
+          <div class="regulations-pane">
+            <!-- 1. 法条三态真伪核验区（exact_match 绿勾 / fuzzy_hint 灰标 / unverifiable 红标） -->
+            <div class="verify-box">
+              <div class="vb-hd">
+                <div>
+                  <h4>法条真伪三态溯源核验台（LLM 零真伪裁决权 · 纯确定性底表对账）</h4>
+                  <p>
+                    粘贴任意法律依据或条文文本（自动兼容“第1条”与“第一条”变体），实时与本地权威法规库逐字对账。
+                  </p>
+                </div>
+                <el-button type="primary" :loading="verifying" @click="handleVerifyArticle">
+                  立即核验法条真伪
+                </el-button>
+              </div>
+
+              <el-input
+                v-model="verifyInputText"
+                type="textarea"
+                :rows="2"
+                placeholder="粘贴待核验法条，例如：《中华人民共和国招标投标法》第1条 为了规范招标投标活动，保护国家利益、社会公共利益和招标投标活动当事人的合法权益，提高经济效益，保证项目质量，制定本法。"
+              />
+
+              <!-- 三态核验结果展示卡片 -->
+              <div
+                v-if="verifyResult"
+                class="verify-result-card"
+                :class="verifyResult.status"
+              >
+                <div class="vr-top">
+                  <!-- 状态 1：exact_match 绿勾 -->
+                  <span v-if="verifyResult.status === 'exact_match'" class="vr-badge exact">
+                    ✓ 库内原文（{{ verifyResult.law }}{{ verifyResult.article_no }}）
+                  </span>
+                  <!-- 状态 2：fuzzy_hint 灰标 -->
+                  <span v-else-if="verifyResult.status === 'fuzzy_hint'" class="vr-badge fuzzy">
+                    疑似系{{ verifyResult.law }}{{ verifyResult.article_no }}改写，未经核验
+                  </span>
+                  <!-- 状态 3：unverifiable 红标 -->
+                  <span v-else class="vr-badge unverified">
+                    ✕ 库中未收录，真伪未经核验
+                  </span>
+
+                  <span class="vr-sim mono-num">
+                    匹配度：{{ (verifyResult.similarity * 100).toFixed(1) }}%
+                  </span>
+                </div>
+
+                <div class="vr-msg">{{ verifyResult.message }}</div>
+
+                <div v-if="verifyResult.official_content" class="vr-official">
+                  <b>库内权威原文（{{ verifyResult.law }} · {{ verifyResult.article_no }}）：</b>
+                  <span>{{ verifyResult.official_content }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 2. 顶部管理员操作条：检查官网更新 + 手动上传 json/txt/docx/pdf 四格式法规 -->
+            <div class="rp-top-bar" style="margin-top: 18px">
+              <div>
+                <h3>招投标权威法律法规底表（已收录 {{ laws.length }} 部法规）</h3>
+                <p>点击左侧法规卡片可浏览全部条文并按关键词检索；点击任意条文可一键填入上方核验台测试。</p>
+              </div>
+
+              <div v-if="authStore.isAdmin" class="admin-reg-actions">
+                <el-input
+                  v-model.trim="importLawNameHint"
+                  size="small"
+                  placeholder="导入法规名称（可选）"
+                  style="width: 180px"
+                />
+                <label class="upload-law-btn">
+                  <span>{{ importingFile ? '导入解析中…' : '+ 上传法规 (json/txt/docx/pdf)' }}</span>
+                  <input
+                    type="file"
+                    accept=".json,.txt,.docx,.pdf"
+                    style="display: none"
+                    :disabled="importingFile"
+                    @change="handleImportLawFile"
+                  />
+                </label>
+                <el-button
+                  size="small"
+                  type="primary"
+                  plain
+                  :loading="crawling"
+                  @click="handleCrawlUpdates"
+                >
+                  检查官网更新
+                </el-button>
+              </div>
+            </div>
+
+            <!-- 官网更新检查结果面板 -->
+            <div v-if="crawlReport" class="crawl-report-box">
+              <div class="crb-title">
+                官网更新检查报告：共检查 {{ crawlReport.total_sources }} 个配置源，
+                更新 {{ crawlReport.updated_laws_count }} 部，待配置占位源 {{ crawlReport.unconfigured_count }} 个
+              </div>
+              <div class="crb-grid">
+                <div v-for="item in crawlReport.results" :key="item.name" class="crb-item">
+                  <span
+                    class="sev-pill"
+                    :class="
+                      item.status === 'updated' || item.status === 'unchanged'
+                        ? 'ok'
+                        : item.status === 'unconfigured'
+                          ? 'info'
+                          : 'warning'
+                    "
+                  >
+                    {{ item.status }}
+                  </span>
+                  <b>{{ item.name }}</b>
+                  <span class="crb-msg">{{ item.message }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 3. 左法规列表卡 + 右条文浏览与关键词检索分栏 -->
+            <div v-loading="loadingLaws" class="reg-split-layout">
+              <!-- 左栏：法规列表卡片 -->
+              <div class="law-cards-col">
+                <div
+                  v-for="law in laws"
+                  :key="law.id"
+                  class="law-card-item"
+                  :class="{ active: law.id === selectedLawId }"
+                  @click="handleSelectLaw(law)"
+                >
+                  <div class="lc-row1">
+                    <span class="lc-name">{{ law.name }}</span>
+                    <span class="sev-pill info">{{ law.article_count }} 条</span>
+                  </div>
+                  <div class="lc-meta">
+                    <div>发文机关：{{ law.issuing_body || '国家立法机关' }}</div>
+                    <div>
+                      来源：<code>{{ law.source_url || '内置种子' }}</code>
+                    </div>
+                    <div v-if="law.updated_at">
+                      更新：{{ law.updated_at.slice(0, 19).replace('T', ' ') }}
+                    </div>
+                  </div>
+                </div>
+
+                <el-empty v-if="laws.length === 0" description="法规库为空" :image-size="60" />
+              </div>
+
+              <!-- 右栏：选中法规的条文浏览与关键词检索 -->
+              <div v-loading="loadingArticles" class="law-articles-col">
+                <div class="la-toolbar">
+                  <div class="la-current-title">
+                    <b>{{ selectedLaw?.name || '请选择左侧法规' }}</b>
+                    <span class="mono-num">（共 {{ totalArticles }} 条匹配）</span>
+                  </div>
+
+                  <div class="la-search">
+                    <el-input
+                      v-model="articleKeyword"
+                      size="small"
+                      clearable
+                      placeholder="按条号（如 第三十三条）或正文关键词检索…"
+                      style="width: 260px"
+                      @keyup.enter="handleSearchArticles"
+                      @clear="handleSearchArticles"
+                    />
+                    <el-button size="small" type="primary" @click="handleSearchArticles">
+                      检索条文
+                    </el-button>
+                  </div>
+                </div>
+
+                <div class="articles-scroll-list">
+                  <div
+                    v-for="art in articles"
+                    :key="art.id"
+                    class="art-item"
+                  >
+                    <div class="art-head">
+                      <span class="art-no">{{ art.article_no }}</span>
+                      <span class="art-hash mono-num">SHA256: {{ art.content_hash.slice(0, 10) }}</span>
+                      <el-button
+                        size="small"
+                        link
+                        type="primary"
+                        style="margin-left: auto"
+                        @click="fillSampleForVerify(art)"
+                      >
+                        送入核验台测试 ↑
+                      </el-button>
+                    </div>
+                    <div class="art-content">{{ art.content }}</div>
+                  </div>
+
+                  <el-empty
+                    v-if="articles.length === 0"
+                    description="未检索到匹配的法条记录"
+                    :image-size="64"
+                  />
+                </div>
+
+                <div v-if="totalArticles > articlePageSize" class="art-pager">
+                  <el-pagination
+                    small
+                    background
+                    layout="total, prev, pager, next"
+                    :total="totalArticles"
+                    :page-size="articlePageSize"
+                    :current-page="articlePage"
+                    @current-change="handleArticlePageChange"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </el-tab-pane>
       </el-tabs>
     </div>
 
@@ -506,12 +862,291 @@ onMounted(() => {
   gap: 12px;
 }
 
-/* 证照临期行橙色高亮 & 过期行红色高亮 */
 :deep(.cert-expiring-row) {
   background-color: #fff7ed !important;
 }
 
 :deep(.cert-expired-row) {
   background-color: #fef2f2 !important;
+}
+
+/* ── 页签 ③：法规库与三态核验样式 ── */
+.verify-box {
+  padding: 16px 18px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-line);
+  border-radius: 10px;
+}
+
+.vb-hd {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.vb-hd h4 {
+  font-size: 14.5px;
+  font-weight: 900;
+  color: var(--txt-strong);
+}
+
+.vb-hd p {
+  font-size: 12px;
+  color: var(--txt-sec);
+  margin-top: 2px;
+}
+
+.verify-result-card {
+  margin-top: 12px;
+  padding: 12px 15px;
+  border-radius: 8px;
+  border: 1px solid var(--border-line);
+  border-left: 4px solid var(--txt-muted);
+  background: #ffffff;
+}
+
+.verify-result-card.exact_match {
+  border-left-color: var(--sev-ok);
+  background: #f0fdf4;
+}
+
+.verify-result-card.fuzzy_hint {
+  border-left-color: #64748b;
+  background: #f8fafc;
+}
+
+.verify-result-card.unverifiable {
+  border-left-color: var(--sev-error);
+  background: #fef2f2;
+}
+
+.vr-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.vr-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.vr-badge.exact {
+  background: var(--sev-ok);
+  color: #ffffff;
+}
+
+.vr-badge.fuzzy {
+  background: #cbd5e1;
+  color: #1e293b;
+}
+
+.vr-badge.unverified {
+  background: var(--sev-error);
+  color: #ffffff;
+}
+
+.vr-sim {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--txt-sec);
+}
+
+.vr-msg {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--txt-strong);
+  margin-bottom: 6px;
+}
+
+.vr-official {
+  font-size: 12.5px;
+  color: var(--txt-body);
+  background: rgba(255, 255, 255, 0.75);
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px dashed var(--border-strong);
+  line-height: 1.6;
+}
+
+.admin-reg-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.upload-law-btn {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 4px;
+  border: 1px solid var(--brand);
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.crawl-report-box {
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+}
+
+.crb-title {
+  font-size: 13px;
+  font-weight: 800;
+  color: #1e3a8a;
+  margin-bottom: 8px;
+}
+
+.crb-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.crb-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.crb-msg {
+  color: var(--txt-sec);
+}
+
+.reg-split-layout {
+  display: grid;
+  grid-template-columns: 330px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.law-cards-col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.law-card-item {
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-line);
+  background: var(--bg-subtle);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.law-card-item:hover {
+  border-color: var(--brand);
+  background: #ffffff;
+}
+
+.law-card-item.active {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+  box-shadow: 0 0 0 2px rgba(29, 78, 216, 0.12);
+}
+
+.lc-row1 {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.lc-name {
+  font-size: 13.5px;
+  font-weight: 900;
+  color: var(--txt-strong);
+}
+
+.lc-meta {
+  font-size: 11.5px;
+  color: var(--txt-sec);
+  line-height: 1.55;
+}
+
+.law-articles-col {
+  border: 1px solid var(--border-line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  background: #ffffff;
+}
+
+.la-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-line);
+  margin-bottom: 12px;
+}
+
+.la-search {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.articles-scroll-list {
+  max-height: 520px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.art-item {
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-line);
+  background: var(--bg-subtle);
+}
+
+.art-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.art-no {
+  font-size: 13px;
+  font-weight: 900;
+  color: var(--brand);
+}
+
+.art-hash {
+  font-size: 11px;
+  color: var(--txt-muted);
+}
+
+.art-content {
+  font-size: 13px;
+  color: var(--txt-body);
+  line-height: 1.65;
+}
+
+.art-pager {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
 }
 </style>

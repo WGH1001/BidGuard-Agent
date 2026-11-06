@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""B1 · BidGuard-Agent 数据库 9 张核心 ORM 表定义（SQLAlchemy 2.0）。
+"""B1 / E4 · BidGuard-Agent 数据库 11 张核心 ORM 表定义（SQLAlchemy 2.0）。
 
-契约依据：INTERFACE.md §2（表名、字段名、枚举值逐字对齐）。
+契约依据：INTERFACE.md §2（既有 9 表一字不动 + E4 新增 regulation_laws / regulation_articles 两表）。
 双驱动兼容：PostgreSQL 16（生产主库）/ SQLite（开发与单测回退，开启 WAL 与 foreign_keys=ON）。
 """
 from __future__ import annotations
@@ -21,6 +21,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     event,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -265,11 +266,58 @@ class UserModelConfig(Base):
     user = relationship('User', back_populates='model_config_rel')
 
     def __repr__(self) -> str:
-        # 铁律 2：明文与密文 key 严禁出现在 repr 或日志中
         return (
             f"<UserModelConfig(id={self.id}, user_id={self.user_id}, "
             f"base_url={self.base_url!r}, model_flash={self.model_flash!r}, api_key='***REDACTED***')>"
         )
+
+
+# ── 10. regulation_laws（E4 招投标法律法规主表）───────────────────────────
+class RegulationLaw(Base):
+    __tablename__ = 'regulation_laws'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(256), nullable=False, unique=True, index=True)  # 《...》全称，唯一
+    issuing_body = Column(String(128), nullable=True)
+    effective_date = Column(String(64), nullable=True)
+    source_url = Column(String(512), nullable=True)
+    article_count = Column(Integer, nullable=False, default=0)
+    content_hash = Column(String(64), nullable=False, default='', index=True)
+    fetched_at = Column(DateTime, nullable=True)
+    is_seed = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
+    updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
+
+    articles = relationship(
+        'RegulationArticle',
+        back_populates='law',
+        cascade='all, delete-orphan',
+        passive_deletes=True,
+    )
+
+
+# ── 11. regulation_articles（E4 招投标法规条文表）─────────────────────────
+class RegulationArticle(Base):
+    __tablename__ = 'regulation_articles'
+    __table_args__ = (
+        UniqueConstraint('law_id', 'article_no', name='uq_regulation_law_article_no'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    law_id = Column(
+        Integer,
+        ForeignKey('regulation_laws.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True,
+    )
+    article_no = Column(String(64), nullable=False, index=True)          # 如 "第一条"
+    article_title = Column(String(256), nullable=True)
+    content = Column(Text, nullable=False)
+    content_hash = Column(String(64), nullable=False, default='', index=True)
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
+    updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
+
+    law = relationship('RegulationLaw', back_populates='articles')
 
 
 def apply_sqlite_pragmas(engine: Any) -> None:
