@@ -1,0 +1,24 @@
+# BidGuard 法规库 · 官网更新源配置（E4）
+# 用途：POST /api/regulations/crawl 逐源拉取官方公布页，解析条文后与库内 content_hash 比对更新。
+# url 为 TODO_USER_FILL 占位——用户找到官方公布页（优先 gov.cn 公报静态页，次选 flk.npc.gov.cn）后填入。
+# adapter 当前仅支持 static_html（requests+lxml 直接解析）；JS 渲染站点拉不到正文时端点会诚实报错并引导手动导入。
+
+sources:
+  - name: 中华人民共和国招标投标法（2017 修正）
+    url: TODO_USER_FILL
+    adapter: static_html
+  - name: 中华人民共和国政府采购法（2014 修正）
+    url: TODO_USER_FILL
+    adapter: static_html
+  - name: 中华人民共和国政府采购法实施条例
+    url: TODO_USER_FILL
+    adapter: static_html
+  - name: 招标投标法实施条例
+    url: TODO_USER_FILL
+    adapter: static_html
+  - name: 政府采购货物和服务招标投标管理办法（财政部令第 87 号）
+    url: TODO_USER_FILL
+    adapter: static_html
+  - name: 中华人民共和国反不正当竞争法（2019 修正）
+    url: TODO_USER_FILL
+    adapter: static_html
