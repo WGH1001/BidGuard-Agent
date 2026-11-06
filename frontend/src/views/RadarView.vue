@@ -1,13 +1,59 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { radarApi, validateUploadFile } from '@/api'
 import { formatPageOrOffset, type RadarScanOut } from '@/api/types'
+import { RADAR_CACHE_KEY, useAuthStore } from '@/stores/auth'
+
+defineOptions({ name: 'RadarView' })
+
+const authStore = useAuthStore()
 
 const loading = ref(false)
 const tenderFile = ref<File | null>(null)
 const customTitle = ref('')
 const scanResult = ref<RadarScanOut | null>(null)
+
+interface CachedRadarPayload {
+  username: string
+  data: RadarScanOut
+}
+
+function saveToSessionStorage(data: RadarScanOut): void {
+  try {
+    const payload: CachedRadarPayload = {
+      username: authStore.user?.username || '',
+      data,
+    }
+    sessionStorage.setItem(RADAR_CACHE_KEY, JSON.stringify(payload))
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function restoreFromSessionStorage(): void {
+  if (scanResult.value) return
+  try {
+    const raw = sessionStorage.getItem(RADAR_CACHE_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw) as Partial<CachedRadarPayload>
+    const curUser = authStore.user?.username || ''
+    if (parsed && parsed.data && (!parsed.username || parsed.username === curUser)) {
+      scanResult.value = parsed.data
+      customTitle.value = parsed.data.title || ''
+    } else {
+      sessionStorage.removeItem(RADAR_CACHE_KEY)
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function handleAuthChanged(): void {
+  scanResult.value = null
+  tenderFile.value = null
+  customTitle.value = ''
+}
 
 function onPickFile(ev: Event): void {
   const input = ev.target as HTMLInputElement
@@ -32,7 +78,9 @@ async function handleRunRadar(): Promise<void> {
   }
   loading.value = true
   try {
-    scanResult.value = await radarApi.scan(tenderFile.value, customTitle.value)
+    const res = await radarApi.scan(tenderFile.value, customTitle.value)
+    scanResult.value = res
+    saveToSessionStorage(res)
     ElMessage.success('F6 投前控标雷达扫描完成')
   } finally {
     loading.value = false
@@ -51,6 +99,15 @@ function exclusiveTypeCls(exType: string): string {
   if (exType === '业绩定向') return 'info'
   return 'warning'
 }
+
+onMounted(() => {
+  restoreFromSessionStorage()
+  window.addEventListener('bidguard-auth-changed', handleAuthChanged)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('bidguard-auth-changed', handleAuthChanged)
+})
 </script>
 
 <template>

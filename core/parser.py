@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""T1 / E1 文档解析模块（含 PDF 扫描件 OCR 与 docx 内嵌证照图片段落就近吸附离线 OCR）。
+"""T1 / E1 / E3 文档解析模块（含 PDF 扫描件 OCR、docx 内嵌证照图片就近 OCR 与 PDF 印刷页码映射）。
 
 实现规格（签名不得修改）：
     parse_document(file_path) -> ParsedDoc
@@ -16,7 +16,9 @@
        - pages = 1（docx 无固定分页概念）。
     2. .pdf：用 PyMuPDF（import pymupdf）。
        - pymupdf.open(file_path) 后逐页 page.get_text()，用 '\n' 连接；
-       - pages = 页数；with 语句确保关闭。
+       - pages = 页数；with 语句确保关闭；
+       - E3 新增 build_pdf_page_spans / offset_to_page：优先读取 PDF page.get_label() 印刷页码，
+         无有效阿拉伯数字 label 时回退 1-based 物理页号；docx 恒返回 None。
     3. .txt / .md：按字节读取，依次尝试 utf-8 / gbk / utf-16 解码，
        全部失败则 utf-8 + errors='replace'；pages = 1。
     4. 其他扩展名：raise ValueError(f'不支持的文件类型: {ext}，当前支持 docx/pdf/txt')
@@ -85,6 +87,63 @@ def _ocr_json_cache_path(pdf_path: Path) -> Path:
 def _docx_media_ocr_cache_path(docx_path: Path) -> Path:
     """E1 docx 内嵌图片 OCR 伴生缓存：<原文件路径>.media.ocr.json（与 docx 同目录）。"""
     return Path(str(docx_path) + '.media.ocr.json')
+
+
+def _resolve_pdf_page_number(page, physical_index_0based: int) -> int:
+    """E3 §2.2：优先读取 PDF 页的印刷页码 page.get_label()；
+    若 label 为正整数（如 '1', '15'）则采用该印刷页码，否则回退为 1-based 物理页号。
+    """
+    try:
+        label_fn = getattr(page, 'get_label', None)
+        if callable(label_fn):
+            lbl = str(label_fn() or '').strip()
+            if lbl.isdigit():
+                val = int(lbl)
+                if val > 0:
+                    return val
+            m = re.match(r'^\s*(\d+)\s*$', lbl)
+            if m:
+                val = int(m.group(1))
+                if val > 0:
+                    return val
+    except Exception:
+        pass
+    return physical_index_0based + 1
+
+
+def build_pdf_page_spans(file_path: str | Path | None) -> list[tuple[int, int, int]]:
+    """E3 §2.2：若输入为 PDF 文件，计算每页在 parse_document 拼接文本中的 (start_char, end_char, page_no)。
+    优先采用 page.get_label() 印刷页码，无有效 label 时回退物理页号；docx 或非 PDF 一律返回 []。
+    """
+    if not file_path:
+        return []
+    path = Path(file_path)
+    if not path.is_file() or path.suffix.lower() != '.pdf':
+        return []
+    try:
+        import pymupdf
+        spans: list[tuple[int, int, int]] = []
+        cursor = 0
+        with pymupdf.open(str(path)) as pdf_doc:
+            for idx, page in enumerate(pdf_doc):
+                ptxt = page.get_text()
+                end = cursor + len(ptxt)
+                page_no = _resolve_pdf_page_number(page, idx)
+                spans.append((cursor, end, page_no))
+                cursor = end + 1  # parse_document 使用 '\n'.join(text_parts)
+        return spans
+    except Exception:
+        return []
+
+
+def offset_to_page(offset: int | None, page_spans: list[tuple[int, int, int]]) -> int | None:
+    """E3 §2.2：将字符偏移量映射为 PDF 页码；docx 或空 page_spans 恒返回 None（绝不编造页码）。"""
+    if offset is None or offset < 0 or not page_spans:
+        return None
+    for lo, hi, page_no in page_spans:
+        if lo <= offset <= hi:
+            return page_no
+    return page_spans[-1][2] if offset >= page_spans[-1][0] else None
 
 
 def _get_image_dimensions(img_bytes: bytes) -> tuple[int, int] | None:
@@ -289,15 +348,7 @@ def _render_page_image(page):
 
 
 def _ocr_pdf_text(pdf_path: Path) -> str:
-    """扫描件 OCR 主流程：缓存秒读 → 逐页渲染识别 → 成功写缓存。
-
-    缓存策略：识别成功才写 <pdf路径>.ocr.txt 与 .ocr.json；后续 parse_document（含
-    /api/qa/ask 读取源合同）检测到缓存直接返回，绝不重复跑 OCR。
-
-    Raises:
-        ValueError: OCR 识别后文本仍不足 OCR_MIN_CHARS（空白页/无效图片）。
-        RuntimeError: OCR 引擎未安装等环境问题。
-    """
+    """扫描件 OCR 主流程：缓存秒读 → 逐页渲染识别 → 成功写缓存。"""
     cache = _ocr_cache_path(pdf_path)
     if cache.exists():
         cached = cache.read_text(encoding='utf-8')
@@ -316,7 +367,6 @@ def _ocr_pdf_text(pdf_path: Path) -> str:
             page_lines = []
             if result:
                 for line in result:
-                    # RapidOCR 返回 [box, text, score]
                     if len(line) >= 2 and line[1]:
                         txt = str(line[1]).strip()
                         ocr_parts.append(txt)
@@ -357,11 +407,7 @@ def _ocr_pdf_text(pdf_path: Path) -> str:
 
 
 def get_pdf_ocr_data(pdf_path: str | Path) -> list[dict]:
-    """T46 获取扫描件 PDF 的 OCR 结构化数据（含每页 boxes、文本、页面尺寸与图像尺寸）。
-
-    优先秒读伴生缓存 <pdf>.ocr.json；若缓存不存在则触发一次 OCR 流程。
-    若该 PDF 并非扫描件或 OCR 无有效文本，返回空列表 []。
-    """
+    """T46 获取扫描件 PDF 的 OCR 结构化数据（含每页 boxes、文本、页面尺寸与图像尺寸）。"""
     path = Path(pdf_path)
     json_cache = _ocr_json_cache_path(path)
     if json_cache.exists():
@@ -372,7 +418,6 @@ def get_pdf_ocr_data(pdf_path: str | Path) -> list[dict]:
         except Exception:
             pass
 
-    # 若 json 缓存尚不存在，触发一次 OCR（若是扫描件则会生成 json 缓存）
     try:
         _ocr_pdf_text(path)
     except Exception:
@@ -389,7 +434,7 @@ def get_pdf_ocr_data(pdf_path: str | Path) -> list[dict]:
 
 
 def _ocr_image_text(img_path: Path) -> str:
-    """图片格式合同（.png / .jpg / .jpeg）OCR 识别并写入伴生缓存 <路径>.ocr.txt。"""
+    """图片格式文件（.png / .jpg / .jpeg）OCR 识别并写入伴生缓存 <路径>.ocr.txt。"""
     cache = _ocr_cache_path(img_path)
     if cache.exists():
         cached = cache.read_text(encoding='utf-8')
@@ -414,26 +459,14 @@ def _ocr_image_text(img_path: Path) -> str:
     if len(text.strip()) < OCR_MIN_CHARS:
         raise ValueError(
             f'图片 OCR 识别后仅得 {len(text.strip())} 字：图片为空白或清晰度不足，'
-            '请上传字迹清晰的合同图片'
+            '请上传字迹清晰的图片'
         )
     cache.write_text(text, encoding='utf-8')
     return text
 
 
 def parse_document(file_path: str) -> ParsedDoc:
-    """解析合同/标书文件为纯文本。
-
-    Args:
-        file_path: 文件路径（.docx / .pdf / .txt / .md / .png / .jpg / .jpeg）。
-
-    Returns:
-        ParsedDoc: text 为全文纯文本；source_type 为 'docx'|'pdf'|'txt'；pages 为页数。
-
-    Raises:
-        FileNotFoundError: 文件不存在。
-        ValueError: 扩展名不支持。
-        RuntimeError: 解析失败（文件损坏、加密等）。
-    """
+    """解析文档文件为纯文本（签名与返回结构严格保持不变）。"""
     path = Path(file_path)
 
     if not path.exists():
@@ -477,10 +510,6 @@ def parse_document(file_path: str) -> ParsedDoc:
                     text_parts.append(itxt)
 
             for table in doc.tables:
-                # F1 修正（2026-11-04 滁州托育语料实测）：合并单元格的延续行会
-                # 反复返回同一 tc 元素，且 WPS 生成的文件存在"同一内容写多个
-                # vMerge 起点格"的怪结构——按格元素本体去重（引用入集合保持
-                # 存活，严禁用 id()：对象回收后 id 复用会导致去重不稳定）。
                 seen_tcs = set()
                 for row in table.rows:
                     for cell in row.cells:
@@ -523,9 +552,6 @@ def parse_document(file_path: str) -> ParsedDoc:
                     max_page_chars = max(max_page_chars, len(page_text.strip()))
             text = "\n".join(text_parts)
 
-            # T29 扫描件兜底：总量 <100 字且**每一页都没有文本层**（单页
-            # 最多文本 <20 字）才判定为图片型 PDF 触发 OCR——短小但真实
-            # 的文本型 PDF 不误伤（配合 orchestrator 终极防护）
             if len(text.strip()) < OCR_MIN_CHARS and max_page_chars < 20:
                 text = _ocr_pdf_text(path)
 
@@ -551,7 +577,6 @@ def parse_document(file_path: str) -> ParsedDoc:
             return ParsedDoc(text=text, source_type=source_type, pages=1)
 
     except ValueError:
-        # OCR 兜底的语义化失败（扫描件仍无有效文本）原样上抛，不包壳
         raise
     except Exception as e:
         raise RuntimeError(f"解析失败: {type(e).__name__}: {e}") from e

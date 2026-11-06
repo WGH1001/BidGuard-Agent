@@ -73,14 +73,20 @@ function getStageState(node: PipelineStageNode, index: number): 'done' | 'active
 const isFailed = computed(() => localStatus.value === 'failed')
 const isDelivered = computed(() => localStatus.value === 'delivered')
 
-function startStream(): void {
+function startStream(resetZero = true): void {
   closeActiveStream()
+  if (resetZero) {
+    localStatus.value = 'extracting'
+    localProgress.value = 0
+    localDetail.value = '正在启动新一轮防废标核验流水线…'
+    localError.value = ''
+  }
   streaming.value = true
   stopStreamFn = subscribeCheckStream(props.taskId, {
     onProgress(frame) {
       localStatus.value = frame.status
       if (typeof frame.progress === 'number') {
-        localProgress.value = Math.max(localProgress.value, frame.progress)
+        localProgress.value = frame.progress
       }
       if (frame.stage_detail) {
         localDetail.value = frame.stage_detail
@@ -115,13 +121,15 @@ watch(
     if (newId !== oldId) {
       closeActiveStream()
     }
-    localStatus.value = String(newSt || 'created')
-    localProgress.value = Number(newProg || 0)
-    localDetail.value = String(newDet || '')
-    localError.value = String(newErr || '')
+    if (!streaming.value) {
+      localStatus.value = String(newSt || 'created')
+      localProgress.value = Number(newProg || 0)
+      localDetail.value = String(newDet || '')
+      localError.value = String(newErr || '')
+    }
 
     if (localStatus.value in { extracting: 1, checking: 1, grading: 1 } && !streaming.value) {
-      startStream()
+      startStream(false)
     }
   },
   { immediate: true },

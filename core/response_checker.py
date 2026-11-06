@@ -1,21 +1,16 @@
-﻿# -*- coding: utf-8 -*-
-"""F4 ★条款逐条响应核验 + 标书前后矛盾检测（大模型①② + 双书勾稽 + E2 门控混合检索与缺佐证探针）。
+# -*- coding: utf-8 -*-
+"""F4 ★条款逐条响应核验 + 标书前后矛盾检测（大模型①② + 双书勾稽 + E2/E3 门控混合检索与同文对齐加固）。
 
-模块职责（对应 PRD-02 §7 F4 与 E2 任务卡）：
+模块职责（对应 PRD-02 §7 F4 与 E2/E3 任务卡）：
 1. ★/▲ 强制条款逐条响应核验（双书勾稽，大模型①）：
    - 输入：招标文件 + 投标文件 + F1 提取的 ★/▲ 要求清单（仅消费 kind=='requirement' 及模式 A/B）；
-   - 门控链路（E2 升级点 1 & 3b）：
-     ① 初筛（条款号/标题/高 2-gram 重合度）直接命中 -> 0ms 直通放行，绝不触发混合检索；
-     ② 初筛未命中的"疑似漏应答候选" -> 启动 core.hybrid_retriever 三级混合检索（含 BM25 + 45组同义词扩展），
-        检索命中（如"项目负责人"->"拟派项目经理"同义改写）则改判 RESPONSE_OK 并附原文证据；
+   - 门控链路（E2/E3 同文对齐加固）：
+     ① 初筛（原文子串/括号长句分句/条款号+标题/高 2-gram 重合度）直接命中 -> 0ms 直通放行，绝不触发混合检索；
+     ② 初筛未命中的"疑似漏应答候选" -> 启动 core.hybrid_retriever 三级混合检索；
    - 缺证明材料支撑探针（E2 升级点 3a · MISSING_EVIDENCE）：
      当招标要求命中"须提供/应提供/提供...(证书|检测报告|截图|证明材料|承诺函|复印件|扫描件)"且初判为 RESPONSE_OK 时，
-     检查投标书除照抄原句外是否含佐证锚点（见附件/详见/证书编号/报告编号/有效期至等）；
-     无锚点则产出 code='MISSING_EVIDENCE', severity='warning'，且 star_results 主状态保持 'RESPONSE_OK'
-     并附 evidence_warning 标记（兼容 F5 偏离表：偏离情况列保持"无偏离"，响应列末尾含"（注：请核实已附对应证明材料）"）。
-2. 标书前后矛盾检测（书内自洽扫描，0 Token 确定性 + 大模型②）：
-   - 0 Token 扫描投标书内部多处出现的质保期、总报价、响应时间、质保金比例、交货工期，同参数多值直接报警；
-   - 语义级冲突走 LLM 二次判定并强制走 quote_verifier 溯源。
+     检查投标书除照抄原句外是否含佐证锚点；无锚点则产出 code='MISSING_EVIDENCE', severity='warning'。
+2. 标书前后矛盾检测（书内自洽扫描，0 Token 确定性 + 大模型②）。
 """
 from __future__ import annotations
 
@@ -27,7 +22,7 @@ from typing import Any, Optional
 
 from core.bid_aligner import compare_contracts, _build_clause_units
 from core.hybrid_retriever import hybrid_retrieve_windows
-from core.parser import parse_document
+from core.parser import build_pdf_page_spans, offset_to_page, parse_document
 from core.quote_verifier import normalize_zh, verify_quote
 from core.tender_extractor import (
     build_review_checklist,
@@ -54,11 +49,11 @@ _EVIDENCE_REQ_RE = re.compile(
 _EVIDENCE_ANCHOR_RE = re.compile(
     r'见附件|详见|附后|见后附|见本标书|见投标文件|附件\s*[0-9一二三四五六七八九十]+'
     r'|证书编号|报告编号|认证编号|登记号|编号\s*[：:]'
-    r'|有效期至|发证机关|发证单位|检验结论|检测结论|实测报告'    r'|扫描件如下|复印件如下|截图如下|详见第\s*\d+\s*页'
+    r'|有效期至|发证机关|发证单位|检验结论|检测结论|实测报告'
+    r'|扫描件如下|复印件如下|截图如下|详见第\s*\d+\s*页'
 )
 
-# E2 验收修正：全书上下文兜底仅认"强锚点"（编号类实证，带实际编号内容）——
-# 泛锚点（见附件等）在全书范围会产生跨需求污染（其他条款的"见附件"豁免本条）
+# E2 验收修正：全书上下文兜底仅认"强锚点"（编号类实证，带实际编号内容）
 _EVIDENCE_STRICT_ANCHOR_RE = re.compile(
     r'(?:证书编号|报告编号|认证编号|登记号|许可证编号|资质编号|备案编号)'
     r'\s*[:：]?\s*[A-Za-z0-9]{4,}'
@@ -72,8 +67,6 @@ _CN_NUM_MAP = {
 }
 
 _JSON_BLOCK_RE = re.compile(r'\{.*\}', re.DOTALL)
-
-# ── LLM 提示词定义（大模型①：双书响应核验；大模型②：书内语义矛盾核验）──────
 
 _RESPONSE_CHECK_PROMPT = """你是招投标合规审查专家。下面给出招标文件中的一条【实质性要求原文窗口】与投标文件中检索到的【投标响应原文窗口】。
 请核验投标文件对该条招标要求的响应状态，并只输出一个 JSON 对象。
@@ -116,8 +109,6 @@ _SELF_CONTRADICTION_PROMPT = """你是投标文件合规审查专家。下面是
 只输出 JSON，不要任何其他文字。"""
 
 
-# ── 工具函数：JSON 解析、PDF 页码映射、中文数字与参数提取 ──────────────────
-
 def _parse_llm_json(content: str) -> Optional[dict]:
     if not content:
         return None
@@ -132,41 +123,17 @@ def _parse_llm_json(content: str) -> Optional[dict]:
 
 
 def _build_pdf_page_spans(file_path: Optional[str | Path]) -> list[tuple[int, int, int]]:
-    """若输入为 PDF 文件，用 pymupdf 计算每页在 parse_document 拼接文本中的 (start, end, page_no)。
-    docx 或非 PDF 一律返回空列表（页码置 None，绝不伪造页码）。
-    """
-    if not file_path:
-        return []
-    path = Path(file_path)
-    if not path.exists() or path.suffix.lower() != '.pdf':
-        return []
-    try:
-        import pymupdf
-        spans: list[tuple[int, int, int]] = []
-        cursor = 0
-        with pymupdf.open(str(path)) as doc:
-            for idx, page in enumerate(doc):
-                ptxt = page.get_text()
-                end = cursor + len(ptxt)
-                spans.append((cursor, end, idx + 1))
-                cursor = end + 1  # parse_document 使用 '\n'.join(text_parts)
-        return spans
-    except Exception:
-        return []
+    """复用 parser.build_pdf_page_spans（优先 page label 印刷页码，回退物理页码；docx 返 []）。"""
+    return build_pdf_page_spans(file_path)
 
 
 def _offset_to_page(offset: Optional[int], page_spans: list[tuple[int, int, int]]) -> Optional[int]:
     """将字符偏移换算为 PDF 页码（1-based）；docx 或未知偏移返回 None。"""
-    if offset is None or offset < 0 or not page_spans:
-        return None
-    for lo, hi, page_no in page_spans:
-        if lo <= offset <= hi:
-            return page_no
-    return page_spans[-1][2] if offset >= page_spans[-1][0] else None
+    return offset_to_page(offset, page_spans)
 
 
 def _cn_to_int(s: str) -> Optional[int]:
-    """将中文数字或阿拉伯数字字符串转为整数（支持 '三'->3, '十二'->12, '二十四'->24, '36'->36）。"""
+    """将中文数字或阿拉伯数字字符串转为整数。"""
     s = (s or '').strip()
     if not s:
         return None
@@ -188,23 +155,29 @@ def _cn_to_int(s: str) -> Optional[int]:
 
 
 def _expand_req_text(full_doc_text: str, req: dict) -> tuple[str, int, int]:
-    """按 _README.md 规范：若候选记录为 PDF 表格断行截短片段，按 start 向后扩窗吸附完整句子。"""
+    """按 _README.md 规范：若候选记录为 PDF 表格断行截短片段，按 start 向后扩窗吸附完整句子。
+    E3 §2.4 修复：保留原文真实换行符，不把 \n 替换为空格，确保同文对齐时在原文中 100% 精确可搜。
+    """
     raw_txt = (req.get('full_text') or req.get('text') or '').strip()
     start = int(req.get('start', 0))
     end = int(req.get('end', start + len(raw_txt)))
     if not full_doc_text:
         return raw_txt, start, end
 
-    # 若原候选过短（<18 字，典型如 '▲资金使'）且未以句号结尾，向后吸附到句末或换行段末
     if len(raw_txt) < 18 and not raw_txt.endswith(('。', '；', '！')):
         hi = min(len(full_doc_text), start + _REQ_EXPAND_AFTER)
         slice_after = full_doc_text[start:hi]
         period_pos = slice_after.find('。')
         if period_pos != -1:
-            expanded = slice_after[:period_pos + 1].strip()
+            end_pos = period_pos + 1
+            rest = slice_after[end_pos:]
+            m_paren = re.match(r'^\s*[（(][^）)]{1,60}[）)]', rest)
+            if m_paren:
+                end_pos += m_paren.end()
+            expanded = slice_after[:end_pos].strip()
         else:
             lines = [ln.strip() for ln in slice_after.splitlines() if ln.strip()]
-            expanded = ' '.join(lines[:3]).strip()
+            expanded = '\n'.join(lines[:3]).strip()
         if len(expanded) > len(raw_txt):
             return expanded, start, start + len(expanded)
 
@@ -221,6 +194,27 @@ def _extract_core_grams(text: str) -> set[str]:
     return {cleaned[i:i + 2] for i in range(len(cleaned) - 1)}
 
 
+def _build_direct_hit_result(bid_text: str, pos: int, anchor_len: int, score: float = 1.0) -> dict[str, Any]:
+    """根据在 bid_text 中命中的偏移量构造直通窗口字典（gate='direct'）。"""
+    w_lo = max(0, pos - _BID_WIN_BEFORE)
+    w_hi = min(len(bid_text), pos + anchor_len + _BID_WIN_AFTER)
+    line_end = bid_text.find('\n', pos + anchor_len)
+    q_end = (
+        line_end
+        if (line_end != -1 and line_end - pos <= 260)
+        else min(len(bid_text), pos + max(anchor_len, 40) + 80)
+    )
+    return {
+        'hit': True,
+        'score': score,
+        'window': bid_text[w_lo:w_hi],
+        'start': pos,
+        'end': q_end,
+        'matched_quote': bid_text[pos:q_end].strip(),
+        'gate': 'direct',
+    }
+
+
 def _locate_bid_window_for_req(
     req_text: str,
     req_start: int,
@@ -231,66 +225,58 @@ def _locate_bid_window_for_req(
     bid_text: str,
     client: Any = None,
 ) -> dict[str, Any]:
-    """为单条招标 ★/▲ 要求在投标书中定位最佳响应窗口（带 E2 严格门控 Gate Filter）。
-
-    优先级（先快后慢门控）：
-    1. 直接子串或"条款号+标题"锚点命中 -> 0ms 直通放行（gate='direct'，绝不触发混合检索）；
-    2. bid_aligner 条款级对齐命中（2-gram 重合度 >= _ANCHOR_MIN_SCORE） -> 0ms 直通放行（gate='direct'）；
-    3. 全文滑动行级高 2-gram 重合度（>= 0.35） -> 0ms 直通放行（gate='direct'）；
-    4. E2 门控兜底：仅当以上初筛全部未命中（疑似漏应答候选）时，才启动 hybrid_retrieve_windows
-       （Level 1 BM25 + 45组同义词扩展 / Level 2 向量精排），命中则标 gate='hybrid'。
-    """
+    """为单条招标 ★/▲ 要求在投标书中定位最佳响应窗口（带 E3 同文对齐加固与严格门控 Gate Filter）。"""
     if not bid_text or not bid_text.strip():
         return {
             'hit': False, 'score': 0.0, 'window': '',
             'start': None, 'end': None, 'matched_quote': '', 'gate': 'miss',
         }
 
-    req_norm = normalize_zh(re.sub(r'^[★▲\s0-9.、()（）一二三四五六七八九十]+', '', req_text))
-    req_grams = _extract_core_grams(req_text)
+    req_stripped = (req_text or '').strip()
+    if not req_stripped:
+        return {
+            'hit': False, 'score': 0.0, 'window': '',
+            'start': None, 'end': None, 'matched_quote': '', 'gate': 'miss',
+        }
 
-    # 1. 直接子串命中（如全文照抄响应或偏离表原样复制招标要求列）
-    if len(req_norm) >= 6:
-        raw_core = re.sub(r'^[★▲\s]+', '', req_text).strip()
+    # ── 1. E3 §2.4 同文对齐直通门控（0ms）：原文或去标记核心句/分句在 bid_text 中逐字存在即直通 ──
+    # 1a. 完整要求原文或首行直接存在于 bid_text（覆盖短要求如 "★（1）常规制片" 及同书自对齐）
+    first_line = req_stripped.split('\n', 1)[0].strip()
+    for exact_cand in (req_stripped, first_line):
+        if len(exact_cand) >= 2:
+            pos = bid_text.find(exact_cand)
+            if pos != -1:
+                return _build_direct_hit_result(bid_text, pos, len(exact_cand), score=1.0)
+
+    # 1b. 剥离行首 ★/▲ 与空白后的前 20 字子串匹配
+    raw_core = re.sub(r'^[★▲\s]+', '', first_line).strip()
+    if len(raw_core) >= 2:
         pos = bid_text.find(raw_core[:20])
         if pos != -1:
-            w_lo = max(0, pos - _BID_WIN_BEFORE)
-            w_hi = min(len(bid_text), pos + len(raw_core) + _BID_WIN_AFTER)
-            line_end = bid_text.find('\n', pos + len(raw_core))
-            q_end = line_end if (line_end != -1 and line_end - pos <= 260) else min(len(bid_text), pos + len(raw_core) + 80)
-            return {
-                'hit': True,
-                'score': 1.0,
-                'window': bid_text[w_lo:w_hi],
-                'start': pos,
-                'end': q_end,
-                'matched_quote': bid_text[pos:q_end].strip(),
-                'gate': 'direct',
-            }
+            return _build_direct_hit_result(bid_text, pos, min(len(raw_core), 20), score=1.0)
 
-        # 1.5 标题锚点：合并记录 = "★N、标题 + 大段正文"
-        head = (req_text.split('\n', 1)[0] if '\n' in req_text else req_text).strip()
-        m_t = re.match(r'^[★▲]?\s*[\d一二三四五六七八九十]+\s*[、\.．]\s*[^，。；\n\s]{2,40}', head)
-        title = re.sub(r'^[★▲\s]+', '', (m_t.group(0) if m_t else head)).strip()
-        title = title.rstrip('。；：:，, ')
-        if len(title) >= 6:
-            pos = bid_text.find(title[:24])
+    # 1c. 条款号+标题短语锚点（南京病理实证形态）
+    m_t = re.match(r'^[★▲]?\s*[\d一二三四五六七八九十]+\s*[、\.．]\s*[^，。；\n\s]{2,40}', first_line)
+    title = re.sub(r'^[★▲\s]+', '', (m_t.group(0) if m_t else first_line)).strip().rstrip('。；：:，, ')
+    if len(title) >= 4:
+        pos = bid_text.find(title[:24])
+        if pos != -1:
+            return _build_direct_hit_result(bid_text, pos, min(len(title), 24), score=0.95)
+
+    # 1d. E3 §2.4 括号长句/多行分句直通：按括号、分号、句号、换行拆出 >=6 字的核心分句定位
+    sub_clauses = [
+        re.sub(r'^[★▲\s0-9.、()（）一二三四五六七八九十]+', '', seg).strip()
+        for seg in re.split(r'[\n；;。！？（）()]+', req_stripped)
+    ]
+    for seg in sub_clauses:
+        if len(seg) >= 6:
+            pos = bid_text.find(seg[:24])
             if pos != -1:
-                w_lo = max(0, pos - _BID_WIN_BEFORE)
-                w_hi = min(len(bid_text), pos + len(title) + _BID_WIN_AFTER)
-                line_end = bid_text.find('\n', pos + len(title))
-                q_end = line_end if (line_end != -1 and line_end - pos <= 260) else min(len(bid_text), pos + len(title) + 80)
-                return {
-                    'hit': True,
-                    'score': 0.95,
-                    'window': bid_text[w_lo:w_hi],
-                    'start': pos,
-                    'end': q_end,
-                    'matched_quote': bid_text[pos:q_end].strip(),
-                    'gate': 'direct',
-                }
+                return _build_direct_hit_result(bid_text, pos, min(len(seg), 24), score=0.92)
 
-    # 2. 检查 bid_aligner 条款级对齐结果
+    req_grams = _extract_core_grams(req_text)
+
+    # ── 2. 检查 bid_aligner 条款级对齐结果 ──
     best_unit = None
     best_score = 0.0
     for u in tender_units:
@@ -319,7 +305,7 @@ def _locate_bid_window_for_req(
             'gate': 'direct',
         }
 
-    # 3. 按段落/行滑动窗口做关键词 2-gram 锚点检索
+    # ── 3. 按段落/行滑动窗口做关键词 2-gram 锚点检索 ──
     best_line_score = 0.0
     best_line_span: Optional[tuple[int, int, str]] = None
     if req_grams:
@@ -350,7 +336,7 @@ def _locate_bid_window_for_req(
                 'gate': 'direct',
             }
 
-    # 4. E2 严格门控后通道：仅对初筛未命中的"疑似漏应答候选"启动三级混合检索（BM25+同义词 / 向量重排）
+    # ── 4. E2 严格门控后通道：仅对初筛未命中的"疑似漏应答候选"启动三级混合检索 ──
     hybrid_hits = hybrid_retrieve_windows(
         query=req_text,
         doc_text=bid_text,
@@ -387,13 +373,7 @@ def _check_missing_evidence(
     bid_window: str,
     bid_text: str,
 ) -> Optional[str]:
-    """E2 升级点 3a：缺证明材料支撑探针（MISSING_EVIDENCE）。
-
-    当招标条款要求提供证书/检测报告/截图/证明材料，且初判为 RESPONSE_OK 时：
-    剥离投标书中原样照抄的招标要求句子后，检查剩余响应内容及全文是否存在佐证锚点
-    （如"见附件"、"详见"、"证书编号"、"有效期至"等）。
-    若无佐证锚点，返回预警描述文案；若有佐证锚点（或招标未要求提供证明材料），返回 None。
-    """
+    """E2 升级点 3a：缺证明材料支撑探针（MISSING_EVIDENCE）。"""
     m_req = _EVIDENCE_REQ_RE.search(req_text or '')
     if not m_req:
         return None
@@ -401,12 +381,10 @@ def _check_missing_evidence(
     evidence_phrase = m_req.group(0).strip()
     core_req_stripped = re.sub(r'^[★▲\s0-9.、()（）一二三四五六七八九十]+', '', req_text or '').strip()
 
-    # 从投标窗口与投标全文中剥离原样照抄的招标要求句，检查投标方增量文字是否含佐证锚点
     residual_window = (bid_window or '').replace(req_text, ' ').replace(core_req_stripped, ' ')
     residual_quote = (bid_quote or '').replace(req_text, ' ').replace(core_req_stripped, ' ')
     residual_full = (bid_text or '').replace(req_text, ' ').replace(core_req_stripped, ' ')
 
-    # E2 验收修正：窗口内剥离其他 ★/▲ 条款的照抄行——相邻条款的"见附件"不得豁免本条
     residual_window = '\n'.join(
         ln for ln in residual_window.split('\n')
         if not re.match(r'^\s*[★▲]\s*[0-9一二三四五六七八九十]+\s*[.、．]?', ln)
@@ -415,8 +393,6 @@ def _check_missing_evidence(
     if (
         _EVIDENCE_ANCHOR_RE.search(residual_quote)
         or _EVIDENCE_ANCHOR_RE.search(residual_window)
-        # E2 验收修正：全书上下文兜底只认"强锚点"（编号类实证），防止其他条款
-        # 响应行里的"见附件"跨需求污染本条判定（实证：mock ★1 的见附件豁免了 ★2 的空口响应）
         or _EVIDENCE_STRICT_ANCHOR_RE.search(residual_full)
     ):
         return None
@@ -435,7 +411,6 @@ _WARRANTY_RE = re.compile(
     r'([0-9]{1,3}|[零一二三四五六七八九十壹贰叁肆伍陆柒捌玖两]{1,3})\s*(个?\s*月|年)'
 )
 
-# 数字在前、关键词在后的高频变体："提供三年的免费质保期"/"质保期为两年"反序写法
 _WARRANTY_REV_RE = re.compile(
     r'([0-9]{1,3}|[零一二三四五六七八九十壹贰叁肆伍陆柒捌玖两]{1,3})\s*(个?\s*月|年)'
     r'\s*(?:的)?\s*(?:免费)?(?:质保期|质量保证期|保修期|维保期|维护期|质保)'
@@ -482,11 +457,7 @@ def _extract_sentence_around(text: str, start: int, end: int) -> tuple[str, int,
 
 
 def _extract_warranty_mentions(text: str) -> list[dict]:
-    """提取文本中所有质保期承诺并统一折算为月数（如 '三年'->36, '24个月'->24）。
-
-    覆盖两种语序：关键词在前（'质保期不少于36个月'）与数字在前
-    （'提供三年的免费质保期'——真实标书高频反序写法）。同位置双命中只记一次。
-    """
+    """提取文本中所有质保期承诺并统一折算为月数。"""
     mentions = []
     consumed = []
     for regex in (_WARRANTY_RE, _WARRANTY_REV_RE):
@@ -580,25 +551,18 @@ def _extract_total_price_mentions(text: str) -> list[dict]:
     return mentions
 
 
-# ── 核心功能 ②：投标书内部前后矛盾检测（0 Token + 大模型②）──────────────
-
 def check_bid_self_contradictions(
     bid_text: str,
     bid_path: Optional[str | Path] = None,
     client=None,
 ) -> list[dict]:
-    """扫描投标书内部前后承诺矛盾（质保期、总报价、响应时间、质保金比例 + LLM 语义冲突）。
-
-    Returns:
-        findings 列表，每项 code='CONTRADICTION', severity='error'，并附双方原文摘录与偏移/页码。
-    """
+    """扫描投标书内部前后承诺矛盾（质保期、总报价、响应时间、质保金比例 + LLM 语义冲突）。"""
     findings: list[dict] = []
     if not bid_text or not bid_text.strip():
         return findings
 
     bid_pages = _build_pdf_page_spans(bid_path)
 
-    # 1. 确定性多处数值比对（0 Token）
     extractors = (
         _extract_warranty_mentions,
         _extract_total_price_mentions,
@@ -636,7 +600,6 @@ def check_bid_self_contradictions(
                 })
                 break
 
-    # 2. 语义级前后矛盾检测（大模型②，仅在 client 提供且存在同主题多段落时触发）
     if client is not None and not findings:
         warranty_paras = [
             (m.start(), _extract_sentence_around(bid_text, m.start(), m.end())[0])
@@ -676,8 +639,6 @@ def check_bid_self_contradictions(
     return findings
 
 
-# ── 核心功能 ①：★/▲ 条款逐条响应核验（双书勾稽 + 大模型① + E2 门控与探针）──
-
 def _filter_valid_requirements(raw_reqs: list[dict]) -> list[dict]:
     """过滤掉 usage_note 与 table_marker，仅保留须逐条响应的 requirement 及模式 A/B 条款。"""
     valid = []
@@ -700,23 +661,7 @@ def check_star_responses(
     tender_path: Optional[str | Path] = None,
     bid_path: Optional[str | Path] = None,
 ) -> dict[str, Any]:
-    """执行招标 ★/▲ 要求 ↔ 投标响应逐条勾稽核验（公共签名与返回结构保持一字不变）。
-
-    Args:
-        tender_text: 招标文件全文。
-        bid_text: 投标文件全文。
-        requirements: F1 提取的候选列表（若为 None 则自动调 extract_marked_clauses + extract_invalid_bid_clauses）。
-        client: 大模型客户端；为 None 时执行 0 Token 确定性对齐与核验（LLM 状态标为 skipped）。
-        tender_path: 招标文件路径（可选，PDF 时换算真实页码）。
-        bid_path: 投标文件路径（可选，PDF 时换算真实页码）。
-
-    Returns:
-        {
-            'findings': list[dict],          # MISSING_RESPONSE / CONTRADICTION / MISSING_EVIDENCE
-            'results': list[dict],           # 全部 requirement 的逐条核验明细（含 RESPONSE_OK）
-            'alignment_summary': dict,       # 双书对齐统计（总要求数、命中数、命中率、门控统计）
-        }
-    """
+    """执行招标 ★/▲ 要求 ↔ 投标响应逐条勾稽核验（公共签名与返回结构保持一字不变）。"""
     if requirements is None:
         marked = extract_marked_clauses(tender_text or '')
         wording = extract_invalid_bid_clauses(tender_text or '')
@@ -726,7 +671,6 @@ def check_star_responses(
     tender_pages = _build_pdf_page_spans(tender_path)
     bid_pages = _build_pdf_page_spans(bid_path)
 
-    # 运行 bid_aligner 获取双书条款级对齐映射
     align_res = compare_contracts(tender_text or '', bid_text or '')
     _, tender_units = _build_clause_units(tender_text or '')
     _, bid_units = _build_clause_units(bid_text or '')
@@ -758,13 +702,13 @@ def check_star_responses(
         t_page = _offset_to_page(r_start, tender_pages)
         b_page = _offset_to_page(loc['start'], bid_pages)
 
-        # 原文溯源锁账：确保 tender_quote 100% 来自招标书原文
-        raw_req_quote = req.get('text', expanded_req_text).strip()
+        raw_req_quote = (req.get('full_text') or req.get('text') or expanded_req_text).strip()
+        if len(raw_req_quote) < 18 and len(expanded_req_text) > len(raw_req_quote):
+            raw_req_quote = expanded_req_text
         if tender_text and not verify_quote(raw_req_quote, tender_text):
             raw_req_quote = expanded_req_text if verify_quote(expanded_req_text, tender_text) else ''
 
         if not loc['hit']:
-            # 初筛与混合检索均未命中 -> 判定为 MISSING_RESPONSE
             finding = {
                 'code': 'MISSING_RESPONSE',
                 'severity': 'error',
@@ -798,7 +742,6 @@ def check_star_responses(
         if bid_text and not verify_quote(default_bid_quote, bid_text):
             default_bid_quote = ''
 
-        # 检查双书窗口是否存在确定性参数冲突（如招标要求质保3年 vs 投标响应写质保2年）
         t_warranties = _extract_warranty_mentions(expanded_req_text)
         b_warranties = _extract_warranty_mentions(bid_window)
         det_contradiction = None
@@ -810,7 +753,6 @@ def check_star_responses(
                 )
 
         if client is None:
-            # 0 Token 降级模式
             if det_contradiction:
                 f_item = {
                     'code': 'CONTRADICTION',
@@ -833,7 +775,6 @@ def check_star_responses(
                 findings.append(f_item)
                 results.append({**f_item, 'status': 'CONTRADICTION'})
             else:
-                # 初判为 RESPONSE_OK，运行 E2 升级点 3a 缺证明材料支撑探针
                 ev_warn_msg = _check_missing_evidence(
                     req_text=expanded_req_text,
                     bid_quote=default_bid_quote,
@@ -889,7 +830,7 @@ def check_star_responses(
                     })
             continue
 
-        # 大模型① 逐条判定
+        # 大模型① 逐条判定（§4 裁定：同文对齐大模型判漏应答属产品设计决策，保持原样）
         prompt = _RESPONSE_CHECK_PROMPT.format(
             tender_window=tender_window,
             req_text=expanded_req_text,
@@ -906,7 +847,6 @@ def check_star_responses(
         llm_b_quote = str((parsed or {}).get('bid_quote', '')).strip()
         reason = str((parsed or {}).get('reason', '')).strip()
 
-        # 强制 quote_verifier 溯源校验：引用失败的一律不采信、清空待人工
         t_verified = bool(llm_t_quote) and verify_quote(llm_t_quote, tender_text)
         final_t_quote = llm_t_quote if t_verified else raw_req_quote
         t_ok = bool(final_t_quote) and verify_quote(final_t_quote, tender_text)
@@ -921,12 +861,17 @@ def check_star_responses(
             final_b_quote = llm_b_quote if b_ok else ''
 
         quote_verified = (t_ok and b_ok)
-        b_real_start = bid_text.find(final_b_quote) if (final_b_quote and bid_text) else loc['start']
-        b_real_end = (
-            (b_real_start + len(final_b_quote))
-            if (final_b_quote and b_real_start is not None and b_real_start >= 0)
-            else loc['end']
-        )
+        if status == 'MISSING_RESPONSE':
+            b_real_start = None
+            b_real_end = None
+        else:
+            found_b_pos = bid_text.find(final_b_quote) if (final_b_quote and bid_text) else -1
+            b_real_start = found_b_pos if found_b_pos >= 0 else loc['start']
+            b_real_end = (
+                (b_real_start + len(final_b_quote))
+                if (final_b_quote and found_b_pos >= 0 and b_real_start is not None)
+                else loc['end']
+            )
 
         ev_warn_llm = None
         if status == 'RESPONSE_OK':
@@ -1010,9 +955,6 @@ def check_star_responses(
     total_reqs = len(valid_reqs)
 
     # ── E2 验收修正：混合命中跨需求污染降级 ─────────────────────────────────
-    # 同义词过宽时，疑似漏答条款的混合命中可能落在其他条款"直接命中"的响应原文上
-    # （实证：mock ★4(CISP驻场工程师) 被洗白到 ★2(达梦DB) 的响应行，score 0.52）。
-    # 混合命中区间与任一直接命中区间重叠率 >30% 即判跨需求污染 → 降级为漏答。
     direct_spans = [
         (int(r['bid_start']), int(r['bid_end']))
         for r in results
@@ -1032,8 +974,6 @@ def check_star_responses(
         if contaminated:
             downgraded.append(r)
     for r in downgraded:
-        # E2 验收修正：原位改写而非移除——B2 worker 按 valid_reqs 与 star_results
-        # 等长配对消费，移除会破坏配对契约（RuntimeError: 配对契约破坏）
         r['status'] = 'MISSING_RESPONSE'
         r['gate'] = 'hybrid_rejected'
         r['bid_quote'] = ''
@@ -1079,30 +1019,13 @@ def check_star_responses(
     }
 
 
-# ── F4 统一主入口 ─────────────────────────────────────────────────────────
-
 def run_response_check(
     tender_path: str | Path,
     bid_path: str | Path,
     requirements: Optional[list[dict]] = None,
     client=None,
 ) -> dict[str, Any]:
-    """F4 端到端主入口：双书 ★/▲ 条款逐条响应核验 + 投标书内部前后矛盾检测。
-
-    Args:
-        tender_path: 招标文件路径。
-        bid_path: 投标文件路径。
-        requirements: 可选，预设的 F1 要求清单；None 时自动调用 build_review_checklist 提取。
-        client: LLM 客户端；None 时走 0 Token 确定性模式（不烧 token）。
-
-    Returns:
-        {
-            'findings': [...],             # 汇总 MISSING_RESPONSE、CONTRADICTION 与 MISSING_EVIDENCE
-            'star_results': [...],         # 每条 ★/▲ 要求的核验详情（含 RESPONSE_OK）
-            'self_contradictions': [...],  # 投标书内部矛盾列表
-            'alignment_summary': {...},    # ★/▲ 要求规模与对齐命中率
-        }
-    """
+    """F4 端到端主入口：双书 ★/▲ 条款逐条响应核验 + 投标书内部前后矛盾检测。"""
     tender_doc = parse_document(str(tender_path))
     bid_doc = parse_document(str(bid_path))
 
@@ -1135,7 +1058,7 @@ def run_response_check(
 
 
 def dry_run_corpus_alignment(corpus_dir: str | Path = 'data/corpus/m0_samples') -> list[dict]:
-    """11 份招标文件确定性对齐链路试跑（0 Token，报告 ★/▲ 要求清单规模 + 自对齐/模拟响应命中率）。"""
+    """11 份招标文件确定性对齐链路试跑（0 Token）。"""
     c_dir = Path(corpus_dir)
     if not c_dir.exists():
         return []

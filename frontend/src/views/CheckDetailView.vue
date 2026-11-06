@@ -16,6 +16,8 @@ import SseProgress from '@/components/SseProgress.vue'
 import RiskCard from '@/components/RiskCard.vue'
 import PriceManualDialog from '@/components/PriceManualDialog.vue'
 
+defineOptions({ name: 'CheckDetailView' })
+
 const router = useRouter()
 const appStore = useAppStore()
 

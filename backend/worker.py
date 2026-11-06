@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
-"""B2 · 进程内线程池任务执行器 + SSE 进度广播总线 + 三级 LLM 客户端降级解析器。
+"""B2 / E3R · 进程内线程池任务执行器 + SSE 进度广播总线 + 三级 LLM 客户端降级解析器。
 
-严格遵循 INTERFACE.md §1 与 §3.3：
+严格遵循 INTERFACE.md §1、§3.3 与 E3R 实锤 B 修复：
 1. 状态机五态推进：created -> extracting -> checking -> grading -> delivered（异常转 failed）；
 2. SSE 三种标准事件：event: progress / event: done / event: error；
-3. 三级 LLM 客户端获取：用户自定义配置 -> 全局 env 配置 -> None（0 Token 确定性降级）；
-4. F1 降级特例（铁律 5）：无模型降级模式下显式直调 build_review_checklist()，绝不调 extract_tender_with_llm。
+3. E3R 实锤 B 修复：同一任务再次触发 run 时，submit_check_task 立即调用 broadcaster.clear(task_id)
+   清除上一轮残留的 done/error 终态帧，并将数据库 status 同步重置为 'extracting'、progress=0，
+   确保第二次运行进度条从 0 实时推进到 100；
+4. 溯源章铁律：F2 算术与 F3 效期/串名计算类发现 quote_verified=False（不盖原文溯源章）。
 """
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-import json
 import os
 from pathlib import Path
 import queue
@@ -48,16 +49,10 @@ def resolve_project_path(rel_or_abs: Optional[str | Path]) -> Path:
 
 
 def resolve_effective_llm_client(session: Session, user_id: Optional[int] = None) -> tuple[Any, str]:
-    """按'用户自定义配置 -> 全局 env 配置 -> None（0 Token 确定性降级）'三级获取 LLM 客户端。
-
-    Returns:
-        (client_or_none, llm_status_str)  # llm_status_str: 'done' | 'skipped'
-    """
-    # Force 0-Token fallback when BidGuard is running in offline test mode
+    """按'用户自定义配置 -> 全局 env 配置 -> None（0 Token 确定性降级）'三级获取 LLM 客户端。"""
     if os.environ.get('BIDGUARD_FORCE_ZERO_TOKEN', '').strip() == '1':
         return None, 'skipped'
 
-    # 1. 用户级自定义配置
     if user_id is not None:
         try:
             cfg = session.query(UserModelConfig).filter_by(user_id=int(user_id)).first()
@@ -74,7 +69,6 @@ def resolve_effective_llm_client(session: Session, user_id: Optional[int] = None
         except Exception:
             pass
 
-    # 2. 全局 env 配置（仅当真实配置了非占位符 Key 时启用，否则安全降级为 None）
     zhipu_key = os.environ.get('ZHIPU_API_KEY', '').strip()
     priv_key = os.environ.get('PRIVATE_API_KEY', '').strip()
     has_valid_env_key = (
@@ -89,7 +83,6 @@ def resolve_effective_llm_client(session: Session, user_id: Optional[int] = None
         except Exception:
             pass
 
-    # 3. 0 Token 确定性降级
     return None, 'skipped'
 
 
@@ -100,6 +93,19 @@ class SSEBroadcaster:
         self._lock = threading.Lock()
         self._subscribers: dict[int, set[queue.Queue]] = {}
         self._latest: dict[int, tuple[str, dict[str, Any]]] = {}
+
+    def clear(self, task_id: int) -> None:
+        """E3R 实锤 B：清理指定 task_id 上一轮残留的 latest 终态帧，并清空在途订阅队列中的旧帧。"""
+        tid = int(task_id)
+        with self._lock:
+            self._latest.pop(tid, None)
+            subs = list(self._subscribers.get(tid, ()))
+        for q in subs:
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
 
     def subscribe(self, task_id: int) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=128)
@@ -145,15 +151,49 @@ class BidTaskWorker:
         self._in_flight: set[int] = set()
         self._shutdown = False
 
+    def _reset_task_for_rerun(self, task_id: int) -> None:
+        """E3R 实锤 B：启动/重跑任务前，同步清除 SSE 上一轮终态帧并将 DB 状态置为 extracting(progress=0)。"""
+        self.broadcaster.clear(task_id)
+        session: Session = self.session_factory()
+        try:
+            task = session.query(BidCheckTask).filter_by(id=task_id).first()
+            if task is not None:
+                task.status = 'extracting'
+                task.progress = 0
+                task.stage_detail = '正在启动新一轮防废标核验流水线…'
+                task.error_msg = None
+                task.updated_at = _utc_now()
+                session.commit()
+        except Exception:
+            session.rollback()
+        finally:
+            session.close()
+
+        self.broadcaster.publish(
+            task_id,
+            'progress',
+            {
+                'task_id': task_id,
+                'status': 'extracting',
+                'progress': 0,
+                'stage_detail': '正在启动新一轮防废标核验流水线…',
+            },
+        )
+
     def submit_check_task(self, task_id: int, sync: bool = False) -> None:
         tid = int(task_id)
         if sync:
+            self._reset_task_for_rerun(tid)
             self._run_pipeline(tid)
             return
         with self._lock:
             if self._shutdown or tid in self._in_flight:
                 return
             self._in_flight.add(tid)
+
+        # 在异步线程启动前同步清理上一轮 done 终态帧并重置 DB 状态为 progress=0
+        self._reset_task_for_rerun(tid)
+
         try:
             self._executor.submit(self._run_pipeline, tid)
         except Exception:
@@ -193,7 +233,6 @@ class BidTaskWorker:
 
             client, llm_status = resolve_effective_llm_client(session, task.user_id)
 
-            # 读取任务快照配置或租户默认 BidRuleConfig
             cfg_snap = dict(task.config_json or {})
             rule_cfg = (
                 session.query(BidRuleConfig)
@@ -230,7 +269,6 @@ class BidTaskWorker:
                     f1_res = build_review_checklist(str(tender_abs))
                     llm_status = 'skipped'
             else:
-                # 铁律 5：无模型降级模式显式直调确定性层 build_review_checklist
                 f1_res = build_review_checklist(str(tender_abs))
 
             marked_clauses = list(f1_res.get('marked_clauses') or [])
@@ -262,7 +300,7 @@ class BidTaskWorker:
             session.query(BidFinding).filter_by(task_id=task.id).delete()
             new_findings: list[BidFinding] = []
 
-            # (a) F2 报价算术发现
+            # (a) F2 报价算术发现（溯源铁律：计算类风险 quote_verified=False，不伪装成原文溯源）
             for f2_item in f2_res.get('findings') or []:
                 new_findings.append(
                     BidFinding(
@@ -272,8 +310,6 @@ class BidTaskWorker:
                         severity=str(f2_item.get('severity') or 'error'),
                         category='报价算术核验',
                         clause_no='开标一览表/分项报价表',
-                        # F2 是整表算术核验：actual 是解析数值而非原文摘录，
-                        # 严禁伪装成 quote 并盖"已通过原文溯源"章（铁律 4）
                         quote=None,
                         quote_verified=False,
                         message=str(f2_item.get('message') or '报价算术不一致'),
@@ -283,7 +319,7 @@ class BidTaskWorker:
                     )
                 )
 
-            # (b) F3 证照效期与串名穿帮发现
+            # (b) F3 证照效期与串名穿帮发现（计算/规则类 quote_verified=False）
             for f3_item in f3_findings or []:
                 new_findings.append(
                     BidFinding(
@@ -293,9 +329,8 @@ class BidTaskWorker:
                         severity=str(f3_item.get('severity') or 'error'),
                         category='证照效期与串名扫描',
                         clause_no='资格证明文件',
-                        quote=str(f3_item.get('quote') or '') or None,
+                        quote=str(f3_item.get('quote') or ''),
                         quote_offset=f3_item.get('offset'),
-                        # F3 为规则引擎产出，摘录未经 verify_quote 校验，不得盖溯源章
                         quote_verified=False,
                         message=str(f3_item.get('message') or ''),
                         suggestion='请替换有效期内证照或清理外部项目单位名称',
@@ -304,16 +339,17 @@ class BidTaskWorker:
                     )
                 )
 
-            # (c) F4 ★条款响应核验与标书前后矛盾发现
+            # (c) F4 ★条款响应核验、缺佐证与标书前后矛盾发现
             for f4_item in f4_res.get('findings') or []:
                 code_str = str(f4_item.get('code') or 'MISSING_RESPONSE')
+                sev_str = str(f4_item.get('severity') or 'error')
                 new_findings.append(
                     BidFinding(
                         task_id=task.id,
                         source_module='F4',
                         code=code_str,
-                        severity=str(f4_item.get('severity') or 'error'),
-                        category='★条款响应核验' if code_str == 'MISSING_RESPONSE' else '前后承诺矛盾检测',
+                        severity=sev_str,
+                        category='★条款响应核验' if code_str != 'CONTRADICTION' else '前后承诺矛盾检测',
                         clause_no=str(f4_item.get('clause_no') or f4_item.get('mark') or ''),
                         quote=str(f4_item.get('tender_quote') or ''),
                         bid_quote=str(f4_item.get('bid_quote') or ''),
@@ -322,7 +358,7 @@ class BidTaskWorker:
                         page=f4_item.get('bid_page') if f4_item.get('bid_page') is not None else f4_item.get('tender_page'),
                         message=str(f4_item.get('message') or ''),
                         suggestion='请在投标书中补齐对该 ★ 条款的明确正面响应与证明材料，并统一前后章节承诺参数',
-                        consequence='veto',
+                        consequence='veto' if sev_str == 'error' else 'deduction',
                         detail_json=f4_item,
                     )
                 )
@@ -344,7 +380,7 @@ class BidTaskWorker:
                             clause_no='全文扫描',
                             quote=bid_parsed.text[lo:hi],
                             quote_offset=pos,
-                            quote_verified=True,
+                            quote_verified=False,
                             message=f"命中部门自定义禁用红线词：「{kw}」",
                             suggestion=f"请排查并清理标书中出现的禁用词「{kw}」",
                             consequence=str(cr.get('consequence') or 'veto'),

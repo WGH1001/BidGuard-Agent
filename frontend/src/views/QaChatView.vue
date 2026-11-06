@@ -3,9 +3,9 @@ import { ref } from 'vue'
 import type { BidTaskOut, QaMessageItem, QaSessionOut } from '@/api/types'
 
 /**
- * 模块级响应式单例状态：确保即使父级路由容器未包 KeepAlive，
- * 用户在各工作台页面之间切换再返回 /qa 时，当前打开的会话、消息流与进行中的提问状态 100% 保留不丢失。
+ * 模块级响应式缓存（绑定 cachedOwnerUsername，切换账号或登出时立即清零）
  */
+const cachedOwnerUsername = ref<string>('')
 const cachedTasks = ref<BidTaskOut[]>([])
 const cachedSessions = ref<QaSessionOut[]>([])
 const cachedSelectedTaskId = ref<number | null>(null)
@@ -13,18 +13,31 @@ const cachedActiveSessionId = ref<number | null>(null)
 const cachedMessages = ref<QaMessageItem[]>([])
 const cachedAsking = ref<boolean>(false)
 let initializedOnce = false
+
+function resetQaModuleCache(): void {
+  cachedOwnerUsername.value = ''
+  cachedTasks.value = []
+  cachedSessions.value = []
+  cachedSelectedTaskId.value = null
+  cachedActiveSessionId.value = null
+  cachedMessages.value = []
+  cachedAsking.value = false
+  initializedOnce = false
+}
 </script>
 
 <script setup lang="ts">
-import { computed, onActivated, onMounted, ref as localRef } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onMounted, ref as localRef } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { checksApi, qaApi } from '@/api'
 import { useAppStore } from '@/stores/app'
+import { useAuthStore } from '@/stores/auth'
 import QaMessageList from '@/components/QaMessageList.vue'
 
 defineOptions({ name: 'QaChatView' })
 
 const appStore = useAppStore()
+const authStore = useAuthStore()
 const loadingInit = localRef(false)
 const creatingSession = localRef(false)
 
@@ -46,8 +59,24 @@ const activeSession = computed<QaSessionOut | null>(
   () => sessions.value.find((s) => s.id === activeSessionId.value) || null,
 )
 
+function ensureAccountIsolation(): boolean {
+  const curUser = authStore.user?.username || ''
+  if (cachedOwnerUsername.value && cachedOwnerUsername.value !== curUser) {
+    resetQaModuleCache()
+    cachedOwnerUsername.value = curUser
+    return true
+  }
+  cachedOwnerUsername.value = curUser
+  return false
+}
+
+function handleAuthChanged(): void {
+  resetQaModuleCache()
+}
+
 async function loadTasksAndSessions(force = false): Promise<void> {
-  if (initializedOnce && !force && sessions.value.length > 0) {
+  const switched = ensureAccountIsolation()
+  if (initializedOnce && !force && !switched && sessions.value.length > 0) {
     return
   }
   loadingInit.value = true
@@ -133,7 +162,6 @@ async function handleSendQuestion(question: string): Promise<void> {
     return
   }
 
-  // 若当前尚无会话，自动为选中任务创建一个会话
   if (!activeSessionId.value) {
     if (!selectedTaskId.value) {
       ElMessage.warning('请先选择关联的投标体检任务后再发起提问')
@@ -174,7 +202,6 @@ async function handleSendQuestion(question: string): Promise<void> {
         loading: false,
       }
     }
-    // 刷新侧栏会话标题
     const updatedList = await qaApi.listSessions(selectedTaskId.value ?? undefined)
     sessions.value = updatedList || []
   } catch {
@@ -188,13 +215,19 @@ async function handleSendQuestion(question: string): Promise<void> {
 }
 
 onMounted(() => {
+  window.addEventListener('bidguard-auth-changed', handleAuthChanged)
   void loadTasksAndSessions(false)
 })
 
 onActivated(() => {
-  if (!asking.value && sessions.value.length === 0) {
-    void loadTasksAndSessions(false)
+  const switched = ensureAccountIsolation()
+  if (switched || (!asking.value && sessions.value.length === 0)) {
+    void loadTasksAndSessions(true)
   }
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('bidguard-auth-changed', handleAuthChanged)
 })
 </script>
 

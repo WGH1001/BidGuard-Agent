@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """F3 证照有效期核验与跨项目串名穿帮扫描（0 Token 确定性引擎）。
 
 纯正则/文本扫描，毫秒级、零模型调用。四大防线：
@@ -108,11 +108,16 @@ def _scan_expiry(text: str, open_d: date) -> list:
 
 # 区间：2026年05月至2026年07月 / 2026.05-2026.07 / 2026年5月到7月（同年省略年份）
 _MONTH_RANGE_RE = re.compile(
-    r'(\d{4})\s*年?\s*[\-\/\.年]\s*(\d{1,2})\s*月?\s*'
+    r'(?<!\d)((?:19|20)\d{2})\s*年?\s*[\-\/\.年]\s*(\d{1,2})\s*月?\s*'
     r'[至到~\-—–]+\s*'
-    r'(?:(\d{4})\s*年?\s*[\-\/\.年]?\s*)?(\d{1,2})\s*月?')
-# 单月：2026年08月 / 2026-08 / 202608
-_MONTH_SINGLE_RE = re.compile(r'(?:(\d{4})\s*年?\s*[\-\/\.]?\s*(\d{1,2})\s*月?|\b(\d{4})(0[1-9]|1[0-2])\b)')
+    r'(?:((?:19|20)\d{2})\s*年?\s*[\-\/\.年]?\s*)?(\d{1,2})\s*(?:月|(?!\d))')
+# 单月：2026年08月 / 2026-08 / 202608（排除 2026-10-28 完整年月日及 202610-014 项目编号）
+_MONTH_SINGLE_RE = re.compile(
+    r'(?:'
+    r'(?<!\d)((?:19|20)\d{2})\s*(?:年\s*(\d{1,2})\s*月?(?!\s*\d+\s*日)|[\-\/\.]\s*(\d{1,2})(?!\s*[\-\/\.\d日]))'
+    r'|(?<!\d)((?:19|20)\d{2})(0[1-9]|1[0-2])(?!\s*[\-\/\.\d日])'
+    r')'
+)
 
 
 def parse_month(y: int, m: int) -> str:
@@ -131,7 +136,7 @@ def collect_covered_months(text: str) -> set:
             d1, d2 = date(y1, m1, 1), date(y2, m2, 1)
         except ValueError:
             continue
-        if d2 < d1:
+        if d2 < d1 or (y2 - y1) * 12 + (m2 - m1) > 60:
             continue
         cur_y, cur_m = y1, m1
         while (cur_y, cur_m) <= (y2, m2):
@@ -145,9 +150,10 @@ def collect_covered_months(text: str) -> set:
         if any(s <= m.start() < e for s, e in consumed):
             continue
         if m.group(1):
-            y, mo = int(m.group(1)), int(m.group(2))
+            y = int(m.group(1))
+            mo = int(m.group(2) or m.group(3))
         else:
-            y, mo = int(m.group(3)), int(m.group(4))
+            y, mo = int(m.group(4)), int(m.group(5))
         try:
             date(y, mo, 1)
         except ValueError:
@@ -163,6 +169,15 @@ def _scan_social(text: str, required: list) -> list:
     missing = [mo for mo in required if mo not in covered]
     if not missing:
         return []
+    m_soc = re.search(r'社会保险|社保证明|社保缴纳|养老保险|社保', text or '')
+    soc_offset = m_soc.start() if m_soc else None
+    if m_soc:
+        lo = max(0, m_soc.start() - 10)
+        hi = min(len(text), m_soc.end() + 60)
+        raw_excerpt = text[lo:hi].replace('\n', ' ').strip()
+        quote_str = f'{raw_excerpt}（检出月份：{",".join(sorted(covered)) or "无"}）'
+    else:
+        quote_str = f'标书社保月份覆盖：{",".join(sorted(covered)) or "（全文未检出社保证明所属期月份）"}'
     return [{
         'code': 'SOCIAL_MONTH_MISSING', 'severity': 'error',
         'message': f'社保证明月份不全：要求 {len(required)} 个月'
@@ -171,7 +186,8 @@ def _scan_social(text: str, required: list) -> list:
                    f'{len(missing)} 个月：{",".join(sorted(missing))}',
         'required_months': sorted(required), 'missing_months': sorted(missing),
         'covered_months': sorted(covered),
-        'quote': f'标书社保月份覆盖：{",".join(sorted(covered)) or "（未检出任何月份）"}',
+        'quote': quote_str,
+        'offset': soc_offset,
     }]
 
 

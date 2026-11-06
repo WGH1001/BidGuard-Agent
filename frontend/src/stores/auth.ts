@@ -4,6 +4,9 @@ import { authApi } from '@/api'
 import { AUTH_STORAGE_KEY } from '@/api/http'
 import type { LoginRequest, UserProfileOut } from '@/api/types'
 
+export const EXTRACT_CACHE_KEY = 'bidguard_extract_cache_v1'
+export const RADAR_CACHE_KEY = 'bidguard_radar_cache_v1'
+
 interface PersistedAuthData {
   token: string
   user: UserProfileOut | null
@@ -25,6 +28,21 @@ function readStoredAuth(): PersistedAuthData {
     // 忽略损坏缓存
   }
   return { token: '', user: null }
+}
+
+/**
+ * 清理会话级缓存并通知所有 KeepAlive / 模块级缓存视图（ExtractView / RadarView / QaChatView）重置内存态
+ */
+export function clearSessionViewCaches(): void {
+  try {
+    sessionStorage.removeItem(EXTRACT_CACHE_KEY)
+    sessionStorage.removeItem(RADAR_CACHE_KEY)
+  } catch {
+    // ignore storage errors
+  }
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('bidguard-auth-changed'))
+  }
 }
 
 export const useAuthStore = defineStore('auth', () => {
@@ -52,7 +70,11 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function login(payload: LoginRequest): Promise<UserProfileOut> {
+    const prevUsername = user.value?.username
     const res = await authApi.login(payload)
+    if (prevUsername && prevUsername !== res.user.username) {
+      clearSessionViewCaches()
+    }
     token.value = res.token
     user.value = res.user
     persist()
@@ -75,6 +97,7 @@ export const useAuthStore = defineStore('auth', () => {
     token.value = ''
     user.value = null
     localStorage.removeItem(AUTH_STORAGE_KEY)
+    clearSessionViewCaches()
   }
 
   return {

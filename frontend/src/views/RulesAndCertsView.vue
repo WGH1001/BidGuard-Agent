@@ -8,6 +8,8 @@ import {
   type CustomRedlineItem,
 } from '@/api/types'
 
+defineOptions({ name: 'RulesAndCertsView' })
+
 const activeTab = ref<'rules' | 'certs'>('rules')
 const loadingRules = ref(false)
 const savingRules = ref(false)

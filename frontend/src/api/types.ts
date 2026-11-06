@@ -214,6 +214,7 @@ export interface MarkedClauseItem {
   full_text?: string
   start: number
   end: number
+  page?: number | null
   clause_no: string
   kind: 'requirement' | 'usage_note' | 'table_marker' | string
   consequence?: ConsequenceType | string
@@ -227,6 +228,7 @@ export interface InvalidBidClauseItem {
   full_text?: string
   start: number
   end: number
+  page?: number | null
   clause_no: string
   promise_doc?: string
   consequence?: ConsequenceType | string
@@ -237,6 +239,7 @@ export interface InvalidBidClauseItem {
 export interface KeywordSectionHitItem {
   keyword: string
   start: number
+  page?: number | null
   excerpt: string
 }
 
@@ -308,6 +311,7 @@ export interface DeviationExportOut {
 export interface SuspiciousParamOut {
   quote: string
   offset: number
+  page?: number | null
   exclusive_type: '品牌绑定' | '资质定向' | '业绩定向' | '参数定向' | string
   confidence: number
   reason: string

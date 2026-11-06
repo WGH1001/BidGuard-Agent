@@ -4,6 +4,8 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { authApi } from '@/api'
 
+defineOptions({ name: 'ChangePasswordView' })
+
 const router = useRouter()
 const submitting = ref(false)
 

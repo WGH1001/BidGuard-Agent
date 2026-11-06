@@ -11,6 +11,8 @@ import { ElMessage } from 'element-plus/es/components/message/index'
 
 echarts.use([BarChart, PieChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
+defineOptions({ name: 'DashboardView' })
+
 const router = useRouter()
 const loading = ref(false)
 const stats = ref<DashboardStatsOut | null>(null)

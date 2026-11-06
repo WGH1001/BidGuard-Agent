@@ -77,6 +77,7 @@ def run_radar_scan(
             clause_no='招标技术/资格条款',
             quote=str(item.get('quote') or ''),
             quote_offset=item.get('offset'),
+            page=item.get('page'),
             quote_verified=bool(item.get('quote_verified', True)),
             message=str(item.get('reason') or '疑似排他性控标参数'),
             suggestion='建议投前向招标代理机构发出书面澄清/提疑函确认是否接受等效产品或资质',
@@ -118,6 +119,7 @@ def run_radar_scan(
             SuspiciousParamOut(
                 quote=str(p.get('quote') or ''),
                 offset=int(p.get('offset') or 0),
+                page=p.get('page'),
                 exclusive_type=str(p.get('exclusive_type') or '参数定向'),
                 confidence=float(p.get('confidence') or 0.8),
                 reason=str(p.get('reason') or ''),

@@ -4,6 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { useAuthStore } from '@/stores/auth'
 
+defineOptions({ name: 'LoginView' })
+
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()

@@ -122,7 +122,6 @@ async function fetchConfig(): Promise<void> {
       form.model_flash = res.model_flash
       form.model_flagship = res.model_flagship || res.model_flash
       form.supports_reasoning_effort = res.supports_reasoning_effort
-      // 按已存 base_url 反查匹配模板，命中则高亮，否则归为自定义
       const matched = PRESETS.find((p) => p.base_url === res.base_url)
       selectedKey.value = matched ? matched.key : 'custom'
     }
@@ -242,6 +241,7 @@ onMounted(() => {
         <el-form-item label="OpenAI 兼容接口地址 (Base URL)" required>
           <el-input
             v-model.trim="form.base_url"
+            autocomplete="off"
             placeholder="例如：http://10.0.2.81:3000/v1 或 https://open.bigmodel.cn/api/paas/v4"
           />
         </el-form-item>
@@ -251,6 +251,7 @@ onMounted(() => {
             v-model.trim="form.api_key"
             type="password"
             show-password
+            autocomplete="new-password"
             :placeholder="
               meta.configured
                 ? `已配置密钥（****${meta.api_key_last4}），如不修改请留空`

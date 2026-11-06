@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { extractApi, validateUploadFile } from '@/api'
 import {
@@ -7,12 +7,56 @@ import {
   type ExtractChecklistOut,
   type MarkedClauseItem,
 } from '@/api/types'
+import { EXTRACT_CACHE_KEY, useAuthStore } from '@/stores/auth'
+
+defineOptions({ name: 'ExtractView' })
+
+const authStore = useAuthStore()
 
 const loading = ref(false)
 const activeTab = ref<'marked' | 'wording' | 'qual_comp' | 'scoring'>('marked')
 const kindFilter = ref<'ALL' | 'requirement' | 'non_req'>('ALL')
 const result = ref<ExtractChecklistOut | null>(null)
 const selectedFile = ref<File | null>(null)
+
+interface CachedExtractPayload {
+  username: string
+  data: ExtractChecklistOut
+}
+
+function saveToSessionStorage(data: ExtractChecklistOut): void {
+  try {
+    const payload: CachedExtractPayload = {
+      username: authStore.user?.username || '',
+      data,
+    }
+    sessionStorage.setItem(EXTRACT_CACHE_KEY, JSON.stringify(payload))
+  } catch {
+    // 忽略配额异常
+  }
+}
+
+function restoreFromSessionStorage(): void {
+  if (result.value) return
+  try {
+    const raw = sessionStorage.getItem(EXTRACT_CACHE_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw) as Partial<CachedExtractPayload>
+    const curUser = authStore.user?.username || ''
+    if (parsed && parsed.data && (!parsed.username || parsed.username === curUser)) {
+      result.value = parsed.data
+    } else {
+      sessionStorage.removeItem(EXTRACT_CACHE_KEY)
+    }
+  } catch {
+    // 忽略损坏缓存
+  }
+}
+
+function handleAuthChanged(): void {
+  result.value = null
+  selectedFile.value = null
+}
 
 function onFileChange(ev: Event): void {
   const input = ev.target as HTMLInputElement
@@ -34,8 +78,10 @@ async function handleRunExtract(): Promise<void> {
   }
   loading.value = true
   try {
-    result.value = await extractApi.extract(selectedFile.value)
-    ElMessage.success(`成功提取「${result.value.filename}」四张必审红线清单`)
+    const extracted = await extractApi.extract(selectedFile.value)
+    result.value = extracted
+    saveToSessionStorage(extracted)
+    ElMessage.success(`成功提取「${extracted.filename}」四张必审红线清单`)
   } finally {
     loading.value = false
   }
@@ -104,6 +150,23 @@ function consequenceBadge(item: {
   if (item.mark === '▲') return { label: 'deduction/bonus · ▲重要参数', cls: 'warning' }
   return { label: 'none · 一般条款', cls: 'neutral' }
 }
+
+function itemPage(item: unknown): number | null {
+  if (item && typeof item === 'object' && 'page' in item) {
+    const p = (item as { page?: number | null }).page
+    return typeof p === 'number' && p > 0 ? p : null
+  }
+  return null
+}
+
+onMounted(() => {
+  restoreFromSessionStorage()
+  window.addEventListener('bidguard-auth-changed', handleAuthChanged)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('bidguard-auth-changed', handleAuthChanged)
+})
 </script>
 
 <template>
@@ -202,7 +265,8 @@ function consequenceBadge(item: {
                     {{ consequenceBadge(item).label }}
                   </span>
                   <span class="cc-loc mono-num">
-                    {{ formatPageOrOffset(null, item.start) }} ~ @{{ item.end }}
+                    {{ formatPageOrOffset(itemPage(item), item.start) }}
+                    <template v-if="itemPage(item) === null"> ~ @{{ item.end }}</template>
                   </span>
                   <span v-if="item.quote_verified !== false" class="verified-badge">
                     ✓ 原文溯源通过
@@ -232,7 +296,7 @@ function consequenceBadge(item: {
                     须提供：《{{ w.promise_doc }}》
                   </span>
                   <span class="cc-loc mono-num">
-                    {{ formatPageOrOffset(null, w.start) }}
+                    {{ formatPageOrOffset(itemPage(w), w.start) }}
                   </span>
                   <span class="verified-badge">✓ 原文溯源通过</span>
                 </div>
@@ -262,7 +326,7 @@ function consequenceBadge(item: {
                 >
                   <div class="cc-head">
                     <span class="sev-pill info">资格审查 · {{ q.keyword }}</span>
-                    <span class="cc-loc mono-num">{{ formatPageOrOffset(null, q.start) }}</span>
+                    <span class="cc-loc mono-num">{{ formatPageOrOffset(itemPage(q), q.start) }}</span>
                   </div>
                   <div class="cc-body pre-excerpt">{{ q.excerpt }}</div>
                 </div>
@@ -279,7 +343,7 @@ function consequenceBadge(item: {
                 >
                   <div class="cc-head">
                     <span class="sev-pill warning">符合性审查 · {{ c.keyword }}</span>
-                    <span class="cc-loc mono-num">{{ formatPageOrOffset(null, c.start) }}</span>
+                    <span class="cc-loc mono-num">{{ formatPageOrOffset(itemPage(c), c.start) }}</span>
                   </div>
                   <div class="cc-body pre-excerpt">{{ c.excerpt }}</div>
                 </div>

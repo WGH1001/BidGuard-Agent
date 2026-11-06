@@ -25,6 +25,8 @@
    - 依据《政府采购法实施条例》第 33 条，未单独设定最高限价时以采购预算作为法定上限；
    - 支持表格横向跨格（标签格与数值格中间隔分包格/空串）、纵向跨行（表头列为预算金额、数据行填数值）
      以及正文跨换行/分包小节的预算提取。
+6. **E3 修复 1（docx 表格与 PDF 文本双路径空白格式表/行号序列防线）**：
+   - 严格拦截数量/单价/合价为 1/2/3 等连续递增小整数序列、含省略号占位符或表头词黑名单的伪报价行。
 """
 import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -122,9 +124,77 @@ _INSTRUCTION_NOISE_KEYS = ('不得超过', '超过最高限价', '无效标', '�
 # 非投标报价的大写上下文排除词（防把最高限价/预算/保证金的大写误提为 bid_total_upper）
 _NON_BID_UPPER_KEYS = ('最高限价', '最高投标限价', '采购预算', '预算金额', '控制价', '保证金')
 
+# 空白格式表防线：表头词黑名单（在 docx 表格路径与 PDF 文本路径共同生效）
+_HEADER_NAME_BLACKLIST = frozenset({
+    '金额（元）', '金额(元)', '单价（元）', '单价(元)', '总价（元）', '总价(元)',
+    '合价（元）', '合价(元)', '小计（元）', '小计(元)',
+    '数量', '备注', '分项价格', '合计价', '单价', '合价', '金额', '总价',
+    '证书有效期', '服务费用报价依据', '分项名称', '品目名称', '货物名称', '服务名称',
+    '项目名称', '证书名称', '发证单位', '证书等级', '从事专业', '技术参数',
+    '响应情况', '投标文件响应部分', '偏离说明', '商务要求', '（页码）', '(页码)',
+    '页码', '品牌', '规格型号', '产地', '厂家', '单位', '序号',
+    '符合或偏离', '主要技术参数及性能描述',
+})
+
+_PLACEHOLDER_CELL_TOKENS = ('/', '-', '—', '--', '…', '...', '……', '无', '详见', '投标人填报', '待填')
+
 
 def _fmt_yuan(val: Decimal) -> str:
     return str(val.quantize(CENT, rounding=ROUND_HALF_UP))
+
+
+def _is_bogus_price_row(
+    item_name: str,
+    qty_raw: str,
+    unit_raw: str,
+    total_raw: str,
+    qty_val: Decimal,
+    unit_val: Decimal,
+    total_val: Decimal,
+) -> bool:
+    """E3 修复 1 核心守卫：判断候选分项行是否为空白模板行号序列（如 1/2/3）、列号指引行或表头黑名单。
+
+    拦截规则：
+    1. 品目名称为空、含省略号（… / ...）、或命中 _HEADER_NAME_BLACKLIST 列头词黑名单；
+    2. 数量/单价/合价任一原始单元格含省略号占位符（… / ...）；
+    3. 行号序列形态：
+       - (qty, unit, total) 恰为连续递增小整数（如 1, 2, 3 或 2, 3, 4 等，即 unit == qty + 1 且 total == unit + 1，且 qty <= 50），
+         无论单元格写成 "1 / 2 / 3" 还是 "1 / 2.00 / 3.00"；
+       - 或者单价与合价均为 <= 10 的整数且不满足算术等式 qty * unit == total（典型如表格列编号指引行 (1) (2) (3) (4)）。
+    """
+    clean_name = re.sub(r'\s+', '', item_name or '')
+    if not clean_name:
+        return True
+    if '…' in clean_name or '...' in clean_name:
+        return True
+    if clean_name in _HEADER_NAME_BLACKLIST or any(k == clean_name for k in _HEADER_NAME_BLACKLIST):
+        return True
+    # 若品目名称只是两个以上表头词拼接（如 "分项名称 服务费用报价依据"）
+    if any(k in clean_name for k in ('报价依据', '证书有效期', '单价（元）', '金额（元）', '合价（元）')):
+        return True
+
+    for r_txt in (qty_raw, unit_raw, total_raw):
+        s_txt = (r_txt or '').strip()
+        if '…' in s_txt or '...' in s_txt:
+            return True
+
+    # 检查是否为整数值（如 Decimal('2.00') == 2）
+    is_int_qty = (qty_val == int(qty_val))
+    is_int_unit = (unit_val == int(unit_val))
+    is_int_total = (total_val == int(total_val))
+
+    if is_int_qty and is_int_unit and is_int_total:
+        iq = int(qty_val)
+        iu = int(unit_val)
+        it = int(total_val)
+        # 形态 A：1 / 2 / 3 或 n / n+1 / n+2 连续递增行号/列号序列
+        if 1 <= iq <= 50 and iu == iq + 1 and it == iu + 1:
+            return True
+        # 形态 B：单价与合价均为 <= 10 的极小整数且单价×数量 != 合价（列编号行或示例序号行）
+        if 1 <= iq <= 10 and 1 <= iu <= 10 and 1 <= it <= 10 and (iq * iu != it):
+            return True
+
+    return False
 
 
 def _parse_money_str(raw: str, default_wan: bool = False,
@@ -138,7 +208,7 @@ def _parse_money_str(raw: str, default_wan: bool = False,
     if not raw:
         return None
     s = str(raw).strip()
-    if not s or s in ('/', '-', '—', '--', '无', '详见', '投标人填报'):
+    if not s or s in _PLACEHOLDER_CELL_TOKENS or '…' in s or '...' in s:
         return None
     if any(k in s for k in _INSTRUCTION_NOISE_KEYS):
         return None
@@ -180,6 +250,8 @@ def _parse_qty_str(raw: str) -> Decimal | None:
     if not raw:
         return None
     s = str(raw).strip().replace(',', '')
+    if '…' in s or '...' in s:
+        return None
     m = re.match(r'^([0-9]+(?:\.[0-9]+)?)\s*[项套台个批年人月次份座宗件套]?\s*$', s)
     if not m:
         return None
@@ -438,15 +510,30 @@ def _extract_from_docx_tables(doc) -> dict:
                 if not item_name or _SEQ_ONLY_RE.match(item_name):
                     continue
 
-                total_val = _parse_money_str(cells[total_i].text, default_wan=is_wan)
-                unit_val = (_parse_money_str(cells[unit_i].text, default_wan=is_wan)
+                raw_total_txt = cells[total_i].text if total_i < len(cells) else ''
+                raw_unit_txt = cells[unit_i].text if (unit_i is not None and unit_i < len(cells)) else ''
+                raw_qty_txt = cells[qty_i].text if (qty_i is not None and qty_i < len(cells)) else '1'
+
+                total_val = _parse_money_str(raw_total_txt, default_wan=is_wan)
+                unit_val = (_parse_money_str(raw_unit_txt, default_wan=is_wan)
                             if unit_i is not None and unit_i < len(cells) else None)
-                qty_val = (_parse_qty_str(cells[qty_i].text)
+                qty_val = (_parse_qty_str(raw_qty_txt)
                            if qty_i is not None and qty_i < len(cells) else Decimal('1'))
 
                 if total_val is None and unit_val is None:
                     continue
                 if total_val is not None and unit_val is not None and qty_val is not None:
+                    # E3 修复 1：在 docx 表格路径同样拦截列头黑名单、省略号与 1/2/3 行号序列
+                    if _is_bogus_price_row(
+                        item_name=item_name,
+                        qty_raw=raw_qty_txt,
+                        unit_raw=raw_unit_txt,
+                        total_raw=raw_total_txt,
+                        qty_val=qty_val,
+                        unit_val=unit_val,
+                        total_val=total_val,
+                    ):
+                        continue
                     items.append({
                         'name': item_name,
                         'qty': str(qty_val),
@@ -473,7 +560,8 @@ def _extract_from_docx_tables(doc) -> dict:
             if bid_col < len(row1):
                 cell_txt = row1[bid_col].text.strip()
                 v = _parse_money_str(cell_txt, default_wan=('万元' in header_cells[bid_col]))
-                if v is not None and v > 0 and bid_total is None:
+                # 防呆：一览表空白模板若填入行号/列号 "1"、"2"、"3"（< 50 元且无货币符号），不作为总报价
+                if v is not None and v >= Decimal('50') and bid_total is None:
                     bid_total = _fmt_yuan(v)
                 m_u = _UPPER_AMOUNT_RE.search(cell_txt)
                 if m_u and not bid_total_upper:
@@ -526,16 +614,6 @@ def _extract_from_docx_tables(doc) -> dict:
     }
 
 
-# 空白格式表防线：PDF 展平文本会把空白投标格式的表头词与行号序列
-# （"…单价（元） 金额（元） 1 2 3…"）拼成假报价行，行号被金额格式化成
-# "2.00"/"3.00" 等原文中不存在的值。分项名称恰为列头词的一律不是真实报价行。
-_HEADER_NAME_BLACKLIST = frozenset({
-    '金额（元）', '金额(元)', '单价（元）', '单价(元)', '数量', '备注',
-    '证书有效期', '服务费用报价依据', '分项名称', '证书名称', '发证单位',
-    '证书等级', '从事专业', '技术参数', '响应情况', '投标文件响应部分',
-})
-
-
 def extract_price_from_text(text: str) -> dict:
     """从纯文本（或 PDF 解析出的文本行）提取报价要素。"""
     price_cap = extract_price_cap(text)
@@ -566,10 +644,10 @@ def extract_price_from_text(text: str) -> dict:
                     break
 
         line_item_re = re.compile(
-            r'^\s*(?:[0-9]{1,2}\s+)?([^\d\n\r]{2,30}?)\s+'
-            r'([0-9]+(?:\.[0-9]+)?)\s*[项套台个批年]?\s+'
-            r'([0-9][0-9,]*(?:\.[0-9]+)?)\s+'
-            r'([0-9][0-9,]*(?:\.[0-9]+)?)\s*$',
+            r'^[ \t\u3000]*(?:[0-9]{1,2}[ \t\u3000]+)?([^\d\n\r]{2,30}?)[ \t\u3000]+'
+            r'([0-9]+(?:\.[0-9]+)?)[ \t\u3000]*[项套台个批年]?[ \t\u3000]+'
+            r'([0-9][0-9,]*(?:\.[0-9]+)?)[ \t\u3000]+'
+            r'([0-9][0-9,]*(?:\.[0-9]+)?)[ \t\u3000]*$',
             re.MULTILINE
         )
         for m in line_item_re.finditer(text):
@@ -582,6 +660,16 @@ def extract_price_from_text(text: str) -> dict:
             u_p = _parse_money_str(m.group(3))
             t_p = _parse_money_str(m.group(4))
             if qty and u_p is not None and t_p is not None:
+                if _is_bogus_price_row(
+                    item_name=name,
+                    qty_raw=m.group(2),
+                    unit_raw=m.group(3),
+                    total_raw=m.group(4),
+                    qty_val=qty,
+                    unit_val=u_p,
+                    total_val=t_p,
+                ):
+                    continue
                 items.append({
                     'name': name,
                     'qty': str(qty),
@@ -637,6 +725,8 @@ def extract_price_data(file_path: str | Path, tender_path: str | Path | None = N
         res['has_price_table_skeleton'] = tbl_res['has_price_table_skeleton']
         if tbl_res['items']:
             res['items'] = tbl_res['items']
+        elif tbl_res['has_price_table_skeleton']:
+            res['items'] = []
         if tbl_res['table_total'] is not None:
             res['table_total'] = tbl_res['table_total']
         if tbl_res['bid_total'] is not None:

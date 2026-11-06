@@ -5,6 +5,8 @@ import { auditApi, checksApi, reportsApi } from '@/api'
 import type { AuditLogItemOut, BidTaskOut } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
+defineOptions({ name: 'ReportsAndAuditView' })
+
 const authStore = useAuthStore()
 
 const activeTab = ref<'deliver' | 'audit'>('deliver')

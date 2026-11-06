@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """F5 《技术与商务偏离表.docx》一键对齐生成器。
 
 模块职责（对应 PRD-02 §7 F5 与 F5 任务卡）：
@@ -129,7 +129,7 @@ def _format_location_index(star_res: dict) -> str:
     b_page = star_res.get('bid_page')
     b_start = star_res.get('bid_start')
 
-    if status == 'MISSING_RESPONSE' or b_start is None:
+    if status == 'MISSING_RESPONSE' or b_start is None or b_start < 0:
         b_part = '投标书未检出响应'
     elif b_page is not None:
         b_part = f"投标书第 {b_page} 页"

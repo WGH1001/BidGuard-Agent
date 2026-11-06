@@ -223,6 +223,7 @@ class DeviationExportOut(BaseModel):
 class SuspiciousParamOut(BaseModel):
     quote: str
     offset: int = 0
+    page: Optional[int] = None
     exclusive_type: str
     confidence: float = 0.8
     reason: str

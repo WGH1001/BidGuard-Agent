@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onActivated, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { checksApi, deviationApi } from '@/api'
 import type { BidTaskOut, DeviationExportOut } from '@/api/types'
 import { useAppStore } from '@/stores/app'
+
+defineOptions({ name: 'DeviationView' })
 
 const route = useRoute()
 const appStore = useAppStore()
@@ -86,6 +88,15 @@ function rowClassName({ row }: { row: { is_negative?: boolean } }): string {
 
 onMounted(() => {
   void loadAvailableTasks()
+})
+
+onActivated(() => {
+  const queryTid = Number(route.query.task_id)
+  if (queryTid && queryTid !== selectedTaskId.value) {
+    void loadAvailableTasks()
+  } else if (!devResult.value && !generating.value) {
+    void loadAvailableTasks()
+  }
 })
 </script>
 
