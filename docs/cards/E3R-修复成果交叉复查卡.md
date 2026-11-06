@@ -45,6 +45,27 @@ r = extract_price_data(p)
 高度疑似行号序列而非报价；也可结合"金额列无千分位/无小数、名称行为空表占位"综合判定。
 **修复后此用例必须通过，且不得误伤正常小金额报价行**（如数量=2、单价=3.5、合价=7.00 是合法的）。
 
+## 2b. 补充实锤（v2 新增两项，用户复测确认）
+
+**实锤 A：F1/F6 提取结果 F5 刷新浏览器即丢（修复方未按卡实现）**
+- E3 卡原要求"KeepAlive + sessionStorage 镜像"双保险；修复方只做了模块级内存单例，
+  **sessionStorage 镜像一个字没写**（架构侧已 grep 核实：ExtractView/RadarView 零命中）。
+- 现象：侧栏切换不丢（keep-alive 生效），但浏览器 F5 刷新 = JS 内存全清 = 结果蒸发；
+  F2-F4 页面 F5 不丢是因为数据从后端 API 拉取。
+- 修法：ExtractView/RadarView 的模块级状态镜像到 sessionStorage（含进行中状态），
+  F5 后从 sessionStorage 恢复；**登录用户切换/登出时必须清空**（与 §3.6 安全项同一处理）。
+
+**实锤 B：F2-F4"重新执行体检"后进度条不实时刷新（根因已定位）**
+- 病灶：`backend/worker.py` 的 `SSEBroadcaster._latest[task_id]` 存有**上一轮的 done 终态帧**，
+  重跑时无任何清理（无 clear 方法，`POST /{id}/run` 也不清）。
+- 链路：重跑 → 前端 startStream 重连 → 后端 checks.py 第 333-335 行把 `latest()` 里的
+  **旧 done 帧**立即续播给前端 → 前端 onDone 秒触发、状态直接置 delivered/进度 100 →
+  进度条冻结，只能手动刷新页面重拉任务 API 才看到真实进度。首次运行无旧帧所以正常。
+- 修法：`SSEBroadcaster` 增加 `clear(task_id)`；`POST /{id}/run` 启动新流水线前调用，
+  清掉上一轮终态帧；并核查并发场景（清帧与旧 worker 线程竞态——上轮若仍在跑应拒绝重跑，
+  该守卫若已存在则只补清帧）。
+- 修后验收：同一任务连续两次 run，第二次进度条从 0 实时推进到 100，中途无需手动刷新。
+
 ## 3. 复查重点（按风险排序）
 
 1. **backend/worker.py**：修复方给 F2/F3/自定义红线新接了 PDF 页码映射（_build_pdf_page_spans / _locate_f2_anchor）——核查页码映射是否会把 docx 误标页码（必须恒 null）、是否拖慢流水线、异常时是否静默吞错；
@@ -69,5 +90,5 @@ r = extract_price_data(p)
 
 ## 6. 分批输出
 
-- 第一批（约 1500 行）：core/price_extractor.py（§2 实锤修复）+ core/qualification_scanner.py + backend/worker.py。输出完停，等"继续"。
-- 第二批（约 1200 行）：core/response_checker.py + core/tender_extractor.py + core/rigging_radar.py + 前端有改动者 + 新增测试（建议 tests/test_e3_review.py，含 §2 复现用例与 §3.6 登出清缓存断言）。
+- 第一批（约 1500 行）：core/price_extractor.py（§2 实锤修复）+ core/qualification_scanner.py + backend/worker.py（§2b 实锤 B 清帧）。输出完停，等"继续"。
+- 第二批（约 1200 行）：core/response_checker.py + core/tender_extractor.py + core/rigging_radar.py + frontend/src/views/ExtractView.vue + frontend/src/views/RadarView.vue（§2b 实锤 A sessionStorage 镜像 + 登出清缓存）+ 新增测试（建议 tests/test_e3_review.py，含 §2 复现用例、§2b 重跑清帧用例与登出清缓存断言）。
