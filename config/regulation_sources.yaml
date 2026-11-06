@@ -22,3 +22,9 @@ sources:
   - name: 中华人民共和国反不正当竞争法（2025 修订）
     url: http://www.npc.gov.cn/c2/c30834/202506/t20250627_446247.html
     adapter: static_html
+  - name: 保障中小企业款项支付条例（2025 修订）
+    url: https://www.gov.cn/zhengce/zhengceku/202503/content_7015405.htm
+    adapter: static_html
+  - name: 政府采购非招标采购方式管理办法（财政部令第 74 号）
+    url: https://www.gov.cn/gongbao/content/2014/content_2644816.htm
+    adapter: static_html
