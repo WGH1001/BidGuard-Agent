@@ -1,24 +1,24 @@
 # BidGuard 法规库 · 官网更新源配置（E4）
 # 用途：POST /api/regulations/crawl 逐源拉取官方公布页，解析条文后与库内 content_hash 比对更新。
-# url 为 TODO_USER_FILL 占位——用户找到官方公布页（优先 gov.cn 公报静态页，次选 flk.npc.gov.cn）后填入。
-# adapter 当前仅支持 static_html（requests+lxml 直接解析）；JS 渲染站点拉不到正文时端点会诚实报错并引导手动导入。
+# URL 均为官方来源（中国政府网 / 中国人大网 / 省部级政府官网静态页），2026-11-06 由架构侧检索核实。
+# adapter=static_html：requests+lxml 直接解析；JS 渲染站点拉不到正文时端点诚实报错并引导手动导入。
 
 sources:
   - name: 中华人民共和国招标投标法（2017 修正）
-    url: TODO_USER_FILL
+    url: http://www.npc.gov.cn/zgrdw/npc/xinwen/2018-01/04/content_2036284.htm
     adapter: static_html
   - name: 中华人民共和国政府采购法（2014 修正）
-    url: TODO_USER_FILL
+    url: https://www.beijing.gov.cn/zhengce/zhengcefagui/qtwj/201908/t20190808_779843.html
     adapter: static_html
   - name: 中华人民共和国政府采购法实施条例
-    url: TODO_USER_FILL
+    url: https://www.gov.cn/zhengce/2015-02/27/content_2822395.htm
     adapter: static_html
-  - name: 招标投标法实施条例
-    url: TODO_USER_FILL
+  - name: 招标投标法实施条例（2019 第三次修订）
+    url: https://www.gov.cn/gongbao/content/2019/content_5468831.htm
     adapter: static_html
   - name: 政府采购货物和服务招标投标管理办法（财政部令第 87 号）
-    url: TODO_USER_FILL
+    url: https://www.gov.cn/gongbao/content/2017/content_5241918.htm
     adapter: static_html
-  - name: 中华人民共和国反不正当竞争法（2019 修正）
-    url: TODO_USER_FILL
+  - name: 中华人民共和国反不正当竞争法（2025 修订）
+    url: http://www.npc.gov.cn/c2/c30834/202506/t20250627_446247.html
     adapter: static_html
