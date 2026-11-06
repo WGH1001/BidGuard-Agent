@@ -1,13 +1,18 @@
 ﻿# -*- coding: utf-8 -*-
-"""F4 ★条款逐条响应核验 + 标书前后矛盾检测（大模型①② + 双书勾稽）。
+"""F4 ★条款逐条响应核验 + 标书前后矛盾检测（大模型①② + 双书勾稽 + E2 门控混合检索与缺佐证探针）。
 
-模块职责（对应 PRD-02 §7 F4）：
+模块职责（对应 PRD-02 §7 F4 与 E2 任务卡）：
 1. ★/▲ 强制条款逐条响应核验（双书勾稽，大模型①）：
    - 输入：招标文件 + 投标文件 + F1 提取的 ★/▲ 要求清单（仅消费 kind=='requirement' 及模式 A/B）；
-   - 链路：bid_aligner 条款级对齐 -> 定位每条要求对应的投标响应窗口（无对齐命中则按编号/关键词锚点开窗）
-           -> 0 Token 预判 + LLM 逐条判定响应状态（RESPONSE_OK / MISSING_RESPONSE / CONTRADICTION）；
-   - 溯源铁律：每条 finding 必须带 tender_quote + bid_quote（强制走 quote_verifier.verify_quote，
-     引用失败的不采信、清空待人工）+ 双方字符偏移 + 页码（PDF 换算页码，docx 为 None）。
+   - 门控链路（E2 升级点 1 & 3b）：
+     ① 初筛（条款号/标题/高 2-gram 重合度）直接命中 -> 0ms 直通放行，绝不触发混合检索；
+     ② 初筛未命中的"疑似漏应答候选" -> 启动 core.hybrid_retriever 三级混合检索（含 BM25 + 45组同义词扩展），
+        检索命中（如"项目负责人"->"拟派项目经理"同义改写）则改判 RESPONSE_OK 并附原文证据；
+   - 缺证明材料支撑探针（E2 升级点 3a · MISSING_EVIDENCE）：
+     当招标要求命中"须提供/应提供/提供...(证书|检测报告|截图|证明材料|承诺函|复印件|扫描件)"且初判为 RESPONSE_OK 时，
+     检查投标书除照抄原句外是否含佐证锚点（见附件/详见/证书编号/报告编号/有效期至等）；
+     无锚点则产出 code='MISSING_EVIDENCE', severity='warning'，且 star_results 主状态保持 'RESPONSE_OK'
+     并附 evidence_warning 标记（兼容 F5 偏离表：偏离情况列保持"无偏离"，响应列末尾含"（注：请核实已附对应证明材料）"）。
 2. 标书前后矛盾检测（书内自洽扫描，0 Token 确定性 + 大模型②）：
    - 0 Token 扫描投标书内部多处出现的质保期、总报价、响应时间、质保金比例、交货工期，同参数多值直接报警；
    - 语义级冲突走 LLM 二次判定并强制走 quote_verifier 溯源。
@@ -21,6 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from core.bid_aligner import compare_contracts, _build_clause_units
+from core.hybrid_retriever import hybrid_retrieve_windows
 from core.parser import parse_document
 from core.quote_verifier import normalize_zh, verify_quote
 from core.tender_extractor import (
@@ -35,6 +41,28 @@ _REQ_EXPAND_AFTER = 360
 _BID_WIN_BEFORE = 120
 _BID_WIN_AFTER = 480
 _ANCHOR_MIN_SCORE = 0.22
+
+_EVIDENCE_WARNING_NOTE = '（注：请核实已附对应证明材料）'
+
+# E2 升级点 3a：招标条款要求提供佐证材料的触发正则与投标书佐证锚点正则
+_EVIDENCE_REQ_RE = re.compile(
+    r'(?:须提供|应提供|必须提供|需提供|提供|须具有|应具有|须附|应附)'
+    r'[^。；\n]{0,35}?'
+    r'(?:证书|检测报告|测试报告|检验报告|截图|证明材料|证明文件|承诺函|复印件|扫描件|认证)'
+)
+
+_EVIDENCE_ANCHOR_RE = re.compile(
+    r'见附件|详见|附后|见后附|见本标书|见投标文件|附件\s*[0-9一二三四五六七八九十]+'
+    r'|证书编号|报告编号|认证编号|登记号|编号\s*[：:]'
+    r'|有效期至|发证机关|发证单位|检验结论|检测结论|实测报告'    r'|扫描件如下|复印件如下|截图如下|详见第\s*\d+\s*页'
+)
+
+# E2 验收修正：全书上下文兜底仅认"强锚点"（编号类实证，带实际编号内容）——
+# 泛锚点（见附件等）在全书范围会产生跨需求污染（其他条款的"见附件"豁免本条）
+_EVIDENCE_STRICT_ANCHOR_RE = re.compile(
+    r'(?:证书编号|报告编号|认证编号|登记号|许可证编号|资质编号|备案编号)'
+    r'\s*[:：]?\s*[A-Za-z0-9]{4,}'
+)
 
 _CN_NUM_MAP = {
     '零': 0, '一': 1, '壹': 1, '二': 2, '贰': 2, '两': 2, '俩': 2,
@@ -201,15 +229,22 @@ def _locate_bid_window_for_req(
     bid_units: list,
     align_map: dict[str, list[str]],
     bid_text: str,
+    client: Any = None,
 ) -> dict[str, Any]:
-    """为单条招标 ★/▲ 要求在投标书中定位最佳响应窗口。
+    """为单条招标 ★/▲ 要求在投标书中定位最佳响应窗口（带 E2 严格门控 Gate Filter）。
 
-    优先级：
-    1. bid_aligner 条款级对齐命中（且与要求核心 2-gram 重合度达到下限，或正文直接包含核心短语）；
-    2. 全文滑动段落/行级 2-gram 锚点检索（防条款切分粒度不同导致漏配）。
+    优先级（先快后慢门控）：
+    1. 直接子串或"条款号+标题"锚点命中 -> 0ms 直通放行（gate='direct'，绝不触发混合检索）；
+    2. bid_aligner 条款级对齐命中（2-gram 重合度 >= _ANCHOR_MIN_SCORE） -> 0ms 直通放行（gate='direct'）；
+    3. 全文滑动行级高 2-gram 重合度（>= 0.35） -> 0ms 直通放行（gate='direct'）；
+    4. E2 门控兜底：仅当以上初筛全部未命中（疑似漏应答候选）时，才启动 hybrid_retrieve_windows
+       （Level 1 BM25 + 45组同义词扩展 / Level 2 向量精排），命中则标 gate='hybrid'。
     """
     if not bid_text or not bid_text.strip():
-        return {'hit': False, 'score': 0.0, 'window': '', 'start': None, 'end': None, 'matched_quote': ''}
+        return {
+            'hit': False, 'score': 0.0, 'window': '',
+            'start': None, 'end': None, 'matched_quote': '', 'gate': 'miss',
+        }
 
     req_norm = normalize_zh(re.sub(r'^[★▲\s0-9.、()（）一二三四五六七八九十]+', '', req_text))
     req_grams = _extract_core_grams(req_text)
@@ -230,11 +265,10 @@ def _locate_bid_window_for_req(
                 'start': pos,
                 'end': q_end,
                 'matched_quote': bid_text[pos:q_end].strip(),
+                'gate': 'direct',
             }
 
-        # 1.5 标题锚点：合并记录 = "★N、标题 + 大段正文"（南京病理实证形态，且 parser
-        # 会把段内换行展平为空格——标题与正文同"行"）。真实投标响应表通常只逐条抄
-        # 标题，故用"条款号+标题短语"正则提取锚点（兼容换行/空格两种展平），防正文稀释。
+        # 1.5 标题锚点：合并记录 = "★N、标题 + 大段正文"
         head = (req_text.split('\n', 1)[0] if '\n' in req_text else req_text).strip()
         m_t = re.match(r'^[★▲]?\s*[\d一二三四五六七八九十]+\s*[、\.．]\s*[^，。；\n\s]{2,40}', head)
         title = re.sub(r'^[★▲\s]+', '', (m_t.group(0) if m_t else head)).strip()
@@ -253,6 +287,7 @@ def _locate_bid_window_for_req(
                     'start': pos,
                     'end': q_end,
                     'matched_quote': bid_text[pos:q_end].strip(),
+                    'gate': 'direct',
                 }
 
     # 2. 检查 bid_aligner 条款级对齐结果
@@ -281,41 +316,115 @@ def _locate_bid_window_for_req(
             'start': best_unit.start,
             'end': best_unit.end,
             'matched_quote': best_unit.raw_text.strip(),
+            'gate': 'direct',
         }
 
     # 3. 按段落/行滑动窗口做关键词 2-gram 锚点检索
-    if not req_grams:
-        return {'hit': False, 'score': 0.0, 'window': '', 'start': None, 'end': None, 'matched_quote': ''}
-
     best_line_score = 0.0
     best_line_span: Optional[tuple[int, int, str]] = None
-    cursor = 0
-    for raw_line in bid_text.split('\n'):
-        line_len = len(raw_line)
-        stripped = raw_line.strip()
-        if len(stripped) >= 4:
-            l_grams = _extract_core_grams(stripped)
-            if l_grams:
-                score = len(req_grams & l_grams) / len(req_grams)
-                if score > best_line_score:
-                    best_line_score = score
-                    best_line_span = (cursor, cursor + line_len, stripped)
-        cursor += line_len + 1
+    if req_grams:
+        cursor = 0
+        for raw_line in bid_text.split('\n'):
+            line_len = len(raw_line)
+            stripped = raw_line.strip()
+            if len(stripped) >= 4:
+                l_grams = _extract_core_grams(stripped)
+                if l_grams:
+                    score = len(req_grams & l_grams) / len(req_grams)
+                    if score > best_line_score:
+                        best_line_score = score
+                        best_line_span = (cursor, cursor + line_len, stripped)
+            cursor += line_len + 1
 
-    if best_line_span is not None and best_line_score >= 0.35:
-        l_start, l_end, l_txt = best_line_span
-        w_lo = max(0, l_start - _BID_WIN_BEFORE)
-        w_hi = min(len(bid_text), l_end + _BID_WIN_AFTER)
+        if best_line_span is not None and best_line_score >= 0.35:
+            l_start, l_end, l_txt = best_line_span
+            w_lo = max(0, l_start - _BID_WIN_BEFORE)
+            w_hi = min(len(bid_text), l_end + _BID_WIN_AFTER)
+            return {
+                'hit': True,
+                'score': round(best_line_score, 4),
+                'window': bid_text[w_lo:w_hi],
+                'start': l_start,
+                'end': l_end,
+                'matched_quote': l_txt,
+                'gate': 'direct',
+            }
+
+    # 4. E2 严格门控后通道：仅对初筛未命中的"疑似漏应答候选"启动三级混合检索（BM25+同义词 / 向量重排）
+    hybrid_hits = hybrid_retrieve_windows(
+        query=req_text,
+        doc_text=bid_text,
+        client=client,
+        top_k=1,
+        min_score=0.38,
+    )
+    if hybrid_hits:
+        top_h = hybrid_hits[0]
         return {
             'hit': True,
-            'score': round(best_line_score, 4),
-            'window': bid_text[w_lo:w_hi],
-            'start': l_start,
-            'end': l_end,
-            'matched_quote': l_txt,
+            'score': top_h['score'],
+            'window': top_h['window'],
+            'start': top_h['start'],
+            'end': top_h['end'],
+            'matched_quote': top_h['quote'],
+            'gate': 'hybrid',
         }
 
-    return {'hit': False, 'score': round(best_line_score, 4), 'window': '', 'start': None, 'end': None, 'matched_quote': ''}
+    return {
+        'hit': False,
+        'score': round(best_line_score, 4),
+        'window': '',
+        'start': None,
+        'end': None,
+        'matched_quote': '',
+        'gate': 'miss',
+    }
+
+
+def _check_missing_evidence(
+    req_text: str,
+    bid_quote: str,
+    bid_window: str,
+    bid_text: str,
+) -> Optional[str]:
+    """E2 升级点 3a：缺证明材料支撑探针（MISSING_EVIDENCE）。
+
+    当招标条款要求提供证书/检测报告/截图/证明材料，且初判为 RESPONSE_OK 时：
+    剥离投标书中原样照抄的招标要求句子后，检查剩余响应内容及全文是否存在佐证锚点
+    （如"见附件"、"详见"、"证书编号"、"有效期至"等）。
+    若无佐证锚点，返回预警描述文案；若有佐证锚点（或招标未要求提供证明材料），返回 None。
+    """
+    m_req = _EVIDENCE_REQ_RE.search(req_text or '')
+    if not m_req:
+        return None
+
+    evidence_phrase = m_req.group(0).strip()
+    core_req_stripped = re.sub(r'^[★▲\s0-9.、()（）一二三四五六七八九十]+', '', req_text or '').strip()
+
+    # 从投标窗口与投标全文中剥离原样照抄的招标要求句，检查投标方增量文字是否含佐证锚点
+    residual_window = (bid_window or '').replace(req_text, ' ').replace(core_req_stripped, ' ')
+    residual_quote = (bid_quote or '').replace(req_text, ' ').replace(core_req_stripped, ' ')
+    residual_full = (bid_text or '').replace(req_text, ' ').replace(core_req_stripped, ' ')
+
+    # E2 验收修正：窗口内剥离其他 ★/▲ 条款的照抄行——相邻条款的"见附件"不得豁免本条
+    residual_window = '\n'.join(
+        ln for ln in residual_window.split('\n')
+        if not re.match(r'^\s*[★▲]\s*[0-9一二三四五六七八九十]+\s*[.、．]?', ln)
+    )
+
+    if (
+        _EVIDENCE_ANCHOR_RE.search(residual_quote)
+        or _EVIDENCE_ANCHOR_RE.search(residual_window)
+        # E2 验收修正：全书上下文兜底只认"强锚点"（编号类实证），防止其他条款
+        # 响应行里的"见附件"跨需求污染本条判定（实证：mock ★1 的见附件豁免了 ★2 的空口响应）
+        or _EVIDENCE_STRICT_ANCHOR_RE.search(residual_full)
+    ):
+        return None
+
+    return (
+        f"【疑似缺佐证材料】招标文件要求「{evidence_phrase}」，投标书已作口头响应，"
+        f"但全书未检索到对应证书/报告/截图或「见附件」索引，建议重点核实"
+    )
 
 
 # ── 参数抽取器（用于双书参数冲突检测 & 投标书内部自洽扫描，0 Token）────────
@@ -567,7 +676,7 @@ def check_bid_self_contradictions(
     return findings
 
 
-# ── 核心功能 ①：★/▲ 条款逐条响应核验（双书勾稽 + 大模型①）───────────────
+# ── 核心功能 ①：★/▲ 条款逐条响应核验（双书勾稽 + 大模型① + E2 门控与探针）──
 
 def _filter_valid_requirements(raw_reqs: list[dict]) -> list[dict]:
     """过滤掉 usage_note 与 table_marker，仅保留须逐条响应的 requirement 及模式 A/B 条款。"""
@@ -591,7 +700,7 @@ def check_star_responses(
     tender_path: Optional[str | Path] = None,
     bid_path: Optional[str | Path] = None,
 ) -> dict[str, Any]:
-    """执行招标 ★/▲ 要求 ↔ 投标响应逐条勾稽核验。
+    """执行招标 ★/▲ 要求 ↔ 投标响应逐条勾稽核验（公共签名与返回结构保持一字不变）。
 
     Args:
         tender_text: 招标文件全文。
@@ -603,9 +712,9 @@ def check_star_responses(
 
     Returns:
         {
-            'findings': list[dict],          # MISSING_RESPONSE / CONTRADICTION
+            'findings': list[dict],          # MISSING_RESPONSE / CONTRADICTION / MISSING_EVIDENCE
             'results': list[dict],           # 全部 requirement 的逐条核验明细（含 RESPONSE_OK）
-            'alignment_summary': dict,       # 双书对齐统计（总要求数、命中数、命中率）
+            'alignment_summary': dict,       # 双书对齐统计（总要求数、命中数、命中率、门控统计）
         }
     """
     if requirements is None:
@@ -626,6 +735,8 @@ def check_star_responses(
     findings: list[dict] = []
     results: list[dict] = []
     hit_count = 0
+    direct_gate_hits = 0
+    hybrid_gate_hits = 0
 
     for idx, req in enumerate(valid_reqs, start=1):
         expanded_req_text, r_start, r_end = _expand_req_text(tender_text, req)
@@ -641,6 +752,7 @@ def check_star_responses(
             bid_units=bid_units,
             align_map=align_map,
             bid_text=bid_text,
+            client=client,
         )
 
         t_page = _offset_to_page(r_start, tender_pages)
@@ -652,7 +764,7 @@ def check_star_responses(
             raw_req_quote = expanded_req_text if verify_quote(expanded_req_text, tender_text) else ''
 
         if not loc['hit']:
-            # 无论是否有 LLM，全书未定位到任何响应窗口均判定为 MISSING_RESPONSE
+            # 初筛与混合检索均未命中 -> 判定为 MISSING_RESPONSE
             finding = {
                 'code': 'MISSING_RESPONSE',
                 'severity': 'error',
@@ -676,6 +788,11 @@ def check_star_responses(
             continue
 
         hit_count += 1
+        if loc.get('gate') == 'hybrid':
+            hybrid_gate_hits += 1
+        else:
+            direct_gate_hits += 1
+
         bid_window = loc['window']
         default_bid_quote = loc['matched_quote']
         if bid_text and not verify_quote(default_bid_quote, bid_text):
@@ -716,13 +833,26 @@ def check_star_responses(
                 findings.append(f_item)
                 results.append({**f_item, 'status': 'CONTRADICTION'})
             else:
-                results.append({
+                # 初判为 RESPONSE_OK，运行 E2 升级点 3a 缺证明材料支撑探针
+                ev_warn_msg = _check_missing_evidence(
+                    req_text=expanded_req_text,
+                    bid_quote=default_bid_quote,
+                    bid_window=bid_window,
+                    bid_text=bid_text,
+                )
+                display_bid_quote = (
+                    f"{default_bid_quote}{_EVIDENCE_WARNING_NOTE}"
+                    if (ev_warn_msg and default_bid_quote)
+                    else default_bid_quote
+                )
+                rec_ok = {
                     'status': 'RESPONSE_OK',
                     'req_index': idx,
                     'mark': req.get('mark', ''),
                     'clause_no': req.get('clause_no', ''),
                     'tender_quote': raw_req_quote,
-                    'bid_quote': default_bid_quote,
+                    'bid_quote': display_bid_quote,
+                    'bid_quote_raw': default_bid_quote,
                     'quote_verified': bool(raw_req_quote and default_bid_quote),
                     'tender_start': r_start,
                     'tender_end': r_end,
@@ -731,8 +861,32 @@ def check_star_responses(
                     'bid_end': loc['end'],
                     'bid_page': b_page,
                     'similarity': loc['score'],
+                    'gate': loc.get('gate', 'direct'),
+                    'evidence_warning': _EVIDENCE_WARNING_NOTE if ev_warn_msg else None,
                     'llm_status': 'skipped',
-                })
+                }
+                results.append(rec_ok)
+
+                if ev_warn_msg:
+                    findings.append({
+                        'code': 'MISSING_EVIDENCE',
+                        'severity': 'warning',
+                        'req_index': idx,
+                        'mark': req.get('mark', ''),
+                        'clause_no': req.get('clause_no', ''),
+                        'message': ev_warn_msg,
+                        'tender_quote': raw_req_quote,
+                        'bid_quote': default_bid_quote,
+                        'quote_verified': bool(raw_req_quote and default_bid_quote),
+                        'tender_start': r_start,
+                        'tender_end': r_end,
+                        'tender_page': t_page,
+                        'bid_start': loc['start'],
+                        'bid_end': loc['end'],
+                        'bid_page': b_page,
+                        'evidence_warning': _EVIDENCE_WARNING_NOTE,
+                        'llm_status': 'skipped',
+                    })
             continue
 
         # 大模型① 逐条判定
@@ -768,7 +922,26 @@ def check_star_responses(
 
         quote_verified = (t_ok and b_ok)
         b_real_start = bid_text.find(final_b_quote) if (final_b_quote and bid_text) else loc['start']
-        b_real_end = (b_real_start + len(final_b_quote)) if (final_b_quote and b_real_start is not None and b_real_start >= 0) else loc['end']
+        b_real_end = (
+            (b_real_start + len(final_b_quote))
+            if (final_b_quote and b_real_start is not None and b_real_start >= 0)
+            else loc['end']
+        )
+
+        ev_warn_llm = None
+        if status == 'RESPONSE_OK':
+            ev_warn_llm = _check_missing_evidence(
+                req_text=expanded_req_text,
+                bid_quote=final_b_quote or default_bid_quote,
+                bid_window=bid_window,
+                bid_text=bid_text,
+            )
+
+        display_llm_b_quote = (
+            f"{final_b_quote}{_EVIDENCE_WARNING_NOTE}"
+            if (ev_warn_llm and final_b_quote)
+            else final_b_quote
+        )
 
         rec = {
             'status': status,
@@ -776,7 +949,8 @@ def check_star_responses(
             'mark': req.get('mark', ''),
             'clause_no': req.get('clause_no', ''),
             'tender_quote': final_t_quote,
-            'bid_quote': final_b_quote,
+            'bid_quote': display_llm_b_quote,
+            'bid_quote_raw': final_b_quote,
             'quote_verified': quote_verified,
             'tender_start': r_start,
             'tender_end': r_end,
@@ -785,6 +959,8 @@ def check_star_responses(
             'bid_end': b_real_end,
             'bid_page': _offset_to_page(b_real_start, bid_pages),
             'reason': reason,
+            'gate': loc.get('gate', 'direct'),
+            'evidence_warning': _EVIDENCE_WARNING_NOTE if ev_warn_llm else None,
             'llm_status': 'done',
         }
         results.append(rec)
@@ -811,8 +987,83 @@ def check_star_responses(
                 'bid_end': b_real_end,
                 'bid_page': _offset_to_page(b_real_start, bid_pages),
             })
+        elif ev_warn_llm:
+            findings.append({
+                'code': 'MISSING_EVIDENCE',
+                'severity': 'warning',
+                'req_index': idx,
+                'mark': req.get('mark', ''),
+                'clause_no': req.get('clause_no', ''),
+                'message': ev_warn_llm,
+                'tender_quote': final_t_quote,
+                'bid_quote': final_b_quote,
+                'quote_verified': quote_verified,
+                'tender_start': r_start,
+                'tender_end': r_end,
+                'tender_page': t_page,
+                'bid_start': b_real_start,
+                'bid_end': b_real_end,
+                'bid_page': _offset_to_page(b_real_start, bid_pages),
+                'evidence_warning': _EVIDENCE_WARNING_NOTE,
+            })
 
     total_reqs = len(valid_reqs)
+
+    # ── E2 验收修正：混合命中跨需求污染降级 ─────────────────────────────────
+    # 同义词过宽时，疑似漏答条款的混合命中可能落在其他条款"直接命中"的响应原文上
+    # （实证：mock ★4(CISP驻场工程师) 被洗白到 ★2(达梦DB) 的响应行，score 0.52）。
+    # 混合命中区间与任一直接命中区间重叠率 >30% 即判跨需求污染 → 降级为漏答。
+    direct_spans = [
+        (int(r['bid_start']), int(r['bid_end']))
+        for r in results
+        if r.get('gate') == 'direct' and r.get('bid_start') is not None
+    ]
+    downgraded: list[dict] = []
+    for r in results:
+        if r.get('gate') != 'hybrid' or r.get('bid_start') is None:
+            continue
+        h_lo, h_hi = int(r['bid_start']), int(r['bid_end'])
+        span_len = max(1, h_hi - h_lo)
+        contaminated = any(
+            max(h_lo, d_lo) < min(h_hi, d_hi)
+            and (min(h_hi, d_hi) - max(h_lo, d_lo)) / span_len > 0.3
+            for d_lo, d_hi in direct_spans
+        )
+        if contaminated:
+            downgraded.append(r)
+    for r in downgraded:
+        # E2 验收修正：原位改写而非移除——B2 worker 按 valid_reqs 与 star_results
+        # 等长配对消费，移除会破坏配对契约（RuntimeError: 配对契约破坏）
+        r['status'] = 'MISSING_RESPONSE'
+        r['gate'] = 'hybrid_rejected'
+        r['bid_quote'] = ''
+        r['bid_quote_raw'] = ''
+        r['evidence_warning'] = None
+        r.pop('quote_verified', None)
+        hit_count -= 1
+        hybrid_gate_hits -= 1
+        findings.append({
+            'code': 'MISSING_RESPONSE',
+            'severity': 'error',
+            'req_index': r.get('req_index'),
+            'mark': r.get('mark', ''),
+            'clause_no': r.get('clause_no', ''),
+            'message': (
+                f"实质性要求漏应答：混合检索命中区间与其他条款的响应原文重叠"
+                f"（疑似跨需求污染），判定未响应「{str(r.get('tender_quote', ''))[:60]}」"
+            ),
+            'tender_quote': r.get('tender_quote', ''),
+            'bid_quote': '',
+            'quote_verified': False,
+            'tender_start': r.get('tender_start'),
+            'tender_end': r.get('tender_end'),
+            'tender_page': r.get('tender_page'),
+            'bid_start': r.get('bid_start'),
+            'bid_end': r.get('bid_end'),
+            'bid_page': r.get('bid_page'),
+            'llm_status': r.get('llm_status', 'skipped'),
+        })
+
     hit_rate = round(hit_count / total_reqs, 4) if total_reqs > 0 else 1.0
 
     return {
@@ -822,6 +1073,8 @@ def check_star_responses(
             'total_requirements': total_reqs,
             'aligned_hits': hit_count,
             'hit_rate': hit_rate,
+            'direct_gate_hits': direct_gate_hits,
+            'hybrid_gate_hits': hybrid_gate_hits,
         },
     }
 
@@ -844,7 +1097,7 @@ def run_response_check(
 
     Returns:
         {
-            'findings': [...],             # 汇总 MISSING_RESPONSE 与 CONTRADICTION
+            'findings': [...],             # 汇总 MISSING_RESPONSE、CONTRADICTION 与 MISSING_EVIDENCE
             'star_results': [...],         # 每条 ★/▲ 要求的核验详情（含 RESPONSE_OK）
             'self_contradictions': [...],  # 投标书内部矛盾列表
             'alignment_summary': {...},    # ★/▲ 要求规模与对齐命中率

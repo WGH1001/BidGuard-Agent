@@ -19,3 +19,4 @@ data/*.db-wal
 .slidep/
 E1派发汇总.txt
 E2派发汇总.txt
+*.media.ocr.json

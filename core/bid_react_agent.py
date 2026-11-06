@@ -1,9 +1,11 @@
 ﻿# -*- coding: utf-8 -*-
-"""F7 标书专家 ReAct 追问引擎（★大模型③）—— 跨双书工具检索与溯源问答。
+"""F7 标书专家 ReAct 追问引擎（★大模型③）—— 跨双书工具检索与溯源问答（E2 接入 hybrid_retriever 混合检索）。
 
-模块定位（对应 PRD-02 §7 F7 与 F6+F7 任务卡）：
-1. 工具层（全部为 0 Token 确定性函数）：
-   - search_tender(keyword, ...) / search_bid(keyword, ...)：双书关键词检索，返回 ±200 字符窗口+偏移+页码；
+模块定位（对应 PRD-02 §7 F7 与 E2 任务卡 §2.4）：
+1. 工具层（全部为 0 Token 确定性/自适应混合检索函数，公共签名一字不变）：
+   - search_tender(keyword, ...) / search_bid(keyword, ...)：双书检索，优先精确子串匹配，
+     未命中时自动接入 core.hybrid_retriever（Level 1 BM25 + 45组招投标同义词扩展 / Level 2 向量重排），
+     使搜"项目经理"能精准命中"拟派项目负责人"段落，返回 ±200 字符窗口+偏移+页码；
    - locate_chapter(text, chapter_title)：章节定位（复用 tender_extractor）；
    - recalc_price(items, ...)：调用 PriceSandbox 复算报价；
    - check_cert_expiry(cert_text, open_date, ...)：调用 F3 scan_qualifications 核验效期。
@@ -14,7 +16,7 @@
      失败的清空该条并标注 quote_verified=False；
    - 引用位置附带字符偏移（PDF 换算真实页码，docx 页码为 None 绝不编造）。
 3. 0 Token 降级（client=None）：
-   - 不做 LLM 推理，直接提取问题关键词跑 search_tender / search_bid 返回命中窗口，标注 mode='keyword_fallback'。
+   - 不做 LLM 推理，结合问题关键词与 hybrid_retriever 返回双书命中窗口，标注 mode='keyword_fallback'。
 """
 from __future__ import annotations
 
@@ -23,6 +25,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+from core.hybrid_retriever import expand_query_synonyms, hybrid_retrieve_windows
 from core.parser import parse_document
 from core.price_sandbox import PriceSandbox
 from core.qualification_scanner import scan_qualifications
@@ -122,13 +125,24 @@ def _search_text_windows(
     source_label: str,
     window: int = _SEARCH_WINDOW,
     page_spans: Optional[list[tuple[int, int, int]]] = None,
+    client: Any = None,
 ) -> list[dict[str, Any]]:
-    """在文本中检索关键词，返回 ±200 字符窗口、字符偏移与页码（PDF 附真实页码，docx 为 None）。"""
+    """在文本中检索关键词，返回 ±200 字符窗口、字符偏移与页码（PDF 附真实页码，docx 为 None）。
+
+    E2 升级点 1b：
+    1. 先尝试原词及同义词扩展词条的子串定位；
+    2. 若子串未直接命中，自动接入 hybrid_retrieve_windows（BM25 + 45组同义词扩展 / 向量精排）。
+    """
     if not text or not keyword:
         return []
 
     kw = str(keyword).strip()
-    search_terms = [kw] if kw in text else _extract_keywords_from_question(kw)
+    syn_terms = expand_query_synonyms(kw)
+    if kw in text:
+        search_terms = [kw]
+    else:
+        extracted = _extract_keywords_from_question(kw)
+        search_terms = list(dict.fromkeys([kw] + syn_terms + extracted))
 
     hits: list[dict[str, Any]] = []
     seen_offsets: list[int] = []
@@ -161,10 +175,30 @@ def _search_text_windows(
         if hits:
             break
 
+    # 若子串未命中，启动 hybrid_retriever（BM25 + 同义词 + 可选向量重排）
+    if not hits:
+        hybrid_res = hybrid_retrieve_windows(
+            query=kw,
+            doc_text=text,
+            client=client,
+            top_k=_MAX_HITS_PER_SEARCH,
+            min_score=0.28,
+            window_pad=window,
+        )
+        for h in hybrid_res:
+            off = int(h['offset'])
+            hits.append({
+                'source': source_label,
+                'keyword': kw,
+                'quote': h['window'].strip() or h['quote'],
+                'offset': off,
+                'page': _offset_to_page(off, spans),
+            })
+
     return hits
 
 
-# ── 工具层：4 组确定性工具函数（支持独立调用与 ReAct 挂载）────────────────
+# ── 工具层：4 组确定性工具函数（支持独立调用与 ReAct 挂载，公共签名不变）─────
 
 def search_tender(
     keyword: str,
@@ -172,7 +206,7 @@ def search_tender(
     window: int = _SEARCH_WINDOW,
     page_spans: Optional[list[tuple[int, int, int]]] = None,
 ) -> list[dict[str, Any]]:
-    """工具 1a：在招标文件中检索关键词，返回 ±200 字符窗口 + 偏移 + 页码。"""
+    """工具 1a：在招标文件中检索关键词（含同义词与 BM25 混合检索），返回 ±200 字符窗口 + 偏移 + 页码。"""
     return _search_text_windows(tender_text, keyword, 'tender', window=window, page_spans=page_spans)
 
 
@@ -182,7 +216,7 @@ def search_bid(
     window: int = _SEARCH_WINDOW,
     page_spans: Optional[list[tuple[int, int, int]]] = None,
 ) -> list[dict[str, Any]]:
-    """工具 1b：在投标文件中检索关键词，返回 ±200 字符窗口 + 偏移 + 页码。"""
+    """工具 1b：在投标文件中检索关键词（含同义词与 BM25 混合检索），返回 ±200 字符窗口 + 偏移 + 页码。"""
     return _search_text_windows(bid_text, keyword, 'bid', window=window, page_spans=page_spans)
 
 
@@ -323,13 +357,13 @@ def ask_bid_expert(
     client=None,
     max_rounds: int = 6,
 ) -> dict[str, Any]:
-    """F7 标书专家 ReAct 追问主入口。
+    """F7 标书专家 ReAct 追问主入口（公共签名保持一字不变）。
 
     Args:
         tender_path: 招标文件路径（docx/pdf/txt）。
         bid_path: 投标文件路径（docx/pdf/txt）。
         question: 投标专员提问内容。
-        client: LLM 客户端；为 None 时执行 0 Token 关键词检索降级（mode='keyword_fallback'）。
+        client: LLM 客户端；为 None 时执行 0 Token 混合检索降级（mode='keyword_fallback'）。
         max_rounds: ReAct 最大循环轮数（默认 6 轮，防死循环）。
 
     Returns:
@@ -351,7 +385,7 @@ def ask_bid_expert(
     tender_pages = _build_pdf_page_spans(tender_path)
     bid_pages = _build_pdf_page_spans(bid_path)
 
-    # ── 1. 0 Token 降级模式（client is None）──
+    # ── 1. 0 Token 降级模式（client is None，接入 hybrid_retriever Level 1）──
     if client is None:
         keywords = _extract_keywords_from_question(question)
         t_hits: list[dict[str, Any]] = []
@@ -359,6 +393,12 @@ def ask_bid_expert(
         for kw in keywords:
             t_hits.extend(search_tender(kw, tender_text=tender_text, page_spans=tender_pages))
             b_hits.extend(search_bid(kw, bid_text=bid_text, page_spans=bid_pages))
+
+        # 若分词检索未命中，直接用完整自然语言问题跑一次混合检索
+        if not t_hits and tender_text:
+            t_hits.extend(_search_text_windows(tender_text, question, 'tender', page_spans=tender_pages))
+        if not b_hits and bid_text:
+            b_hits.extend(_search_text_windows(bid_text, question, 'bid', page_spans=bid_pages))
 
         quotes = []
         for h in (t_hits[:2] + b_hits[:2]):
@@ -384,7 +424,7 @@ def ask_bid_expert(
             'quotes': quotes,
             'steps': [{
                 'round': 1,
-                'thought': '0 Token 关键词检索降级模式',
+                'thought': '0 Token 关键词与混合同义词检索降级模式',
                 'action': 'keyword_search',
                 'action_input': keywords,
                 'observation': {'tender_hits': len(t_hits), 'bid_hits': len(b_hits)},
@@ -476,11 +516,13 @@ def ask_bid_expert(
                 'terminated_by_max_rounds': False,
             }
 
-        # 执行工具调用
+        # 执行工具调用（search_tender / search_bid 已内置混合检索增强）
         observation: Any = None
         if action == 'search_tender':
             kw = action_input.get('keyword', '') if isinstance(action_input, dict) else str(action_input or '')
-            observation = search_tender(kw, tender_text=tender_text, page_spans=tender_pages)
+            observation = _search_text_windows(
+                tender_text, kw, 'tender', page_spans=tender_pages, client=client
+            )
             for h in observation[:2]:
                 collected_tool_quotes.append({
                     'source': 'tender', 'quote': h['quote'],
@@ -488,7 +530,9 @@ def ask_bid_expert(
                 })
         elif action == 'search_bid':
             kw = action_input.get('keyword', '') if isinstance(action_input, dict) else str(action_input or '')
-            observation = search_bid(kw, bid_text=bid_text, page_spans=bid_pages)
+            observation = _search_text_windows(
+                bid_text, kw, 'bid', page_spans=bid_pages, client=client
+            )
             for h in observation[:2]:
                 collected_tool_quotes.append({
                     'source': 'bid', 'quote': h['quote'],
