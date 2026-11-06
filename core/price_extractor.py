@@ -21,6 +21,10 @@
 4. **vMerge 合并单元格去重与合计行隔离**：
    - 参考 parser.py 的 _tc 实体去重机制，按 (名称格_tc, 合价格_tc) 组合去重防止跨行合并虚增；
    - 严格隔离"合计/总计/小计/大写"汇总行，提取为 table_total，严禁混入 items 明细。
+5. **E1 升级点 4b（江苏政采模板跨格与分包预算提取）**：
+   - 依据《政府采购法实施条例》第 33 条，未单独设定最高限价时以采购预算作为法定上限；
+   - 支持表格横向跨格（标签格与数值格中间隔分包格/空串）、纵向跨行（表头列为预算金额、数据行填数值）
+     以及正文跨换行/分包小节的预算提取。
 """
 import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -43,12 +47,37 @@ _CAP_HIGH_RE = re.compile(
 )
 _CAP_UNIT_HEADER_RE = re.compile(
     r'(?:最高(?:投标)?限价|招标控制价|预算金额|采购预算)\s*[（(]\s*(万元|元)\s*[)）]'
-    r'[^0-9\n]{0,25}?([0-9][0-9,]*(?:\.[0-9]+)?)',
+    # E1 验收修正：(?<![包号]) 防跨行 filler 吃进"采购包1"式包号尾巴——
+    # 数字若紧跟"包/号"字（如"采购包1"的 1）则不是金额，正则回溯继续找真值
+    r'[\s\S]{0,40}?(?<![包号])([0-9][0-9,]*(?:\.[0-9]+)?)',
     re.IGNORECASE
 )
 _CAP_BUDGET_RE = re.compile(
     r'(?:采购预算|预算金额|项目预算|预算总价|最高预算)'
     r'[^0-9\n]{0,45}?'
+    r'([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|万|元)',
+    re.IGNORECASE
+)
+
+# E1 升级点 4b：支持跨换行（docx 表格展平后标签格与数值格以 \n 分隔）及中间夹带分包/标段编号的限价与预算匹配
+_CAP_HIGH_MULTILINE_RE = re.compile(
+    r'(?:最高(?:投标)?限价|招标控制价|最高限额)'
+    r'(?:[\s:：—\-]|人民币|小写|(?:采购)?包\s*\d+|分包\s*[0-9一二三四五六七八九十]+|标段\s*[0-9一二三四五六七八九十]+){0,30}?'
+    r'([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|万|元)',
+    re.IGNORECASE
+)
+_CAP_BUDGET_MULTILINE_RE = re.compile(
+    r'(?:采购预算|预算金额|项目预算|预算总价|最高预算|本项目预算)'
+    r'(?:[\s:：—\-、，]|人民币|小写|为|共计|合计|(?:采购)?包\s*\d+|分包\s*[0-9一二三四五六七八九十]+|标段\s*[0-9一二三四五六七八九十]+){0,35}?'
+    r'([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|万|元)',
+    re.IGNORECASE
+)
+# 分包小节预算匹配（如 "分包1：采购预算 80万元" / "采购包1 预算金额：120万元"）
+_PACKAGE_BUDGET_RE = re.compile(
+    r'(?:采购包|分包|标段)\s*([0-9一二三四五六七八九十]{1,3})'
+    r'[^\n。；]{0,40}?'
+    r'(?:最高(?:投标)?限价|采购预算|预算金额|项目预算|预算)'
+    r'[^0-9\n]{0,20}?'
     r'([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|万|元)',
     re.IGNORECASE
 )
@@ -74,6 +103,11 @@ _COL_QTY_KEYS = ('数量', '采购数量', '投标数量', '工作量', '套数'
 _COL_UNIT_PRICE_KEYS = ('单价', '投标单价', '含税单价', '综合单价', '全费用单价')
 _COL_TOTAL_PRICE_KEYS = ('合价', '分项合计', '分项总价', '投标合价', '含税总价',
                          '含税合价', '小计', '总价', '金额')
+
+# 限价/预算表头或标签关键词（高优先级：最高限价/控制价；法定等同级：采购预算/预算金额）
+_CAP_LABEL_HIGH_KEYS = ('最高限价', '最高投标限价', '招标控制价', '控制价', '最高限额')
+_CAP_LABEL_BUDGET_KEYS = ('采购预算', '预算金额', '项目预算', '预算总价')
+_CAP_LABEL_ALL_KEYS = _CAP_LABEL_HIGH_KEYS + _CAP_LABEL_BUDGET_KEYS
 
 # 汇总行识别
 _SUMMARY_ROW_RE = re.compile(
@@ -159,18 +193,28 @@ def _parse_qty_str(raw: str) -> Decimal | None:
 def extract_price_cap(text: str) -> str | None:
     """从招标/投标文件全文中提取最高限价或采购预算（统一折算为元）。
 
-    优先级：最高限价 / 控制价 > 表头带单位限价 > 采购预算 / 预算金额。
+    依据《政府采购法实施条例》第 33 条：未单独设定最高限价时，以采购预算作为法定上限。
+    优先级：最高限价 / 控制价（同行 -> 跨行） > 表头带单位限价/预算 > 采购预算 / 预算金额（同行 -> 跨行 -> 分包）。
     """
     if not text:
         return None
 
-    for regex in (_CAP_HIGH_RE, _CAP_UNIT_HEADER_RE, _CAP_BUDGET_RE):
+    for regex in (
+        _CAP_HIGH_RE,
+        _CAP_HIGH_MULTILINE_RE,
+        _CAP_UNIT_HEADER_RE,
+        _CAP_BUDGET_RE,
+        _CAP_BUDGET_MULTILINE_RE,
+    ):
         for m in regex.finditer(text):
             g1, g2 = m.group(1), m.group(2)
             if g1 in ('万元', '万', '元'):
                 unit, num_s = g1, g2
             else:
                 num_s, unit = g1, g2
+            # 校验提取的数字字面量确实存在于原文切片中（防幻影数字铁律）
+            if num_s not in m.group(0):
+                continue
             try:
                 val = Decimal(num_s.replace(',', ''))
             except InvalidOperation:
@@ -181,6 +225,23 @@ def extract_price_cap(text: str) -> str | None:
                 val = val * WAN
             if val >= Decimal('100'):
                 return _fmt_yuan(val)
+
+    # 分包小节预算兜底（如按分包1/分包2分别列出采购预算而无总述句）
+    pkg_matches = list(_PACKAGE_BUDGET_RE.finditer(text))
+    if pkg_matches:
+        for m in pkg_matches:
+            num_s, unit = m.group(2), m.group(3)
+            if num_s not in m.group(0):
+                continue
+            try:
+                val = Decimal(num_s.replace(',', ''))
+            except InvalidOperation:
+                continue
+            if '万' in unit:
+                val = val * WAN
+            if val >= Decimal('100'):
+                return _fmt_yuan(val)
+
     return None
 
 
@@ -212,13 +273,36 @@ def _detect_header_map(cells_text: list[str]) -> dict | None:
     return None
 
 
+def _try_parse_cap_cell_value(cell_txt: str, label_has_unit: bool, label_is_wan: bool) -> Decimal | None:
+    """从表格目标单元格提取限价/预算金额。
+    - 若标签格已显式带单位（如"预算金额（万元）"或"最高限价（元）"），目标格允许为纯数字；
+    - 若标签格未带单位，则目标格必须自身带单位（require_unit=True），防止误抓序号/包号。
+    """
+    txt = (cell_txt or '').strip()
+    if not txt:
+        return None
+    # 排除纯分包号或纯小序号（如 "包1"、"1"、"第1包"）
+    if re.match(r'^(?:(?:采购)?包|分包|标段)?\s*[0-9一二三四五六七八九十]{1,2}\s*$', txt):
+        if not label_has_unit:
+            return None
+    v = _parse_money_str(
+        txt,
+        default_wan=(label_is_wan or '万元' in txt),
+        require_unit=(not label_has_unit),
+    )
+    if v is not None and v >= Decimal('100'):
+        return v
+    return None
+
+
 def _extract_from_docx_tables(doc) -> dict:
-    """遍历 python-docx 的所有表格，提取开标一览表与分项报价明细表数据。"""
+    """遍历 python-docx 的所有表格，提取开标一览表、分项报价明细表及跨格/分包预算限价。"""
     items = []
     table_total = None
     bid_total = None
     bid_total_upper = None
-    price_cap_in_table = None
+    high_cap_in_table = None
+    budget_cap_in_table = None
     has_price_table_skeleton = False
 
     for table in doc.tables:
@@ -228,6 +312,68 @@ def _extract_from_docx_tables(doc) -> dict:
 
         first_row_txt = ' '.join(c.text.strip() for c in rows[0].cells)
         table_is_wan = ('万元' in first_row_txt)
+
+        # ── 0. 无论何种表格，先扫描是否存在「最高限价 / 采购预算 / 预算金额」跨格或跨行定义 ──
+        deduped_rows: list[list[str]] = []
+        for row in rows:
+            u_cells = []
+            s_tc = set()
+            for c in row.cells:
+                if c._tc not in s_tc:
+                    s_tc.add(c._tc)
+                    u_cells.append(c.text.strip())
+            if u_cells:
+                deduped_rows.append(u_cells)
+
+        for r_idx, uniq_cells in enumerate(deduped_rows):
+            for c_idx, label in enumerate(uniq_cells):
+                clean_lbl = re.sub(r'\s+', '', label)
+                if not clean_lbl or len(clean_lbl) > 35:
+                    continue
+                is_high_key = any(k in clean_lbl for k in _CAP_LABEL_HIGH_KEYS)
+                is_budget_key = any(k in clean_lbl for k in _CAP_LABEL_BUDGET_KEYS)
+                if not is_high_key and not is_budget_key:
+                    continue
+
+                lbl_is_wan = ('万元' in clean_lbl) or table_is_wan
+                lbl_has_unit = ('万元' in clean_lbl) or ('元' in clean_lbl)
+
+                # (a) 先看标签格自身是否已包含金额（如 "采购预算：180万元"）
+                cand_self = _parse_money_str(label, default_wan=lbl_is_wan, require_unit=True)
+                if cand_self is not None and cand_self >= Decimal('100'):
+                    if is_high_key and high_cap_in_table is None:
+                        high_cap_in_table = _fmt_yuan(cand_self)
+                    elif budget_cap_in_table is None:
+                        budget_cap_in_table = _fmt_yuan(cand_self)
+                    continue
+
+                # (b) 横向跨格查找：向后扫描同行 i+1 .. i+3（容忍中间隔着空串、"人民币"或"采购包1"格）
+                matched_horiz = None
+                for step in range(1, 4):
+                    if c_idx + step >= len(uniq_cells):
+                        break
+                    target_txt = uniq_cells[c_idx + step]
+                    val = _try_parse_cap_cell_value(target_txt, lbl_has_unit, lbl_is_wan)
+                    if val is not None:
+                        matched_horiz = val
+                        break
+                if matched_horiz is not None:
+                    if is_high_key and high_cap_in_table is None:
+                        high_cap_in_table = _fmt_yuan(matched_horiz)
+                    elif budget_cap_in_table is None:
+                        budget_cap_in_table = _fmt_yuan(matched_horiz)
+                    continue
+
+                # (c) 纵向跨行查找：当前格是表头列（如第 r_idx 行第 c_idx 列为 "预算金额（万元）"），数值在下一行同列
+                if r_idx + 1 < len(deduped_rows):
+                    next_row = deduped_rows[r_idx + 1]
+                    if c_idx < len(next_row):
+                        val_down = _try_parse_cap_cell_value(next_row[c_idx], lbl_has_unit, lbl_is_wan)
+                        if val_down is not None:
+                            if is_high_key and high_cap_in_table is None:
+                                high_cap_in_table = _fmt_yuan(val_down)
+                            elif budget_cap_in_table is None:
+                                budget_cap_in_table = _fmt_yuan(val_down)
 
         # ── 1. 尝试作为《分项报价明细表》解析（查找表头行） ──
         header_idx = None
@@ -309,7 +455,7 @@ def _extract_from_docx_tables(doc) -> dict:
                     })
             continue
 
-        # ── 2. 尝试作为《开标一览表》或《投标人须知前附表》解析 ──
+        # ── 2. 尝试作为《开标一览表》解析投标报价 ──
         header_cells = [re.sub(r'\s+', '', c.text) for c in rows[0].cells]
         bid_col = None
         upper_col = None
@@ -337,15 +483,7 @@ def _extract_from_docx_tables(doc) -> dict:
                 if m_u:
                     bid_total_upper = m_u.group(2).strip()
 
-        for row in rows:
-            uniq_cells = []
-            seen_tc = set()
-            for c in row.cells:
-                if c._tc not in seen_tc:
-                    seen_tc.add(c._tc)
-                    uniq_cells.append(c.text.strip())
-            if not uniq_cells:
-                continue
+        for uniq_cells in deduped_rows:
             row_joined = ' '.join(uniq_cells)
             if any(k in row_joined for k in ('开标一览表', '报价一览表', '投标总价', '投标总报价')):
                 has_price_table_skeleton = True
@@ -354,14 +492,6 @@ def _extract_from_docx_tables(doc) -> dict:
                 clean_lbl = re.sub(r'\s+', '', label)
                 if len(clean_lbl) > 30:
                     continue
-                if any(k in clean_lbl for k in ('最高限价', '最高投标限价', '招标控制价', '采购预算', '预算金额')):
-                    target_txt = uniq_cells[i + 1] if i + 1 < len(uniq_cells) else label
-                    v_cap = _parse_money_str(target_txt,
-                                             default_wan=('万元' in clean_lbl or '万元' in target_txt),
-                                             require_unit=True)
-                    if v_cap is not None and v_cap >= Decimal('100') and price_cap_in_table is None:
-                        price_cap_in_table = _fmt_yuan(v_cap)
-
                 if any(k in clean_lbl for k in ('投标总价', '投标总报价', '报价总计', '总报价', '投标报价')):
                     if any(k in clean_lbl for k in _NON_BID_UPPER_KEYS):
                         continue
@@ -383,6 +513,8 @@ def _extract_from_docx_tables(doc) -> dict:
                     m_u = _UPPER_AMOUNT_RE.search(val_part)
                     if m_u:
                         bid_total_upper = m_u.group(2).strip()
+
+    price_cap_in_table = high_cap_in_table if high_cap_in_table is not None else budget_cap_in_table
 
     return {
         'items': items,

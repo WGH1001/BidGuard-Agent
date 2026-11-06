@@ -24,6 +24,7 @@
     - 绝不静默：正则不命中不是错误（返回空列表），但解析失败必须抛异常；
     - 库模块只抛不打印。
 """
+from decimal import Decimal, InvalidOperation
 import re
 
 from core.interfaces import ParsedDoc
@@ -338,13 +339,37 @@ def build_review_checklist(file_path: str) -> dict:
     }
 
 
-# ── 评分细则表结构化（0 Token，docx 表格型）────────────────────────────────
+# ── 评分细则表结构化（0 Token，docx 表格型 + E1 100分强守恒校准）──────────
 # 表头识别键（语料实证四套变体：评审因素/评标内容/评分内容 × 评审细则/评分标准/
 # 评标标准 × 分值/分值范围，2026-11-04 全库扫描）
 _SCORE_TABLE_SCORE_KEYS = ('分值', '分数', '得分', '标准分', '满分')
 _SCORE_TABLE_FACTOR_KEYS = ('评审因素', '评分内容', '评标内容', '评审内容', '评分因素')
 _SCORE_TABLE_DETAIL_KEYS = ('评审细则', '评分标准', '评标标准', '评审标准')
 _SCORE_NUM_RE = re.compile(r'\d+(?:\.\d+)?')
+
+# E1 升级点 4a：表内价格项识别词与正文价格分提取正则族
+_PRICE_FACTOR_KEYWORDS = ('价格', '报价', '投标报价', '评标基准价')
+_PROSE_PRICE_SCORE_PATTERNS = (
+    # 形态 1："价格分统一采用低价优先法...价格分 10 分" / "价格分（10分）" / "价格分值：10分" / "价格分满分30分"
+    re.compile(
+        r'(?:价格分(?:值)?|投标报价(?:分|得分)?|报价分|价格部分|价格评审)'
+        r'[^0-9\n。；]{0,35}?'
+        r'(?:满分(?:为)?|分值(?:为)?|占|为|[（(]|[:：])\s*(\d{1,2}(?:\.\d+)?)\s*分'
+    ),
+    # 形态 2："价格分 10 分" / "价格部分 30 分" 直连写法
+    re.compile(
+        r'(?:价格分(?:值)?|投标报价(?:分)?|报价分|价格部分)'
+        r'\s*(\d{1,2}(?:\.\d+)?)\s*分'
+    ),
+    # 形态 3："低价优先法计算，即满足招标文件要求且投标价格最低的投标报价为评标基准价，其价格分为满分 10 分"
+    re.compile(
+        r'评标基准价[^。\n]{0,35}?价格分(?:为)?(?:满分)?\s*[：:为]?\s*(\d{1,2}(?:\.\d+)?)\s*分'
+    ),
+    # 形态 4："投标报价得分=（评标基准价/投标报价）×10分" 或 "×10（或30）"
+    re.compile(
+        r'(?:价格(?:分|得分)|投标报价(?:分|得分)?)\s*[=＝]\s*[（(]?\s*评标基准价\s*[/／÷]\s*投标报价\s*[)）]?\s*[*×xX]\s*(\d{1,2}(?:\.\d+)?)\s*分?'
+    ),
+)
 
 
 def _dedup_row_cells(row) -> list:
@@ -376,13 +401,90 @@ def _map_score_columns(header_texts: list) -> dict:
     return col
 
 
+def _has_price_scoring_item(items: list[dict]) -> bool:
+    """检查已提取的表格评分项中是否已包含价格/报价分项。"""
+    for it in items:
+        combined = f"{it.get('section', '')} {it.get('factor', '')} {it.get('no', '')}"
+        if any(k in combined for k in _PRICE_FACTOR_KEYWORDS):
+            return True
+    return False
+
+
+def _extract_prose_price_candidates(doc) -> list[tuple[Decimal, str]]:
+    """从 docx 正文段落中提取候选价格分值及所在原句。
+
+    优先扫描评标办法/评标标准章节所在段落；返回 [(score_decimal, sentence_text), ...]。
+    """
+    paras = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
+    if not paras:
+        return []
+
+    full_para_text = '\n'.join(paras)
+    chapters = locate_chapters(full_para_text)
+    eval_candidates = [ch for ch in chapters if any(k in ch['title'] for k in _EVAL_CHAPTER_KEYS)]
+    real_eval = [
+        ch for ch in eval_candidates
+        if '…' not in ch['title'] and not re.search(r'[.·\t]*\d+\s*$', ch['title'])
+    ]
+    eval_ch = real_eval[-1] if real_eval else (eval_candidates[-1] if eval_candidates else None)
+
+    search_regions = []
+    if eval_ch is not None:
+        search_regions.append(full_para_text[eval_ch['start']:])
+    search_regions.append(full_para_text)
+    # E1 验收修正（滁州托育实证）：价格分公式/分值常落在评分表单元格内
+    # （如"价格分（10分）""其价格分为满分10分"），doc.paragraphs 不含表格文本，
+    # 追加表格单元格文本作为末位搜索区（前两区命中即不触达）。
+    table_texts = []
+    for _t in doc.tables:
+        for _row in _t.rows:
+            for _cell in _dedup_row_cells(_row):
+                if _cell.text and _cell.text.strip():
+                    table_texts.append(_cell.text.strip())
+    if table_texts:
+        search_regions.append('\n'.join(table_texts))
+
+    found: list[tuple[Decimal, str]] = []
+    seen_scores: set[Decimal] = set()
+
+    for region in search_regions:
+        for pat in _PROSE_PRICE_SCORE_PATTERNS:
+            for m in pat.finditer(region):
+                num_str = m.group(1)
+                try:
+                    val = Decimal(num_str)
+                except InvalidOperation:
+                    continue
+                if val <= Decimal('0') or val >= Decimal('100'):
+                    continue
+                if val in seen_scores:
+                    continue
+                # 截取命中处所在单行或单句作为原文证据
+                line_lo = region.rfind('\n', 0, m.start()) + 1
+                line_hi = region.find('\n', m.end())
+                if line_hi < 0:
+                    line_hi = len(region)
+                sentence = region[line_lo:line_hi].strip()
+                seen_scores.add(val)
+                found.append((val, sentence))
+        if found:
+            break
+
+    return found
+
+
 def extract_scoring_tables(file_path: str) -> list[dict]:
-    """结构化 docx 评分细则表（表格型语料 0 Token 主通道）。
+    """结构化 docx 评分细则表（表格型语料 0 Token 主通道 + E1 100分强守恒校准）。
 
     仅处理 docx（PDF 无表格对象，段落式评分由 LLM 评分区段层兜底）。
     表格识别：首行表头同时含分值列键与（评审因素或评分标准）键。
     行分两类：分节行（去重后仅 1 格，如"1.价格"）记为当前 section；
     明细行按列映射产出评分项。
+
+    E1 升级点 4a（强守恒校准）：
+    当表格评分项合计分值落在 (0, 100) 之间且表内无"价格/报价"分项时，
+    在评标章正文检索价格分值；仅当 `表格分合计 + 正文价格分 == 100` 时才自动补入
+    同构的价格评分行（注明"价格分（正文提取）"），否则保持现状输出绝不凑数。
 
     Returns:
         [{'table_index': int, 'no': str, 'section': str, 'factor': str,
@@ -425,4 +527,63 @@ def extract_scoring_tables(file_path: str) -> list[dict]:
                 'score_max': max((float(n) for n in nums), default=None),
                 'type': _cell('type'),
             })
+
+    # ── E1 升级点 4a：评分表 100 分强守恒校准 ─────────────────────────────
+    # Case A：表内无价格/报价分项 → 正文守恒补入整行；
+    # Case B（滁州托育语料实证）：表内有价格行但其分值格未解析出数值
+    # （如"（10分）"式括号写法落在合并格/细则格里，score_max=None）→
+    # 正文检索价格分，仅当 其余项合计 + 正文价格分 == 100 时回填该行分值。
+    # 两案共用强守恒约束：加起来不是 100 就保持现状，绝不凑数。
+    table_sum = Decimal('0')
+    for it in items:
+        s_max = it.get('score_max')
+        if s_max is not None:
+            try:
+                table_sum += Decimal(str(s_max))
+            except InvalidOperation:
+                pass
+
+    if items and Decimal('0') < table_sum < Decimal('100'):
+        has_price_item = _has_price_scoring_item(items)
+        # Case B 候选：含价格词且分值未解析的行（要求全表仅此一行，多行即歧义放弃）
+        none_price_rows = [
+            it for it in items
+            if it.get('score_max') is None
+            and any(
+                k in f"{it.get('section', '')} {it.get('factor', '')} {it.get('detail', '')}"
+                for k in _PRICE_FACTOR_KEYWORDS
+            )
+        ]
+        prose_candidates = _extract_prose_price_candidates(doc)
+
+        if has_price_item and len(none_price_rows) == 1:
+            for prose_score, prose_sentence in prose_candidates:
+                if table_sum + prose_score == Decimal('100'):
+                    row = none_price_rows[0]
+                    row['score_max'] = float(prose_score)
+                    if not row.get('score'):
+                        row['score'] = str(int(prose_score)) if prose_score == int(prose_score) else str(prose_score)
+                    row['type'] = ((row.get('type') or '') + '（分值由正文 100 分守恒校准补齐）').strip()
+                    break
+        elif not has_price_item:
+            for prose_score, prose_sentence in prose_candidates:
+                if table_sum + prose_score == Decimal('100'):
+                    score_str = (
+                        str(int(prose_score))
+                        if prose_score == int(prose_score)
+                        else str(prose_score)
+                    )
+                    items.append({
+                        'table_index': items[0].get('table_index', 0),
+                        'row_index': 0,
+                        'no': '价格',
+                        'section': '价格分（正文提取）',
+                        'factor': '价格分（正文提取）',
+                        'detail': prose_sentence,
+                        'score': score_str,
+                        'score_max': float(prose_score),
+                        'type': '价格分（正文提取）',
+                    })
+                    break
+
     return items
