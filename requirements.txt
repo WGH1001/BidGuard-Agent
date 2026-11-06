@@ -1,37 +1,43 @@
 # BidGuard-Agent dependency manifest (Python 3.12)
-# Scope: core engine modules extracted from Contract-Review-Agent + planned
-#        FastAPI backend layer + pytest. Install into the project venv:
+# Scope: core engine modules extracted from Contract-Review-Agent + FastAPI
+#        backend layer + pytest. Install into the project venv:
 #        .venv\Scripts\python -m pip install -r requirements.txt
+#
+# 版本策略（D1 封版定稿）：全部钉死为 == 精确版本——
+#   1) 保证任何机器/任何时间构建出的镜像依赖完全一致（可复现封版）；
+#   2) 避免 >= 语义下依赖悄悄出新版导致"上次能跑这次挂"的漂移
+#      （实例：openai 曾因 >= 在本机 venv 与容器间漂移出 3.42.1 / 3.46.0 两个版本）；
+#   3) 升级依赖 = 有意修改本文件（改版本号）→ pip 层重建一次，属预期行为。
 
 # -- document parsing & native annotation (core/parser.py, redline.py, F5) --
-python-docx>=1.1.0
-PyMuPDF>=1.24.0
-lxml>=5.0
-numpy>=1.26
+python-docx==1.2.0
+PyMuPDF==2.1
+lxml==6.1.3
+numpy==2.5.4
 
 # -- offline OCR for scanned documents (core/parser.py, F3 evidence photos) --
-rapidocr-onnxruntime>=1.3.0
+rapidocr-onnxruntime==1.4.4
 
 # -- LLM gateway (core/llm_gateway.py, config/models.yaml) --
-PyYAML>=6.0
-openai>=1.40.0
-requests>=2.31.0
+PyYAML==6.0.3
+openai==3.46.0
+requests==2.34.2
 
 # -- FastAPI backend layer (backend/, four-container deploy) --
-fastapi>=0.110.0
-uvicorn>=0.29.0
-python-dotenv>=1.0
-pydantic>=2.7
-python-multipart>=0.0.9
-httpx>=0.27.0
-sqlalchemy>=2.0
+fastapi==0.162.0
+uvicorn==0.54.0
+python-dotenv==1.2.4
+pydantic==2.14.2
+python-multipart==0.0.33
+httpx==0.28.1
+SQLAlchemy==2.1.6
 
-# -- auth layer (backend/auth.py full version, pending models.py task card) --
-bcrypt==4.*
+# -- auth layer (backend/auth.py: bcrypt password hashing) --
+bcrypt==4.3.0
 
 # -- tests --
-pytest>=8.0
+pytest==9.2.0
 
-# -- 生产部署依赖: PostgreSQL 16 驱动与 Redis 7 客户端 --
+# -- 生产部署依赖: PostgreSQL 16 驱动与 Redis 7 客户端（容器内验证版本） --
 psycopg2-binary==2.9.9
-redis==5.*
+redis==5.3.1
