@@ -98,9 +98,14 @@ docker compose up -d --build
 - 在不启动 Docker 容器的开发场景下，直接清除或将环境变量设回 SQLite：
   ```powershell
   Remove-Item Env:\DATABASE_URL -ErrorAction SilentlyContinue
-  .venv\Scripts\python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+  .venv\Scripts\python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --env-file .env
   ```
   此时后端自动使用本地 `data/bidguard.db` 文件库运行。
+- **`--env-file .env` 说明**：本机直跑模式默认**不会**自动读取项目根的 `.env`（代码无 dotenv 逻辑），
+  必须显式加 `--env-file .env`（uvicorn 内置参数）才会加载——推荐始终带上，让 `.env` 成为唯一配置源。
+  注意优先级：**系统/用户级环境变量 > .env 文件**（uvicorn 加载 dotenv 默认不覆盖已存在的系统变量），
+  若某变量改了 `.env` 却不生效，检查 Windows「环境变量」里是否有同名系统级残留（如历史设置的
+  `ZHIPU_API_KEY`），删掉系统级那条即可让 `.env` 接管。`启动BidGuard.bat` 已内置该参数（.env 存在时自动启用）。
 
 ---
 
