@@ -1,20 +1,21 @@
 # -*- coding: utf-8 -*-
-"""F5 《技术与商务偏离表.docx》一键对齐生成器。
+"""F5 / E6 《技术与商务偏离表.docx》一键对齐生成器（含 Word 双轨估算页码展示）。
 
-模块职责（对应 PRD-02 §7 F5 与 F5 任务卡）：
+模块职责（对应 PRD-02 §7 F5、F5 任务卡与 E6 任务卡）：
 1. 主入口 export_deviation_table(tender_path, bid_path, output_path, requirements=None, client=None)：
    - 内部调用 F4 run_response_check 拿到逐条核验结果 star_results；
-   - 与 _filter_valid_requirements 过滤后的有效要求清单（已排除 usage_note / table_marker）严格同序 zip 配对；
+   - 与 _filter_valid_requirements 过滤后的有效要求清单严格同序 zip 配对；
    - 生成标准六列 Word 表格（Table Grid）：
      序号 | 招标条款号 | 招标文件要求 | 我方投标响应 | 偏离情况 | 位置索引
 2. 偏离判定严禁二次判定，只消费 F4 三态结果：
    - RESPONSE_OK      -> 无偏离（绿色）
    - MISSING_RESPONSE -> 负偏离（漏应答）（红色加粗，我方投标响应填"（未检出响应内容）"）
    - CONTRADICTION    -> 负偏离（响应冲突）（红色加粗）
-   - 若要求含 structured.consequence（veto/deduction/bonus），在偏离情况列追加标注（如"，★一票否决项"）。
-3. 位置索引列纪律：
+3. 位置索引列纪律（E6 升级）：
    - PDF 使用 pymupdf 真实页码（"招标书第 X 页 | 投标书第 Y 页"）；
-   - docx 页码一律为 None（严禁编造），写字符偏移（"招标书@字符123 | 投标书@字符456"）；
+   - docx 若解析到分页锚点：有底部印刷页码时输出 "招标书 第X页(印刷页Y·估算)" / "投标书 第X页(印刷页Y·估算)"，
+     无印刷页码时输出 "招标书 第X页(物理页·估算)" / "投标书 第X页(物理页·估算)"；
+   - docx 无分页锚点（纯机器生成）：保持 "招标书@字符123 | 投标书@字符456"；
    - 漏应答行注明"投标书未检出响应"。
 """
 from __future__ import annotations
@@ -31,7 +32,6 @@ from docx.shared import Pt, RGBColor
 from core.response_checker import _filter_valid_requirements, run_response_check
 from core.tender_extractor import build_review_checklist
 
-# 表格六列标准表头
 DEVIATION_TABLE_HEADERS = (
     '序号',
     '招标条款号',
@@ -41,7 +41,6 @@ DEVIATION_TABLE_HEADERS = (
     '位置索引',
 )
 
-# 颜色定义：负偏离红色、无偏离绿色
 _COLOR_RED = RGBColor(0xDC, 0x26, 0x26)
 _COLOR_GREEN = RGBColor(0x16, 0xA3, 0x4A)
 _COLOR_NAVY = RGBColor(0x0F, 0x17, 0x2A)
@@ -91,11 +90,7 @@ def _format_clause_no(req: dict, star_res: dict) -> str:
 
 
 def _format_deviation_label(status: str, req: dict) -> tuple[str, bool]:
-    """根据 F4 的三态结果映射偏离情况文案与是否为负偏离。
-
-    Returns:
-        (deviation_text, is_negative)
-    """
+    """根据 F4 的三态结果映射偏离情况文案与是否为负偏离。"""
     if status == 'MISSING_RESPONSE':
         base = '负偏离（漏应答）'
         is_neg = True
@@ -112,29 +107,50 @@ def _format_deviation_label(status: str, req: dict) -> tuple[str, bool]:
     return base, is_neg
 
 
-def _format_location_index(star_res: dict) -> str:
-    """格式化第 6 列「位置索引」：
-    - PDF 用真实页码（招标书第 X 页 / 投标书第 Y 页）；
-    - docx 页码为 None，使用字符偏移（招标书@字符123 | 投标书@字符456）；
-    - 漏应答行注明"投标书未检出响应"。
+def _format_single_doc_loc(
+    doc_label: str,
+    page: Optional[int],
+    footer_page: Optional[int],
+    is_docx: bool,
+    char_offset: Optional[int],
+) -> str:
+    """格式化单侧（招标书或投标书）位置描述：
+    - docx 且有页码：第X页(印刷页Y·估算) 或 第X页(物理页·估算)
+    - PDF 且有页码：第 X 页
+    - 无页码：@字符N
     """
-    t_page = star_res.get('tender_page')
-    t_start = star_res.get('tender_start', 0)
-    if t_page is not None:
-        t_part = f"招标书第 {t_page} 页"
-    else:
-        t_part = f"招标书@字符{t_start if t_start is not None else 0}"
+    if page is not None and page > 0:
+        if is_docx:
+            if footer_page is not None and footer_page > 0:
+                return f"{doc_label} 第{page}页(印刷页{footer_page}·估算)"
+            return f"{doc_label} 第{page}页(物理页·估算)"
+        return f"{doc_label}第 {page} 页"
+    return f"{doc_label}@字符{char_offset if char_offset is not None else 0}"
+
+
+def _format_location_index(star_res: dict) -> str:
+    """格式化第 6 列「位置索引」（招标书与投标书各自独立判定格式）。"""
+    t_part = _format_single_doc_loc(
+        doc_label='招标书',
+        page=star_res.get('tender_page'),
+        footer_page=star_res.get('tender_footer_page'),
+        is_docx=bool(star_res.get('tender_is_docx', False)),
+        char_offset=star_res.get('tender_start', 0),
+    )
 
     status = star_res.get('status')
-    b_page = star_res.get('bid_page')
     b_start = star_res.get('bid_start')
 
     if status == 'MISSING_RESPONSE' or b_start is None or b_start < 0:
         b_part = '投标书未检出响应'
-    elif b_page is not None:
-        b_part = f"投标书第 {b_page} 页"
     else:
-        b_part = f"投标书@字符{b_start}"
+        b_part = _format_single_doc_loc(
+            doc_label='投标书',
+            page=star_res.get('bid_page'),
+            footer_page=star_res.get('bid_footer_page'),
+            is_docx=bool(star_res.get('bid_is_docx', False)),
+            char_offset=b_start,
+        )
 
     return f"{t_part} | {b_part}"
 
@@ -146,27 +162,7 @@ def export_deviation_table(
     requirements: Optional[list[dict]] = None,
     client=None,
 ) -> dict[str, Any]:
-    """一键生成《技术与商务偏离表.docx》。
-
-    Args:
-        tender_path: 招标文件路径（docx/pdf）。
-        bid_path: 投标文件路径（docx/pdf）。
-        output_path: 导出的偏离表 docx 保存路径。
-        requirements: 可选，预设的 F1 候选要求清单；为 None 时内部自动提取。
-        client: 可选，LLM 客户端；为 None 时全程 0 Token 运行。
-
-    Returns:
-        {
-            'output_path': str,
-            'total_rows': int,
-            'no_deviation_count': int,
-            'negative_deviation_count': int,
-            'missing_count': int,
-            'contradiction_count': int,
-            'rows': list[dict],
-            'f4_result': dict,
-        }
-    """
+    """一键生成《技术与商务偏离表.docx》。"""
     t_path = Path(tender_path)
     b_path = Path(bid_path)
     out_path = Path(output_path)
@@ -177,7 +173,6 @@ def export_deviation_table(
 
     valid_reqs = _filter_valid_requirements(requirements)
 
-    # 调用 F4 获取核验结果（star_results 与 valid_reqs 严格同序）
     f4_res = run_response_check(
         tender_path=t_path,
         bid_path=b_path,
@@ -201,7 +196,6 @@ def export_deviation_table(
         status = s_res.get('status', 'RESPONSE_OK')
         clause_no_str = _format_clause_no(req, s_res)
 
-        # 摘录沿用 F4 已溯源通过的 quote，本模块绝不产生新摘录
         tender_q = (s_res.get('tender_quote') or '').strip()
         bid_q = (s_res.get('bid_quote') or '').strip()
 
@@ -233,10 +227,8 @@ def export_deviation_table(
             'status': status,
         })
 
-    # ── 构建 Word 文档 ─────────────────────────────────────────────────────
     doc = Document()
 
-    # 1. 标题《技术与商务偏离表》
     title_p = doc.add_paragraph()
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title_run = title_p.add_run('技术与商务偏离表')
@@ -244,19 +236,18 @@ def export_deviation_table(
     title_run.font.size = Pt(16)
     title_run.font.color.rgb = _COLOR_NAVY
 
-    # 2. 元信息行（项目名 / 核验统计 / 生成时间）
     now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     meta_p = doc.add_paragraph()
     meta_run = meta_p.add_run(
         f"招标文件：{t_path.name} ｜ 投标文件：{b_path.name}\n"
         f"核验统计：共核验实质性要求 {len(rows_data)} 项，无偏离 {no_dev_count} 项，"
         f"负偏离 {neg_dev_count} 项（其中漏应答 {missing_count} 项、响应冲突 {contra_count} 项） ｜ "
-        f"生成时间：{now_str}"
+        f"生成时间：{now_str}\n"
+        f"注：Word 页码为系统估算，可能与实际排版有出入，以字符偏移为准。"
     )
     meta_run.font.size = Pt(9.5)
     meta_run.font.color.rgb = _COLOR_MUTED
 
-    # 3. 六列标准 Table Grid 表格
     table = doc.add_table(rows=1, cols=len(DEVIATION_TABLE_HEADERS))
     table.style = 'Table Grid'
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -283,7 +274,6 @@ def export_deviation_table(
             p = row_cells[col_i].paragraphs[0]
             r = p.add_run(val)
             r.font.size = Pt(10)
-            # 第 5 列（偏离情况）着色：负偏离红色加粗、无偏离绿色
             if col_i == 4:
                 if item['is_negative']:
                     r.bold = True

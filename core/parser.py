@@ -1,42 +1,24 @@
 # -*- coding: utf-8 -*-
-"""T1 / E1 / E3 文档解析模块（含 PDF 扫描件 OCR、docx 内嵌证照图片就近 OCR 与 PDF 印刷页码映射）。
+"""T1 / E1 / E3 / E6 文档解析模块（含 PDF 扫描件 OCR、docx 内嵌证照图片就近 OCR、PDF 印刷页码映射与 docx 页码双轨定位）。
 
 实现规格（签名不得修改）：
     parse_document(file_path) -> ParsedDoc
-
-行为要求：
-    1. .docx：用 python-docx（from docx import Document）。
-       - 正文段落：遍历 doc.paragraphs，跳过 strip 后为空的段落；
-       - E1 升级点 2（内嵌图片段落就近吸附 OCR）：检测段落及表格单元格 XML 内是否含
-         <a:blip r:embed="rId..."/>（或 <v:imagedata r:id="rId..."/>），从 doc.part.related_parts
-         取出图片字节流；仅对 >20KB、宽高 >=200px 且长宽比在 1:6 ~ 6:1 之间的图片执行离线 OCR，
-         识别文字紧跟在所在段落文本下方拼接，并按图片 SHA1 缓存在 <原文件>.media.ocr.json；
-       - 表格文字：遍历 doc.tables 每行每格 cell.text，strip 后非空则追加；
-       - 所有文本片段用 '\n' 连接成一个字符串；
-       - pages = 1（docx 无固定分页概念）。
-    2. .pdf：用 PyMuPDF（import pymupdf）。
-       - pymupdf.open(file_path) 后逐页 page.get_text()，用 '\n' 连接；
-       - pages = 页数；with 语句确保关闭；
-       - E3 新增 build_pdf_page_spans / offset_to_page：优先读取 PDF page.get_label() 印刷页码，
-         无有效阿拉伯数字 label 时回退 1-based 物理页号；docx 恒返回 None。
-    3. .txt / .md：按字节读取，依次尝试 utf-8 / gbk / utf-16 解码，
-       全部失败则 utf-8 + errors='replace'；pages = 1。
-    4. 其他扩展名：raise ValueError(f'不支持的文件类型: {ext}，当前支持 docx/pdf/txt')
-    5. 文件不存在：raise FileNotFoundError（不得自行捕获吞掉）。
-    6. 解析过程中的任何异常（docx 损坏、pdf 加密等）：
-       raise RuntimeError(f'解析失败: {原始异常}') —— 不得吞异常返回空串。
-
-禁止事项：
-    - 不得引入 requirements.txt 之外的第三方库；
-    - 不得修改函数签名与 core/interfaces.py；
-    - 不得 print（库模块静默工作）。
+    build_pdf_page_spans(file_path) -> list[tuple[int, int, int]]
+    offset_to_page(offset, page_spans) -> int | None
+    build_docx_page_spans(file_path) -> list[tuple[int, int, int, int | None]]
+    offset_to_docx_page(offset, spans) -> dict | None
 """
+import bisect
 import hashlib
 import json
 from pathlib import Path
 import re
 import struct
 import threading
+from typing import Optional
+import zipfile
+
+import lxml.etree as ET
 
 from core.interfaces import ParsedDoc
 
@@ -44,7 +26,6 @@ SUPPORTED = {'.docx', '.pdf', '.txt', '.md', '.png', '.jpg', '.jpeg'}
 _IMAGE_EXTS = {'.png', '.jpg', '.jpeg'}
 
 # ── T29 扫描件离线 OCR（RapidOCR + pymupdf 渲染）────────────────────────
-# 文本层不足该字数视为扫描件/图片型 PDF，触发 OCR 兜底
 OCR_MIN_CHARS = 100
 
 # ── E1 升级点 2：docx 内嵌证照图片双重过滤阈值 ──────────────────────────
@@ -53,6 +34,38 @@ _MEDIA_MIN_DIM_PX = 200          # 宽高像素下限：width >= 200 且 height 
 _MEDIA_MAX_ASPECT_RATIO = 6.0    # 长宽比范围：1:6 ~ 6:1
 
 _REL_EMBED_RE = re.compile(r'(?:r:embed|r:id)="([^"]+)"')
+
+# ── E6 OpenXML 命名空间常量 ──────────────────────────────────────────────
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_REL_PKG_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_W_P = f"{{{_W_NS}}}p"
+_W_TBL = f"{{{_W_NS}}}tbl"
+_W_TR = f"{{{_W_NS}}}tr"
+_W_TC = f"{{{_W_NS}}}tc"
+_W_TCPR = f"{{{_W_NS}}}tcPr"
+_W_VMERGE = f"{{{_W_NS}}}vMerge"
+_W_GRIDSPAN = f"{{{_W_NS}}}gridSpan"
+_W_PPR = f"{{{_W_NS}}}pPr"
+_W_SECTPR = f"{{{_W_NS}}}sectPr"
+_W_PGNUMTYPE = f"{{{_W_NS}}}pgNumType"
+_W_FOOTERREF = f"{{{_W_NS}}}footerReference"
+_W_R = f"{{{_W_NS}}}r"
+_W_T = f"{{{_W_NS}}}t"
+_W_TAB = f"{{{_W_NS}}}tab"
+_W_BR = f"{{{_W_NS}}}br"
+_W_CR = f"{{{_W_NS}}}cr"
+_W_LAST_RENDERED_PB = f"{{{_W_NS}}}lastRenderedPageBreak"
+_W_FLDSIMPLE = f"{{{_W_NS}}}fldSimple"
+_W_INSTRTEXT = f"{{{_W_NS}}}instrText"
+_W_VAL = f"{{{_W_NS}}}val"
+_W_TYPE = f"{{{_W_NS}}}type"
+_W_START = f"{{{_W_NS}}}start"
+_W_FMT = f"{{{_W_NS}}}fmt"
+_W_INSTR = f"{{{_W_NS}}}instr"
+_R_ID = f"{{{_R_NS}}}id"
+
+_PAGE_FIELD_RE = re.compile(r'\bPAGE\b', re.IGNORECASE)
 
 _OCR_ENGINE = None
 _OCR_LOCK = threading.Lock()
@@ -146,17 +159,503 @@ def offset_to_page(offset: int | None, page_spans: list[tuple[int, int, int]]) -
     return page_spans[-1][2] if offset >= page_spans[-1][0] else None
 
 
+# ── E6 · Word (.docx) 页锚点双轨解析（zipfile + lxml 直读，零 python-docx 抽象丢失）────
+
+def _footer_xml_has_page_field(xml_bytes: bytes) -> bool:
+    """检查 word/footer*.xml 是否包含 PAGE 页码域（w:fldSimple[@w:instr] 或 w:instrText）。"""
+    if not xml_bytes:
+        return False
+    try:
+        root = ET.fromstring(xml_bytes)
+    except Exception:
+        return False
+
+    for fld in root.iter(_W_FLDSIMPLE):
+        instr = fld.get(_W_INSTR) or fld.get('instr') or ''
+        if _PAGE_FIELD_RE.search(instr):
+            return True
+
+    instr_chunks: list[str] = []
+    for it in root.iter(_W_INSTRTEXT):
+        if it.text:
+            instr_chunks.append(it.text)
+    if instr_chunks and _PAGE_FIELD_RE.search(''.join(instr_chunks)):
+        return True
+
+    return False
+
+
+def _load_docx_rels_and_footers(zf: zipfile.ZipFile) -> tuple[dict[str, str], dict[str, bool]]:
+    """从 docx zip 包读取 word/_rels/document.xml.rels，返回：
+    - rel_target_map: rId -> zip 内规范路径（如 'word/footer1.xml' 或 'word/media/image1.png'）
+    - footer_has_page_map: rId -> 该页脚是否包含 PAGE 域布尔值
+    """
+    rel_target_map: dict[str, str] = {}
+    footer_has_page_map: dict[str, bool] = {}
+
+    rels_path = 'word/_rels/document.xml.rels'
+    if rels_path not in zf.namelist():
+        return rel_target_map, footer_has_page_map
+
+    try:
+        rels_root = ET.fromstring(zf.read(rels_path))
+    except Exception:
+        return rel_target_map, footer_has_page_map
+
+    names_set = set(zf.namelist())
+    for rel in rels_root.iter(f"{{{_REL_PKG_NS}}}Relationship"):
+        rid = rel.get('Id')
+        target = (rel.get('Target') or '').strip()
+        if not rid or not target:
+            continue
+        norm_target = target.lstrip('/')
+        if not norm_target.startswith('word/'):
+            norm_target = f"word/{norm_target.lstrip('./')}"
+        rel_target_map[rid] = norm_target
+
+        if 'footer' in norm_target.lower() and norm_target in names_set:
+            try:
+                footer_has_page_map[rid] = _footer_xml_has_page_field(zf.read(norm_target))
+            except Exception:
+                footer_has_page_map[rid] = False
+
+    return rel_target_map, footer_has_page_map
+
+
+def _parse_sectpr_config(
+    sect_el: ET._Element,
+    footer_has_page_map: dict[str, bool],
+    inherited_has_footer: bool = False,
+) -> dict[str, Optional[int | bool]]:
+    """解析单个 <w:sectPr> 节点的页码配置：
+    - start_num: int | None（若设置了正整数 w:start="N" 则返回 N，否则 None 表示延续前节）
+    - fmt_decimal: bool（w:fmt 缺省或为 'decimal' 时 True，roman/letter 等其他格式为 False）
+    - has_page_footer: bool（本节挂载了含 PAGE 域的 footerReference，或未显式声明 footerReference 时继承前节）
+    """
+    start_num: Optional[int] = None
+    fmt_decimal = True
+
+    pg_num_el = sect_el.find(_W_PGNUMTYPE)
+    has_pgnum_tag = pg_num_el is not None
+    if pg_num_el is not None:
+        raw_fmt = (pg_num_el.get(_W_FMT) or pg_num_el.get('fmt') or '').strip()
+        if raw_fmt and raw_fmt.lower() != 'decimal':
+            fmt_decimal = False
+        raw_start = (pg_num_el.get(_W_START) or pg_num_el.get('start') or '').strip()
+        if raw_start.isdigit() and int(raw_start) > 0:
+            start_num = int(raw_start)
+
+    footer_refs = sect_el.findall(_W_FOOTERREF)
+    if footer_refs:
+        has_page_footer = any(
+            footer_has_page_map.get(ref.get(_R_ID) or ref.get('id') or '', False)
+            for ref in footer_refs
+        )
+    else:
+        has_page_footer = inherited_has_footer
+
+    return {
+        'start_num': start_num,
+        'fmt_decimal': fmt_decimal,
+        'has_page_footer': has_page_footer,
+        'has_pgnum_tag': has_pgnum_tag,
+    }
+
+
+def _extract_p_text_and_breaks_lxml(p_el: ET._Element) -> tuple[str, list[int]]:
+    """用 lxml 严格复刻 python-docx 的 Paragraph.text 拼接逻辑，并记录段内每个分页锚点
+    （<w:lastRenderedPageBreak/> 或 <w:br w:type="page"/>）在该段落 raw text 中的字符位置。
+    """
+    chars: list[str] = []
+    break_raw_positions: list[int] = []
+
+    for elem in p_el.iter():
+        tag = elem.tag
+        if tag == _W_LAST_RENDERED_PB:
+            break_raw_positions.append(len(chars))
+        elif tag == _W_BR:
+            br_type = (elem.get(_W_TYPE) or elem.get('type') or '').strip().lower()
+            if br_type == 'page':
+                break_raw_positions.append(len(chars))
+            elif br_type in ('', 'textwrapping'):
+                chars.append('\n')
+        elif tag == _W_CR:
+            chars.append('\n')
+        elif tag == _W_TAB:
+            chars.append('\t')
+        elif tag == _W_T:
+            if elem.text:
+                chars.append(elem.text)
+
+    raw_text = ''.join(chars)
+    stripped = raw_text.strip()
+    if not stripped:
+        return '', [0] * len(break_raw_positions)
+
+    leading_ws = len(raw_text) - len(raw_text.lstrip())
+    stripped_len = len(stripped)
+    mapped_breaks: list[int] = []
+    for pos in break_raw_positions:
+        adj = max(0, min(stripped_len, pos - leading_ws))
+        mapped_breaks.append(adj)
+
+    return stripped, mapped_breaks
+
+
+def _extract_table_unique_tcs_lxml(tbl_el: ET._Element) -> list[ET._Element]:
+    """用 lxml 严格复刻 python-docx 遍历 table.rows -> row.cells 并按 _tc 去重的顺序（兼容 gridSpan 与 vMerge 跨行合并）。"""
+    rows_els = tbl_el.findall(_W_TR)
+    if not rows_els:
+        return []
+
+    # 跟踪每一列当前的上方单元格元素（用于复刻 vMerge continue 指向同一 _tc 的去重行为）
+    col_active_tc: dict[int, ET._Element] = {}
+    unique_tcs: list[ET._Element] = []
+    seen_tc_objs: set[ET._Element] = set()
+
+    for tr_el in rows_els:
+        col_idx = 0
+        for tc_el in tr_el.findall(_W_TC):
+            tc_pr = tc_el.find(_W_TCPR)
+            grid_span = 1
+            is_vmerge_continue = False
+
+            if tc_pr is not None:
+                gs_el = tc_pr.find(_W_GRIDSPAN)
+                if gs_el is not None:
+                    gs_val = (gs_el.get(_W_VAL) or gs_el.get('val') or '1').strip()
+                    if gs_val.isdigit() and int(gs_val) > 1:
+                        grid_span = int(gs_val)
+                vm_el = tc_pr.find(_W_VMERGE)
+                if vm_el is not None:
+                    vm_val = (vm_el.get(_W_VAL) or vm_el.get('val') or '').strip().lower()
+                    if vm_val != 'restart':
+                        is_vmerge_continue = True
+
+            if is_vmerge_continue and col_idx in col_active_tc:
+                effective_tc = col_active_tc[col_idx]
+            else:
+                effective_tc = tc_el
+                for c_offset in range(grid_span):
+                    col_active_tc[col_idx + c_offset] = tc_el
+
+            if effective_tc not in seen_tc_objs:
+                seen_tc_objs.add(effective_tc)
+                unique_tcs.append(effective_tc)
+
+            col_idx += grid_span
+
+    return unique_tcs
+
+
+def _extract_tc_text_and_breaks_lxml(tc_el: ET._Element) -> tuple[str, list[int]]:
+    """用 lxml 严格复刻 python-docx _Cell.text.strip() 拼接逻辑，并记录单元格内分页锚点的相对字符偏移。"""
+    # 注意：仅取直接子级 <w:p>（与 python-docx cell.paragraphs 一致）
+    p_els = tc_el.findall(_W_P)
+    raw_p_texts: list[str] = []
+    raw_breaks: list[int] = []
+    cursor = 0
+
+    for p_idx, p_el in enumerate(p_els):
+        chars: list[str] = []
+        for elem in p_el.iter():
+            tag = elem.tag
+            if tag == _W_LAST_RENDERED_PB:
+                raw_breaks.append(cursor + len(chars))
+            elif tag == _W_BR:
+                br_type = (elem.get(_W_TYPE) or elem.get('type') or '').strip().lower()
+                if br_type == 'page':
+                    raw_breaks.append(cursor + len(chars))
+                elif br_type in ('', 'textwrapping'):
+                    chars.append('\n')
+            elif tag == _W_CR:
+                chars.append('\n')
+            elif tag == _W_TAB:
+                chars.append('\t')
+            elif tag == _W_T and elem.text:
+                chars.append(elem.text)
+
+        p_raw = ''.join(chars)
+        raw_p_texts.append(p_raw)
+        cursor += len(p_raw) + (1 if p_idx < len(p_els) - 1 else 0)
+
+    cell_raw = '\n'.join(raw_p_texts)
+    stripped = cell_raw.strip()
+    if not stripped:
+        return '', [0] * len(raw_breaks)
+
+    leading_ws = len(cell_raw) - len(cell_raw.lstrip())
+    stripped_len = len(stripped)
+    mapped = [max(0, min(stripped_len, b - leading_ws)) for b in raw_breaks]
+    return stripped, mapped
+
+
+def _parse_docx_with_page_spans_internal(
+    file_path: str | Path,
+) -> tuple[str, list[tuple[int, int, int, Optional[int]]], bool, int]:
+    """用 zipfile + lxml 单趟解析 docx，同时产出：
+    1. full_text（与 parse_document 逐字节 100% SHA256 等值）；
+    2. page_spans: [(start_offset, end_offset, physical_page, footer_page), ...]；
+    3. ocr_skipped_any: bool；
+    4. media_ocr_count: int。
+    """
+    path = Path(file_path)
+    media_cache_path = _docx_media_ocr_cache_path(path)
+    media_cache_map = _load_docx_media_cache(media_cache_path)
+    seen_media_sha1s: set[str] = set()
+    cache_dirty = False
+    ocr_skipped_any = False
+
+    # ── 权威偏移空间 = python-docx 部件序列（与 parse_document 拼接严格同构）──
+    # E6 验收修正：lxml 单独重建全文无法对特殊构造（文本框/超链接/域字符/修订标记）
+    # 逐字节复刻 python-docx 的取文逻辑——实测 4 份真实标书有 1 份尾部漂移 10 字符。
+    # 改为：python-docx 部件为偏移权威（offsets 天然落在 parse_document 空间，零漂移），
+    # lxml 只负责提供段内分页锚点（lastRenderedPageBreak / w:br page）的位置。
+    with zipfile.ZipFile(str(path), 'r') as zf:
+        if 'word/document.xml' not in zf.namelist():
+            raise RuntimeError(f"非法的 docx 文件（缺少 word/document.xml）：{file_path}")
+        rel_target_map, footer_has_page_map = _load_docx_rels_and_footers(zf)
+
+    from docx import Document
+    doc = Document(str(path))
+    related_parts = getattr(doc.part, 'related_parts', {}) or {}
+
+    top_p_els = [para._p for para in doc.paragraphs]
+    top_tbl_els = [table._tbl for table in doc.tables]
+    body_el = doc.element.body
+
+    # 收集所有节定义（段内 pPr/sectPr 按顺序管辖各前序节，body/sectPr 管辖最后一节）
+    section_configs: list[dict[str, Optional[int | bool]]] = []
+    inherited_footer = False
+    for p_el in top_p_els:
+        ppr = p_el.find(_W_PPR)
+        sect_el = ppr.find(_W_SECTPR) if ppr is not None else None
+        if sect_el is not None:
+            cfg = _parse_sectpr_config(sect_el, footer_has_page_map, inherited_footer)
+            inherited_footer = bool(cfg['has_page_footer'])
+            section_configs.append(cfg)
+
+    body_sect_el = body_el.find(_W_SECTPR)
+    if body_sect_el is not None:
+        cfg = _parse_sectpr_config(body_sect_el, footer_has_page_map, inherited_footer)
+        section_configs.append(cfg)
+    elif not section_configs:
+        section_configs.append({
+            'start_num': None,
+            'fmt_decimal': True,
+            'has_page_footer': False,
+            'has_pgnum_tag': False,
+        })
+
+    def _media_for_xml(xml_str: str, p_idx_val: int) -> list[str]:
+        nonlocal cache_dirty, ocr_skipped_any
+        img_texts, dirty, skipped = _extract_xml_embedded_media_texts(
+            xml_str, related_parts, media_cache_map, p_idx_val, seen_media_sha1s
+        )
+        if dirty:
+            cache_dirty = True
+        if skipped:
+            ocr_skipped_any = True
+        return img_texts
+
+    # ── 组装：部件序列与分页锚点事件（偏移全部落在 python-docx 权威空间）──
+    text_parts: list[str] = []
+    # events: (char_offset_in_full_text, 'page_break' | 'section_break')，偏移即 parse_document 空间
+    events: list[tuple[int, str]] = []
+    current_offset = 0
+    has_any_anchor = False
+
+    def _append_part(part_str: str, inner_breaks: list[int]) -> None:
+        nonlocal current_offset, has_any_anchor
+        if text_parts:
+            current_offset += 1  # '\n' 分隔符
+        base_off = current_offset
+        for b_pos in inner_breaks:
+            events.append((base_off + min(b_pos, len(part_str)), 'page_break'))
+            has_any_anchor = True
+        text_parts.append(part_str)
+        current_offset += len(part_str)
+
+    def _boundary_event(ev_type: str) -> None:
+        nonlocal has_any_anchor
+        events.append((current_offset, ev_type))
+        has_any_anchor = True
+
+    # 阶段 1：顶层段落（python-docx 与 lxml 元素同序一对一配对）
+    for p_idx, para in enumerate(doc.paragraphs):
+        p_el = top_p_els[p_idx]
+        _p_text, p_breaks = _extract_p_text_and_breaks_lxml(p_el)
+        pdx_text = para.text.strip()
+        xml_str = getattr(para._p, 'xml', '') or ''
+        img_texts = _media_for_xml(xml_str, p_idx)
+        if pdx_text:
+            _append_part(pdx_text, p_breaks)
+        elif p_breaks:
+            for _ in p_breaks:
+                _boundary_event('page_break')
+        for itxt in img_texts:
+            _append_part(itxt, [])
+
+        ppr = p_el.find(_W_PPR)
+        if ppr is not None and ppr.find(_W_SECTPR) is not None:
+            _boundary_event('section_break')
+
+    # 阶段 2：顶层表格（逐表配对；唯一 tc 序列复刻 python-docx row.cells 的 gridSpan/vMerge 去重序）
+    for table in doc.tables:
+        tbl_el = table._tbl
+        tc_els = _extract_table_unique_tcs_lxml(tbl_el)
+        seen_tcs: set = set()
+        pdx_cells = []
+        for row in table.rows:
+            for cell in row.cells:
+                tc = cell._tc
+                if tc in seen_tcs:
+                    continue
+                seen_tcs.add(tc)
+                pdx_cells.append(cell)
+        if len(pdx_cells) != len(tc_els):
+            # 配对失败：本表放弃锚点（部件照常拼接保证全文等值）——绝不乱锚
+            for cell in pdx_cells:
+                txt = cell.text.strip()
+                if txt:
+                    _append_part(txt, [])
+                xml_str = getattr(cell._tc, 'xml', '') or ''
+                for itxt in _media_for_xml(xml_str, -1):
+                    _append_part(itxt, [])
+            continue
+        for cell, tc_el in zip(pdx_cells, tc_els):
+            _tc_text, tc_breaks = _extract_tc_text_and_breaks_lxml(tc_el)
+            pdx_text = cell.text.strip()
+            xml_str = getattr(cell._tc, 'xml', '') or ''
+            img_texts = _media_for_xml(xml_str, -1)
+            if pdx_text:
+                _append_part(pdx_text, tc_breaks)
+            elif tc_breaks:
+                for _ in tc_breaks:
+                    _boundary_event('page_break')
+            for itxt in img_texts:
+                _append_part(itxt, [])
+
+    if cache_dirty:
+        _save_docx_media_cache(media_cache_path, media_cache_map)
+
+    full_text = '\n'.join(text_parts)
+    total_len = len(full_text)
+
+    # 检查是否存在任何有效分页锚点或页脚页码设置
+    any_footer_or_pgnum = any(
+        bool(cfg.get('has_page_footer')) or bool(cfg.get('has_pgnum_tag'))
+        for cfg in section_configs
+    )
+    if not has_any_anchor and not any_footer_or_pgnum:
+        # §2.5 绝不编造：纯机器生成无任何分页锚点与页脚的 docx 返回空 spans
+        return full_text, [], ocr_skipped_any, len(seen_media_sha1s)
+
+    # ── 将事件序列转化为连续无缝的 (start_offset, end_offset, physical_page, footer_page) 区间 ──
+    sec_idx = 0
+    phys_page = 1
+    first_cfg = section_configs[0]
+    printed_counter = int(first_cfg['start_num']) if first_cfg.get('start_num') is not None else 1
+
+    def _current_footer_page(s_i: int, p_counter: int) -> Optional[int]:
+        cfg = section_configs[min(s_i, len(section_configs) - 1)]
+        if not cfg.get('has_page_footer') or not cfg.get('fmt_decimal', True):
+            return None
+        return p_counter
+
+    spans: list[tuple[int, int, int, Optional[int]]] = []
+    seg_start = 0
+
+    for ev_offset, ev_type in events:
+        clamped_off = max(seg_start, min(total_len, ev_offset))
+        spans.append((
+            seg_start,
+            clamped_off,
+            phys_page,
+            _current_footer_page(sec_idx, printed_counter),
+        ))
+        seg_start = clamped_off
+        phys_page += 1
+
+        if ev_type == 'section_break':
+            sec_idx = min(sec_idx + 1, len(section_configs) - 1)
+            next_cfg = section_configs[sec_idx]
+            if next_cfg.get('start_num') is not None:
+                printed_counter = int(next_cfg['start_num'])
+            else:
+                printed_counter += 1
+        else:
+            printed_counter += 1
+
+    spans.append((
+        seg_start,
+        total_len,
+        phys_page,
+        _current_footer_page(sec_idx, printed_counter),
+    ))
+
+    # 合并因段首连续换页产生的零长度空区间（保留最新页码）
+    cleaned_spans: list[tuple[int, int, int, Optional[int]]] = []
+    for sp in spans:
+        if cleaned_spans and sp[0] == cleaned_spans[-1][0] and cleaned_spans[-1][0] == cleaned_spans[-1][1]:
+            cleaned_spans[-1] = sp
+        else:
+            cleaned_spans.append(sp)
+
+    return full_text, cleaned_spans, ocr_skipped_any, len(seen_media_sha1s)
+
+
+def build_docx_page_spans(file_path: str | Path | None) -> list[tuple[int, int, int, int | None]]:
+    """E6 §1 & §2：解析 .docx 文件的物理页与底部印刷页码区间。
+
+    Returns:
+        [(start_offset, end_offset, physical_page, footer_page), ...]
+        按 start_offset 升序且区间连续无缝；
+        若非 docx 或整份文档无任何分页锚点（纯机器生成 docx），返回 []。
+    """
+    if not file_path:
+        return []
+    path = Path(file_path)
+    if not path.is_file() or path.suffix.lower() != '.docx':
+        return []
+    try:
+        _text, spans, _skipped, _cnt = _parse_docx_with_page_spans_internal(path)
+        return spans
+    except Exception:
+        return []
+
+
+def offset_to_docx_page(
+    offset: int | None,
+    spans: list[tuple[int, int, int, int | None]],
+) -> dict | None:
+    """E6 §1 & §2.4：用二分查找将字符偏移量映射为 {'physical': X, 'footer': Y | None}。
+    未命中或 spans 为空时诚实返回 None。
+    """
+    if offset is None or offset < 0 or not spans:
+        return None
+
+    starts = [s[0] for s in spans]
+    idx = bisect.bisect_right(starts, offset) - 1
+    if idx < 0:
+        idx = 0
+    lo, hi, phys, footer = spans[idx]
+    if lo <= offset <= hi or idx == len(spans) - 1:
+        return {'physical': phys, 'footer': footer}
+    return None
+
+
+# ── 图片尺寸与 PDF OCR 既有实现（一字不动）──────────────────────────────────
+
 def _get_image_dimensions(img_bytes: bytes) -> tuple[int, int] | None:
     """解析图片字节流的 (width, height) 像素尺寸（标准库 PNG/JPEG 头快速解析 + PyMuPDF 兜底）。"""
     if not img_bytes or len(img_bytes) < 24:
         return None
 
-    # 1. PNG 头解析（Signature 8B + Length 4B + 'IHDR' 4B + Width 4B + Height 4B）
     if img_bytes[:8] == b'\x89PNG\r\n\x1a\n' and img_bytes[12:16] == b'IHDR':
         w, h = struct.unpack('>II', img_bytes[16:24])
         return int(w), int(h)
 
-    # 2. JPEG SOF 段解析
     if img_bytes[:2] == b'\xff\xd8':
         idx = 2
         length = len(img_bytes)
@@ -179,7 +678,6 @@ def _get_image_dimensions(img_bytes: bytes) -> tuple[int, int] | None:
                 break
             idx += 2 + seg_len
 
-    # 3. 兜底使用 PyMuPDF Pixmap 读取尺寸
     try:
         import pymupdf
         pix = pymupdf.Pixmap(img_bytes)
@@ -277,11 +775,7 @@ def _extract_xml_embedded_media_texts(
     para_idx: int,
     seen_sha1s: set[str],
 ) -> tuple[list[str], bool, bool]:
-    """从段落或单元格 XML 提取内嵌图片并执行就近 OCR（命中缓存直接秒读，不重算）。
-
-    Returns:
-        (ocr_texts_list, cache_dirty, ocr_skipped)
-    """
+    """从段落或单元格 XML 提取内嵌图片并执行就近 OCR（命中缓存直接秒读，不重算）。"""
     if not xml_str or ('blip' not in xml_str and 'imagedata' not in xml_str):
         return [], False, False
 
@@ -311,7 +805,6 @@ def _extract_xml_embedded_media_texts(
             continue
         seen_sha1s.add(sha1)
 
-        # 优先命中伴生缓存：若 sha1 在缓存中，直接取缓存文本，绝不重新调用 OCR
         if sha1 in cache_map:
             cached_txt = str(cache_map[sha1].get('text') or '').strip()
             if cached_txt:
@@ -342,8 +835,7 @@ def _render_page_image(page):
         pix.height, pix.width, pix.n
     )
     if pix.n == 4:
-        img = img[:, :, :3]      # 去 alpha 通道
-    # 反转通道产生负步长视图，cv2 预处理要求连续内存，必须 ascontiguousarray
+        img = img[:, :, :3]
     return np.ascontiguousarray(img[:, :, ::-1])
 
 

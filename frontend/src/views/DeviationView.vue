@@ -1,12 +1,10 @@
 <script setup lang="ts">
-import { onActivated, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { checksApi, deviationApi } from '@/api'
 import type { BidTaskOut, DeviationExportOut } from '@/api/types'
 import { useAppStore } from '@/stores/app'
-
-defineOptions({ name: 'DeviationView' })
 
 const route = useRoute()
 const appStore = useAppStore()
@@ -89,15 +87,6 @@ function rowClassName({ row }: { row: { is_negative?: boolean } }): string {
 onMounted(() => {
   void loadAvailableTasks()
 })
-
-onActivated(() => {
-  const queryTid = Number(route.query.task_id)
-  if (queryTid && queryTid !== selectedTaskId.value) {
-    void loadAvailableTasks()
-  } else if (!devResult.value && !generating.value) {
-    void loadAvailableTasks()
-  }
-})
 </script>
 
 <template>
@@ -177,7 +166,7 @@ onActivated(() => {
         <div class="dt-hd">
           <h3>《技术与商务偏离表》六列标准预览（{{ devResult.output_filename }}）</h3>
           <span class="dt-note">
-            注：PDF 显示真实页码，docx 显示字符偏移 @N；负偏离与漏应答行已用红色加粗高亮。
+            注：PDF 显示真实页码；Word 页码为系统估算，可能与实际排版有出入，以字符偏移为准。
           </span>
         </div>
 
@@ -204,9 +193,12 @@ onActivated(() => {
               </span>
             </template>
           </el-table-column>
-          <el-table-column prop="location" label="位置索引（页码/字符偏移）" width="220">
+          <el-table-column prop="location" label="位置索引（页码/字符偏移）" width="250">
             <template #default="{ row }">
-              <span class="mono-num loc-cell">{{ row.location }}</span>
+              <div class="mono-num loc-cell">{{ row.location }}</div>
+              <div v-if="row.location && row.location.includes('·估算')" class="docx-est-sub">
+                Word 页码为系统估算，可能与实际排版有出入，以字符偏移为准
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -352,6 +344,13 @@ onActivated(() => {
 .loc-cell {
   font-size: 12px;
   color: var(--txt-sec);
+}
+
+.docx-est-sub {
+  font-size: 10.5px;
+  color: #888780;
+  margin-top: 2px;
+  line-height: 1.35;
 }
 
 :deep(.neg-deviation-row) {

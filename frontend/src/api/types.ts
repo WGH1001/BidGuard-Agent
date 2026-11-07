@@ -1,6 +1,6 @@
 /**
- * BidGuard-Agent 前端全局 TypeScript 契约类型定义（E4 完整覆盖版）
- * 严格逐字段对齐 FRONTEND.md §2、backend/schemas.py 与 E4 法规库契约
+ * BidGuard-Agent 前端全局 TypeScript 契约类型定义（E6 完整覆盖版）
+ * 严格逐字段对齐 FRONTEND.md §2、backend/schemas.py、E4 法规库与 E6 docx 双轨页码契约
  */
 
 export type UserRole = 'admin' | 'member'
@@ -55,6 +55,16 @@ export interface HealthOut {
 }
 
 // ── 2. 防废标体检任务与发现明细 (/api/checks) ───────────────────────────
+export interface FindingDetailJson {
+  footer_page?: number | null
+  is_docx_page?: boolean
+  tender_footer_page?: number | null
+  tender_is_docx?: boolean
+  bid_footer_page?: number | null
+  bid_is_docx?: boolean
+  [key: string]: unknown
+}
+
 export interface BidFindingOut {
   id: number
   task_id: number
@@ -73,7 +83,7 @@ export interface BidFindingOut {
   consequence?: ConsequenceType | string | null
   feedback: FeedbackType
   feedback_note?: string | null
-  detail_json?: Record<string, unknown> | null
+  detail_json?: FindingDetailJson | null
   created_at?: string | null
 }
 
@@ -578,8 +588,31 @@ export interface RegulationCrawlOut {
   results: CrawlSourceResultItem[]
 }
 
-export function formatPageOrOffset(page?: number | null, offset?: number | null): string {
+export interface PageFormatOptions {
+  isDocx?: boolean
+  footerPage?: number | null
+}
+
+/**
+ * E6 扩展版页码/偏移格式化：
+ * - docx 且有页码：返回 "第X页(印刷页Y·估算)" 或 "第X页(物理页·估算)"；
+ * - PDF 且有页码：返回 "第 X 页"；
+ * - 无页码但有字符偏移：返回 "字符偏移 @N"；
+ * - 两者皆无：返回 "—"。
+ */
+export function formatPageOrOffset(
+  page?: number | null,
+  offset?: number | null,
+  options?: PageFormatOptions,
+): string {
   if (typeof page === 'number' && page > 0) {
+    const fPage = options?.footerPage
+    if (typeof fPage === 'number' && fPage > 0) {
+      return `第${page}页(印刷页${fPage}·估算)`
+    }
+    if (options?.isDocx) {
+      return `第${page}页(物理页·估算)`
+    }
     return `第 ${page} 页`
   }
   if (typeof offset === 'number' && offset >= 0) {

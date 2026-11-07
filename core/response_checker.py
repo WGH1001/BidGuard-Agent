@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
-"""F4 ★条款逐条响应核验 + 标书前后矛盾检测（大模型①② + 双书勾稽 + E2/E3 门控混合检索与同文对齐加固）。
+"""F4 ★条款逐条响应核验 + 标书前后矛盾检测（大模型①② + 双书勾稽 + E2/E3 门控混合检索 + E6 docx 双轨页码接线）。
 
-模块职责（对应 PRD-02 §7 F4 与 E2/E3 任务卡）：
+模块职责（对应 PRD-02 §7 F4 与 E2/E3/E6 任务卡）：
 1. ★/▲ 强制条款逐条响应核验（双书勾稽，大模型①）：
    - 输入：招标文件 + 投标文件 + F1 提取的 ★/▲ 要求清单（仅消费 kind=='requirement' 及模式 A/B）；
    - 门控链路（E2/E3 同文对齐加固）：
-     ① 初筛（原文子串/括号长句分句/条款号+标题/高 2-gram 重合度）直接命中 -> 0ms 直通放行，绝不触发混合检索；
+     ① 初筛（原文子串/括号长句分句/条款号+标题/高 2-gram 重合度）直接命中 -> 0ms 直通放行；
      ② 初筛未命中的"疑似漏应答候选" -> 启动 core.hybrid_retriever 三级混合检索；
-   - 缺证明材料支撑探针（E2 升级点 3a · MISSING_EVIDENCE）：
-     当招标要求命中"须提供/应提供/提供...(证书|检测报告|截图|证明材料|承诺函|复印件|扫描件)"且初判为 RESPONSE_OK 时，
-     检查投标书除照抄原句外是否含佐证锚点；无锚点则产出 code='MISSING_EVIDENCE', severity='warning'。
+   - 缺证明材料支撑探针（E2 升级点 3a · MISSING_EVIDENCE）；
+   - E6 页码双轨接线：tender/bid 为 PDF 时走 build_pdf_page_spans + offset_to_page；
+     为 docx 时走 build_docx_page_spans + offset_to_docx_page，page 填 physical，
+     footer_page 与 is_docx_page 同步写入结果与 detail_json，无分页锚点时保持 None。
 2. 标书前后矛盾检测（书内自洽扫描，0 Token 确定性 + 大模型②）。
 """
 from __future__ import annotations
@@ -22,7 +23,13 @@ from typing import Any, Optional
 
 from core.bid_aligner import compare_contracts, _build_clause_units
 from core.hybrid_retriever import hybrid_retrieve_windows
-from core.parser import build_pdf_page_spans, offset_to_page, parse_document
+from core.parser import (
+    build_docx_page_spans,
+    build_pdf_page_spans,
+    offset_to_docx_page,
+    offset_to_page,
+    parse_document,
+)
 from core.quote_verifier import normalize_zh, verify_quote
 from core.tender_extractor import (
     build_review_checklist,
@@ -39,7 +46,6 @@ _ANCHOR_MIN_SCORE = 0.22
 
 _EVIDENCE_WARNING_NOTE = '（注：请核实已附对应证明材料）'
 
-# E2 升级点 3a：招标条款要求提供佐证材料的触发正则与投标书佐证锚点正则
 _EVIDENCE_REQ_RE = re.compile(
     r'(?:须提供|应提供|必须提供|需提供|提供|须具有|应具有|须附|应附)'
     r'[^。；\n]{0,35}?'
@@ -53,7 +59,6 @@ _EVIDENCE_ANCHOR_RE = re.compile(
     r'|扫描件如下|复印件如下|截图如下|详见第\s*\d+\s*页'
 )
 
-# E2 验收修正：全书上下文兜底仅认"强锚点"（编号类实证，带实际编号内容）
 _EVIDENCE_STRICT_ANCHOR_RE = re.compile(
     r'(?:证书编号|报告编号|认证编号|登记号|许可证编号|资质编号|备案编号)'
     r'\s*[:：]?\s*[A-Za-z0-9]{4,}'
@@ -123,13 +128,43 @@ def _parse_llm_json(content: str) -> Optional[dict]:
 
 
 def _build_pdf_page_spans(file_path: Optional[str | Path]) -> list[tuple[int, int, int]]:
-    """复用 parser.build_pdf_page_spans（优先 page label 印刷页码，回退物理页码；docx 返 []）。"""
+    """兼容旧内部调用：PDF 返回 3 元组列表，非 PDF 返回 []。"""
     return build_pdf_page_spans(file_path)
 
 
 def _offset_to_page(offset: Optional[int], page_spans: list[tuple[int, int, int]]) -> Optional[int]:
-    """将字符偏移换算为 PDF 页码（1-based）；docx 或未知偏移返回 None。"""
+    """兼容旧内部调用：将字符偏移换算为 PDF 页码。"""
     return offset_to_page(offset, page_spans)
+
+
+def _build_unified_page_context(file_path: Optional[str | Path]) -> dict[str, Any]:
+    """E6 统一构建文档页码映射上下文（自动区分 PDF 与 docx 双轨页码）。"""
+    if not file_path:
+        return {'kind': 'none', 'pdf_spans': [], 'docx_spans': []}
+    path = Path(file_path)
+    if not path.is_file():
+        return {'kind': 'none', 'pdf_spans': [], 'docx_spans': []}
+    ext = path.suffix.lower()
+    if ext == '.pdf':
+        return {'kind': 'pdf', 'pdf_spans': build_pdf_page_spans(path), 'docx_spans': []}
+    if ext == '.docx':
+        return {'kind': 'docx', 'pdf_spans': [], 'docx_spans': build_docx_page_spans(path)}
+    return {'kind': 'none', 'pdf_spans': [], 'docx_spans': []}
+
+
+def _resolve_unified_page(offset: Optional[int], ctx: dict[str, Any]) -> tuple[Optional[int], Optional[int], bool]:
+    """根据偏移量与文档页码上下文返回 (physical_or_pdf_page, footer_page, is_docx_page)。"""
+    if offset is None or offset < 0:
+        return None, None, False
+    kind = ctx.get('kind', 'none')
+    if kind == 'pdf':
+        p = offset_to_page(offset, ctx.get('pdf_spans') or [])
+        return p, None, False
+    if kind == 'docx':
+        hit = offset_to_docx_page(offset, ctx.get('docx_spans') or [])
+        if hit is not None:
+            return hit['physical'], hit['footer'], True
+    return None, None, False
 
 
 def _cn_to_int(s: str) -> Optional[int]:
@@ -155,9 +190,7 @@ def _cn_to_int(s: str) -> Optional[int]:
 
 
 def _expand_req_text(full_doc_text: str, req: dict) -> tuple[str, int, int]:
-    """按 _README.md 规范：若候选记录为 PDF 表格断行截短片段，按 start 向后扩窗吸附完整句子。
-    E3 §2.4 修复：保留原文真实换行符，不把 \n 替换为空格，确保同文对齐时在原文中 100% 精确可搜。
-    """
+    """按 _README.md 规范：若候选记录为 PDF 表格断行截短片段，按 start 向后扩窗吸附完整句子。"""
     raw_txt = (req.get('full_text') or req.get('text') or '').strip()
     start = int(req.get('start', 0))
     end = int(req.get('end', start + len(raw_txt)))
@@ -239,8 +272,6 @@ def _locate_bid_window_for_req(
             'start': None, 'end': None, 'matched_quote': '', 'gate': 'miss',
         }
 
-    # ── 1. E3 §2.4 同文对齐直通门控（0ms）：原文或去标记核心句/分句在 bid_text 中逐字存在即直通 ──
-    # 1a. 完整要求原文或首行直接存在于 bid_text（覆盖短要求如 "★（1）常规制片" 及同书自对齐）
     first_line = req_stripped.split('\n', 1)[0].strip()
     for exact_cand in (req_stripped, first_line):
         if len(exact_cand) >= 2:
@@ -248,14 +279,12 @@ def _locate_bid_window_for_req(
             if pos != -1:
                 return _build_direct_hit_result(bid_text, pos, len(exact_cand), score=1.0)
 
-    # 1b. 剥离行首 ★/▲ 与空白后的前 20 字子串匹配
     raw_core = re.sub(r'^[★▲\s]+', '', first_line).strip()
     if len(raw_core) >= 2:
         pos = bid_text.find(raw_core[:20])
         if pos != -1:
             return _build_direct_hit_result(bid_text, pos, min(len(raw_core), 20), score=1.0)
 
-    # 1c. 条款号+标题短语锚点（南京病理实证形态）
     m_t = re.match(r'^[★▲]?\s*[\d一二三四五六七八九十]+\s*[、\.．]\s*[^，。；\n\s]{2,40}', first_line)
     title = re.sub(r'^[★▲\s]+', '', (m_t.group(0) if m_t else first_line)).strip().rstrip('。；：:，, ')
     if len(title) >= 4:
@@ -263,7 +292,6 @@ def _locate_bid_window_for_req(
         if pos != -1:
             return _build_direct_hit_result(bid_text, pos, min(len(title), 24), score=0.95)
 
-    # 1d. E3 §2.4 括号长句/多行分句直通：按括号、分号、句号、换行拆出 >=6 字的核心分句定位
     sub_clauses = [
         re.sub(r'^[★▲\s0-9.、()（）一二三四五六七八九十]+', '', seg).strip()
         for seg in re.split(r'[\n；;。！？（）()]+', req_stripped)
@@ -276,7 +304,6 @@ def _locate_bid_window_for_req(
 
     req_grams = _extract_core_grams(req_text)
 
-    # ── 2. 检查 bid_aligner 条款级对齐结果 ──
     best_unit = None
     best_score = 0.0
     for u in tender_units:
@@ -305,7 +332,6 @@ def _locate_bid_window_for_req(
             'gate': 'direct',
         }
 
-    # ── 3. 按段落/行滑动窗口做关键词 2-gram 锚点检索 ──
     best_line_score = 0.0
     best_line_span: Optional[tuple[int, int, str]] = None
     if req_grams:
@@ -336,7 +362,6 @@ def _locate_bid_window_for_req(
                 'gate': 'direct',
             }
 
-    # ── 4. E2 严格门控后通道：仅对初筛未命中的"疑似漏应答候选"启动三级混合检索 ──
     hybrid_hits = hybrid_retrieve_windows(
         query=req_text,
         doc_text=bid_text,
@@ -403,7 +428,7 @@ def _check_missing_evidence(
     )
 
 
-# ── 参数抽取器（用于双书参数冲突检测 & 投标书内部自洽扫描，0 Token）────────
+# ── 参数抽取器 ────────────────────────────────────────────────────────────
 
 _WARRANTY_RE = re.compile(
     r'(?:免费)?(?:质保期|质量保证期|维保期|保修期|维护期|免费维护|免费质保)'
@@ -435,7 +460,7 @@ _BID_TOTAL_MENTION_RE = re.compile(
 
 
 def _extract_sentence_around(text: str, start: int, end: int) -> tuple[str, int, int]:
-    """提取命中位置所在的完整单句或单行（保证 100% 是原文连续子串，通过 verify_quote）。"""
+    """提取命中位置所在的完整单句或单行。"""
     lo = start
     while lo > 0 and text[lo - 1] not in '\n。；！？':
         if start - lo >= 90:
@@ -457,7 +482,6 @@ def _extract_sentence_around(text: str, start: int, end: int) -> tuple[str, int,
 
 
 def _extract_warranty_mentions(text: str) -> list[dict]:
-    """提取文本中所有质保期承诺并统一折算为月数。"""
     mentions = []
     consumed = []
     for regex in (_WARRANTY_RE, _WARRANTY_REV_RE):
@@ -485,7 +509,6 @@ def _extract_warranty_mentions(text: str) -> list[dict]:
 
 
 def _extract_response_time_mentions(text: str) -> list[dict]:
-    """提取故障响应时间承诺并统一折算为分钟。"""
     mentions = []
     for m in _RESPONSE_TIME_RE.finditer(text or ''):
         num = _cn_to_int(m.group(1))
@@ -507,7 +530,6 @@ def _extract_response_time_mentions(text: str) -> list[dict]:
 
 
 def _extract_retention_mentions(text: str) -> list[dict]:
-    """提取质保金/履约保证金比例（%）。"""
     mentions = []
     for m in _RETENTION_RATIO_RE.finditer(text or ''):
         try:
@@ -528,7 +550,6 @@ def _extract_retention_mentions(text: str) -> list[dict]:
 
 
 def _extract_total_price_mentions(text: str) -> list[dict]:
-    """提取标书中多处出现的投标总报价（统一折算为元）。"""
     mentions = []
     for m in _BID_TOTAL_MENTION_RE.finditer(text or ''):
         try:
@@ -561,7 +582,7 @@ def check_bid_self_contradictions(
     if not bid_text or not bid_text.strip():
         return findings
 
-    bid_pages = _build_pdf_page_spans(bid_path)
+    bid_ctx = _build_unified_page_context(bid_path)
 
     extractors = (
         _extract_warranty_mentions,
@@ -579,6 +600,8 @@ def check_bid_self_contradictions(
                 q1 = first['quote'] if verify_quote(first['quote'], bid_text) else ''
                 q2 = other['quote'] if verify_quote(other['quote'], bid_text) else ''
                 q_ok = bool(q1 and q2)
+                p1, fp1, is_dx1 = _resolve_unified_page(first['start'], bid_ctx)
+                p2, fp2, is_dx2 = _resolve_unified_page(other['start'], bid_ctx)
                 findings.append({
                     'code': 'CONTRADICTION',
                     'severity': 'error',
@@ -593,10 +616,16 @@ def check_bid_self_contradictions(
                     'quote_verified': q_ok,
                     'tender_start': first['start'],
                     'tender_end': first['end'],
-                    'tender_page': _offset_to_page(first['start'], bid_pages),
+                    'tender_page': p1,
+                    'tender_footer_page': fp1,
+                    'tender_is_docx': is_dx1,
                     'bid_start': other['start'],
                     'bid_end': other['end'],
-                    'bid_page': _offset_to_page(other['start'], bid_pages),
+                    'bid_page': p2,
+                    'bid_footer_page': fp2,
+                    'bid_is_docx': is_dx2,
+                    'footer_page': fp2 if p2 is not None else fp1,
+                    'is_docx_page': is_dx2 if p2 is not None else is_dx1,
                 })
                 break
 
@@ -619,6 +648,8 @@ def check_bid_self_contradictions(
                     raw_qb = str(parsed.get('quote_b', '')).strip()
                     qa_ok = bool(raw_qa) and verify_quote(raw_qa, bid_text)
                     qb_ok = bool(raw_qb) and verify_quote(raw_qb, bid_text)
+                    p1, fp1, is_dx1 = _resolve_unified_page(pos_a, bid_ctx)
+                    p2, fp2, is_dx2 = _resolve_unified_page(pos_b, bid_ctx)
                     findings.append({
                         'code': 'CONTRADICTION',
                         'severity': 'error',
@@ -630,10 +661,16 @@ def check_bid_self_contradictions(
                         'quote_verified': (qa_ok and qb_ok),
                         'tender_start': pos_a,
                         'tender_end': pos_a + len(txt_a),
-                        'tender_page': _offset_to_page(pos_a, bid_pages),
+                        'tender_page': p1,
+                        'tender_footer_page': fp1,
+                        'tender_is_docx': is_dx1,
                         'bid_start': pos_b,
                         'bid_end': pos_b + len(txt_b),
-                        'bid_page': _offset_to_page(pos_b, bid_pages),
+                        'bid_page': p2,
+                        'bid_footer_page': fp2,
+                        'bid_is_docx': is_dx2,
+                        'footer_page': fp2 if p2 is not None else fp1,
+                        'is_docx_page': is_dx2 if p2 is not None else is_dx1,
                     })
 
     return findings
@@ -668,8 +705,8 @@ def check_star_responses(
         requirements = marked + wording
 
     valid_reqs = _filter_valid_requirements(requirements)
-    tender_pages = _build_pdf_page_spans(tender_path)
-    bid_pages = _build_pdf_page_spans(bid_path)
+    tender_ctx = _build_unified_page_context(tender_path)
+    bid_ctx = _build_unified_page_context(bid_path)
 
     align_res = compare_contracts(tender_text or '', bid_text or '')
     _, tender_units = _build_clause_units(tender_text or '')
@@ -699,8 +736,8 @@ def check_star_responses(
             client=client,
         )
 
-        t_page = _offset_to_page(r_start, tender_pages)
-        b_page = _offset_to_page(loc['start'], bid_pages)
+        t_page, t_footer, t_is_docx = _resolve_unified_page(r_start, tender_ctx)
+        b_page, b_footer, b_is_docx = _resolve_unified_page(loc['start'], bid_ctx)
 
         raw_req_quote = (req.get('full_text') or req.get('text') or expanded_req_text).strip()
         if len(raw_req_quote) < 18 and len(expanded_req_text) > len(raw_req_quote):
@@ -722,9 +759,15 @@ def check_star_responses(
                 'tender_start': r_start,
                 'tender_end': r_end,
                 'tender_page': t_page,
+                'tender_footer_page': t_footer,
+                'tender_is_docx': t_is_docx,
                 'bid_start': None,
                 'bid_end': None,
                 'bid_page': None,
+                'bid_footer_page': None,
+                'bid_is_docx': False,
+                'footer_page': t_footer,
+                'is_docx_page': t_is_docx if t_page is not None else False,
                 'llm_status': 'skipped' if client is None else 'confirmed_missing',
             }
             findings.append(finding)
@@ -767,9 +810,15 @@ def check_star_responses(
                     'tender_start': r_start,
                     'tender_end': r_end,
                     'tender_page': t_page,
+                    'tender_footer_page': t_footer,
+                    'tender_is_docx': t_is_docx,
                     'bid_start': loc['start'],
                     'bid_end': loc['end'],
                     'bid_page': b_page,
+                    'bid_footer_page': b_footer,
+                    'bid_is_docx': b_is_docx,
+                    'footer_page': b_footer if b_page is not None else t_footer,
+                    'is_docx_page': b_is_docx if b_page is not None else t_is_docx,
                     'llm_status': 'skipped',
                 }
                 findings.append(f_item)
@@ -798,9 +847,15 @@ def check_star_responses(
                     'tender_start': r_start,
                     'tender_end': r_end,
                     'tender_page': t_page,
+                    'tender_footer_page': t_footer,
+                    'tender_is_docx': t_is_docx,
                     'bid_start': loc['start'],
                     'bid_end': loc['end'],
                     'bid_page': b_page,
+                    'bid_footer_page': b_footer,
+                    'bid_is_docx': b_is_docx,
+                    'footer_page': b_footer if b_page is not None else t_footer,
+                    'is_docx_page': b_is_docx if b_page is not None else t_is_docx,
                     'similarity': loc['score'],
                     'gate': loc.get('gate', 'direct'),
                     'evidence_warning': _EVIDENCE_WARNING_NOTE if ev_warn_msg else None,
@@ -822,15 +877,21 @@ def check_star_responses(
                         'tender_start': r_start,
                         'tender_end': r_end,
                         'tender_page': t_page,
+                        'tender_footer_page': t_footer,
+                        'tender_is_docx': t_is_docx,
                         'bid_start': loc['start'],
                         'bid_end': loc['end'],
                         'bid_page': b_page,
+                        'bid_footer_page': b_footer,
+                        'bid_is_docx': b_is_docx,
+                        'footer_page': b_footer if b_page is not None else t_footer,
+                        'is_docx_page': b_is_docx if b_page is not None else t_is_docx,
                         'evidence_warning': _EVIDENCE_WARNING_NOTE,
                         'llm_status': 'skipped',
                     })
             continue
 
-        # 大模型① 逐条判定（§4 裁定：同文对齐大模型判漏应答属产品设计决策，保持原样）
+        # 大模型① 逐条判定
         prompt = _RESPONSE_CHECK_PROMPT.format(
             tender_window=tender_window,
             req_text=expanded_req_text,
@@ -873,6 +934,8 @@ def check_star_responses(
                 else loc['end']
             )
 
+        b_real_page, b_real_footer, b_real_is_docx = _resolve_unified_page(b_real_start, bid_ctx)
+
         ev_warn_llm = None
         if status == 'RESPONSE_OK':
             ev_warn_llm = _check_missing_evidence(
@@ -900,9 +963,15 @@ def check_star_responses(
             'tender_start': r_start,
             'tender_end': r_end,
             'tender_page': t_page,
+            'tender_footer_page': t_footer,
+            'tender_is_docx': t_is_docx,
             'bid_start': b_real_start,
             'bid_end': b_real_end,
-            'bid_page': _offset_to_page(b_real_start, bid_pages),
+            'bid_page': b_real_page,
+            'bid_footer_page': b_real_footer,
+            'bid_is_docx': b_real_is_docx,
+            'footer_page': b_real_footer if b_real_page is not None else t_footer,
+            'is_docx_page': b_real_is_docx if b_real_page is not None else t_is_docx,
             'reason': reason,
             'gate': loc.get('gate', 'direct'),
             'evidence_warning': _EVIDENCE_WARNING_NOTE if ev_warn_llm else None,
@@ -928,9 +997,15 @@ def check_star_responses(
                 'tender_start': r_start,
                 'tender_end': r_end,
                 'tender_page': t_page,
+                'tender_footer_page': t_footer,
+                'tender_is_docx': t_is_docx,
                 'bid_start': b_real_start,
                 'bid_end': b_real_end,
-                'bid_page': _offset_to_page(b_real_start, bid_pages),
+                'bid_page': b_real_page,
+                'bid_footer_page': b_real_footer,
+                'bid_is_docx': b_real_is_docx,
+                'footer_page': b_real_footer if b_real_page is not None else t_footer,
+                'is_docx_page': b_real_is_docx if b_real_page is not None else t_is_docx,
             })
         elif ev_warn_llm:
             findings.append({
@@ -946,9 +1021,15 @@ def check_star_responses(
                 'tender_start': r_start,
                 'tender_end': r_end,
                 'tender_page': t_page,
+                'tender_footer_page': t_footer,
+                'tender_is_docx': t_is_docx,
                 'bid_start': b_real_start,
                 'bid_end': b_real_end,
-                'bid_page': _offset_to_page(b_real_start, bid_pages),
+                'bid_page': b_real_page,
+                'bid_footer_page': b_real_footer,
+                'bid_is_docx': b_real_is_docx,
+                'footer_page': b_real_footer if b_real_page is not None else t_footer,
+                'is_docx_page': b_real_is_docx if b_real_page is not None else t_is_docx,
                 'evidence_warning': _EVIDENCE_WARNING_NOTE,
             })
 
@@ -998,9 +1079,15 @@ def check_star_responses(
             'tender_start': r.get('tender_start'),
             'tender_end': r.get('tender_end'),
             'tender_page': r.get('tender_page'),
+            'tender_footer_page': r.get('tender_footer_page'),
+            'tender_is_docx': r.get('tender_is_docx', False),
             'bid_start': r.get('bid_start'),
             'bid_end': r.get('bid_end'),
             'bid_page': r.get('bid_page'),
+            'bid_footer_page': r.get('bid_footer_page'),
+            'bid_is_docx': r.get('bid_is_docx', False),
+            'footer_page': r.get('tender_footer_page'),
+            'is_docx_page': r.get('tender_is_docx', False),
             'llm_status': r.get('llm_status', 'skipped'),
         })
 

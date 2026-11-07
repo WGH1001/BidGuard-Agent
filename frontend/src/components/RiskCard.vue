@@ -59,6 +59,36 @@ function feedbackMeta(fb: FeedbackType): { text: string; cls: string } {
   return { text: '待确认', cls: 'warning' }
 }
 
+function isDocxEstimatedPage(item: BidFindingOut): boolean {
+  if (typeof item.page !== 'number' || item.page <= 0) return false
+  const dj = item.detail_json
+  if (!dj) return false
+  return Boolean(
+    dj.is_docx_page ||
+      dj.bid_is_docx ||
+      dj.tender_is_docx ||
+      typeof dj.footer_page === 'number' ||
+      typeof dj.bid_footer_page === 'number' ||
+      typeof dj.tender_footer_page === 'number',
+  )
+}
+
+function getFooterPage(item: BidFindingOut): number | null {
+  const dj = item.detail_json
+  if (!dj) return null
+  if (typeof dj.footer_page === 'number' && dj.footer_page > 0) return dj.footer_page
+  if (typeof dj.bid_footer_page === 'number' && dj.bid_footer_page > 0) return dj.bid_footer_page
+  if (typeof dj.tender_footer_page === 'number' && dj.tender_footer_page > 0) return dj.tender_footer_page
+  return null
+}
+
+function renderItemLocation(item: BidFindingOut): string {
+  return formatPageOrOffset(item.page, item.quote_offset, {
+    isDocx: isDocxEstimatedPage(item),
+    footerPage: getFooterPage(item),
+  })
+}
+
 async function submitFeedback(item: BidFindingOut, fb: FeedbackType): Promise<void> {
   if (busyMap.value[item.id]) return
   busyMap.value[item.id] = true
@@ -149,7 +179,10 @@ async function submitFeedback(item: BidFindingOut, fb: FeedbackType): Promise<vo
             {{ consequenceMeta(item.consequence).text }}
           </span>
           <span class="loc-tag mono-num">
-            {{ formatPageOrOffset(item.page, item.quote_offset) }}
+            {{ renderItemLocation(item) }}
+          </span>
+          <span v-if="isDocxEstimatedPage(item)" class="docx-est-hint">
+            Word 页码为系统估算，可能与实际排版有出入，以字符偏移为准
           </span>
 
           <span class="fb-status sev-pill" :class="feedbackMeta(item.feedback).cls">
@@ -159,7 +192,6 @@ async function submitFeedback(item: BidFindingOut, fb: FeedbackType): Promise<vo
 
         <div class="fc-message">{{ item.message }}</div>
 
-        <!-- 双书对照展示（当 bid_quote 存在时并排展示招标要求 vs 我方响应，否则单栏展示原文摘录） -->
         <div v-if="item.quote && item.bid_quote" class="dual-quote-grid">
           <div class="dq-box tender-side">
             <div class="dq-label">招标文件要求 / 前文基准摘录</div>
@@ -345,6 +377,11 @@ async function submitFeedback(item: BidFindingOut, fb: FeedbackType): Promise<vo
 .loc-tag {
   font-size: 11.5px;
   color: var(--txt-muted);
+}
+
+.docx-est-hint {
+  font-size: 11px;
+  color: #888780;
 }
 
 .fb-status {
