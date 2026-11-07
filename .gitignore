@@ -17,10 +17,4 @@ data/*.db-shm
 data/*.db-wal
 派发归档/
 .slidep/
-E1派发汇总.txt
-E2派发汇总.txt
 *.media.ocr.json
-E3派发汇总.txt
-E3R派发汇总.txt
-E4派发汇总.txt
-E4派发汇总.txt
