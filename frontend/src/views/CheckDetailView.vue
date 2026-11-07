@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { checksApi, reportsApi } from '@/api'
@@ -73,10 +73,20 @@ async function selectTask(task: BidTaskOut): Promise<void> {
 }
 
 function checkAutoPopupPriceManual(task: BidTaskOut): void {
-  if (task.status === 'delivered' && task.stats_json?.price_status === 'NEED_MANUAL') {
+  if (task.status !== 'delivered' || task.stats_json?.price_status !== 'NEED_MANUAL') return
+  // 每个任务每个浏览器会话只自动弹一次：关闭后本会话不再打扰（页面上的人工回填入口仍在），
+  // 重开浏览器后视为新会话，会再提醒一次。提交回填成功后 price_status 变 OK，永不再弹。
+  const key = `price_manual_popup_dismissed_${task.id}`
+  if (!sessionStorage.getItem(key)) {
     priceModalVisible.value = true
   }
 }
+
+watch(priceModalVisible, (visible) => {
+  if (!visible && currentTask.value && currentTask.value.stats_json?.price_status === 'NEED_MANUAL') {
+    sessionStorage.setItem(`price_manual_popup_dismissed_${currentTask.value.id}`, '1')
+  }
+})
 
 async function handleTriggerRun(): Promise<void> {
   if (!currentTask.value) return

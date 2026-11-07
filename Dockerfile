@@ -4,7 +4,9 @@
 # 构建命令：docker compose build 或 docker build -t bidguard-agent:1.0 .
 # ==============================================================================
 
-FROM python:3.12-slim
+# 基础镜像按 digest 钉死（与老项目同款做法）：终结上游标签漂移/镜像源差异导致的构建缓存全量失效
+# digest 取自本机构建实际解析版本（2026-11-06 构建日志），后续如需升级基础镜像手动更换 digest
+FROM python:3.12-slim@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54
 
 WORKDIR /app
 
