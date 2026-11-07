@@ -8,6 +8,7 @@
 4. 表头标注「单位：万元」的分项报价表自动折算为元；
 5. 纯文本 / PDF 文本行报价提取与噪声过滤（不误抓评分公式或保证金大写）；
 6. run_price_check() 端到端串联 PriceSandbox 检出算术错误、跨表差额、大写错误与超限价。
+7. E7 开标一览表提取鲁棒性（三列同行限价在前/报价格在前、标签格含限价语境、双金额歧义护栏、开标一览表主源优先与自洽表交叉核验）。
 """
 import os
 import sys
@@ -259,3 +260,207 @@ def test_blank_format_table_lineno_sequence_not_misread():
     res = extract_price_from_text(text)
     assert res['items'] == []
     assert res['status'] == 'NEED_MANUAL'
+
+
+# ── 8. E7 新增测试集：限价/报价同行防误判、多金额歧义护栏与开标一览表主源优先 ──────
+
+def test_e7_three_cols_cap_before_bid_extracts_bid_total_without_error():
+    """E7 用例 ①：三列同行、限价格在前（主复现用例：投标总报价 | 不得高于最高限价390,000.00元 | 人民币 382,000.00 元（叁拾捌万贰仟元整））。"""
+    doc = Document()
+    doc.add_paragraph('一、商务承诺自洽性核验表')
+    t_self = doc.add_table(rows=2, cols=3)
+    t_self.cell(0, 0).text = '承诺要点'
+    t_self.cell(0, 1).text = '招标文件要求'
+    t_self.cell(0, 2).text = '我方投标响应承诺'
+    t_self.cell(1, 0).text = '投标总报价'
+    t_self.cell(1, 1).text = '不得高于最高限价390,000.00元'
+    t_self.cell(1, 2).text = '人民币 382,000.00 元（叁拾捌万贰仟元整）'
+
+    doc.add_paragraph('二、分项报价明细表')
+    t_items = doc.add_table(rows=3, cols=4)
+    for i, h in enumerate(['品目名称', '数量', '单价（元）', '合价（元）']):
+        t_items.cell(0, i).text = h
+    t_items.cell(1, 0).text = '智慧托育实训平台软件'
+    t_items.cell(1, 1).text = '1套'
+    t_items.cell(1, 2).text = '382,000.00'
+    t_items.cell(1, 3).text = '382,000.00'
+    t_items.cell(2, 0).text = '合计'
+    t_items.cell(2, 3).text = '382,000.00'
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['status'] == 'OK'
+        assert chk['bid_total'] == '382000.00'
+        assert chk['bid_total_upper'] == '叁拾捌万贰仟元整'
+        assert chk['table_total'] == '382000.00'
+        assert chk['price_cap'] == '390000.00'
+        assert chk['findings'] == []
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_e7_three_cols_bid_before_cap_extracts_bid_total_without_error():
+    """E7 用例 ②：三列同行、报价格在前，且限价格内含限价大写（叁拾玖万元整），严禁混淆。"""
+    doc = Document()
+    t = doc.add_table(rows=2, cols=3)
+    t.cell(0, 0).text = '承诺要点'
+    t.cell(0, 1).text = '我方投标响应承诺'
+    t.cell(0, 2).text = '招标文件要求'
+    t.cell(1, 0).text = '投标总报价'
+    t.cell(1, 1).text = '人民币 382,000.00 元（叁拾捌万贰仟元整）'
+    t.cell(1, 2).text = '不得高于最高限价390,000.00元（叁拾玖万元整）'
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['status'] == 'OK'
+        assert chk['bid_total'] == '382000.00'
+        assert chk['bid_total_upper'] == '叁拾捌万贰仟元整'
+        assert chk['findings'] == []
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_e7_cap_keyword_inside_label_cell_itself():
+    """E7 用例 ③：限价语境词出现在标签格自身（如标签"投标总报价（不得高于最高限价）"）。"""
+    # 场景 3a：标签格带括号限价提醒，后续响应格为真实投标报价 -> 正常提取响应格报价
+    doc_a = Document()
+    t_a = doc_a.add_table(rows=2, cols=2)
+    t_a.cell(0, 0).text = '投标总报价（不得高于最高限价390,000.00元）'
+    t_a.cell(0, 1).text = '人民币 382,000.00 元（叁拾捌万贰仟元整）'
+    t_a.cell(1, 0).text = '工期要求'
+    t_a.cell(1, 1).text = '合同签订后 30 日历天'
+
+    p_a = _save_temp_docx(doc_a)
+    try:
+        res_a = run_price_check(p_a)
+        assert res_a['status'] == 'OK'
+        assert res_a['bid_total'] == '382000.00'
+        assert res_a['bid_total_upper'] == '叁拾捌万贰仟元整'
+        assert res_a['findings'] == []
+    finally:
+        p_a.unlink(missing_ok=True)
+
+    # 场景 3b：单格或值格本身仅为限价要求说明 -> 不得误提为 bid_total
+    doc_b = Document()
+    t_b = doc_b.add_table(rows=1, cols=2)
+    t_b.cell(0, 0).text = '投标总报价（不得高于最高限价）'
+    t_b.cell(0, 1).text = '不得高于最高限价 390,000.00 元'
+
+    p_b = _save_temp_docx(doc_b)
+    try:
+        res_b = extract_price_data(p_b)
+        assert res_b['bid_total'] is None
+        assert res_b['status'] == 'NEED_MANUAL'
+    finally:
+        p_b.unlink(missing_ok=True)
+
+
+def test_e7_standard_bid_summary_table_unscathed():
+    """E7 用例 ④：规范《开标一览表》（横向表头式）照常提取，零误伤。"""
+    doc = Document()
+    doc.add_paragraph('一、开标一览表')
+    t = doc.add_table(rows=2, cols=4)
+    t.cell(0, 0).text = '项目名称'
+    t.cell(0, 1).text = '投标总报价（元）'
+    t.cell(0, 2).text = '投标总报价（大写）'
+    t.cell(0, 3).text = '交付期'
+    t.cell(1, 0).text = '智慧园区安防改造采购项目'
+    t.cell(1, 1).text = '382,000.00'
+    t.cell(1, 2).text = '叁拾捌万贰仟元整'
+    t.cell(1, 3).text = '30日历天'
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['status'] == 'OK'
+        assert chk['bid_total'] == '382000.00'
+        assert chk['bid_total_upper'] == '叁拾捌万贰仟元整'
+        assert chk['findings'] == []
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_e7_dual_amounts_without_context_words_triggers_warning_not_error():
+    """E7 用例 ⑤：双金额无语境词歧义行 -> bid_total=None + warning 级 finding（绝不产出 error）。"""
+    doc = Document()
+    t_amb = doc.add_table(rows=2, cols=3)
+    t_amb.cell(0, 0).text = '要素名称'
+    t_amb.cell(0, 1).text = '数值一'
+    t_amb.cell(0, 2).text = '数值二'
+    t_amb.cell(1, 0).text = '投标总报价'
+    t_amb.cell(1, 1).text = '人民币 390,000.00 元'
+    t_amb.cell(1, 2).text = '人民币 382,000.00 元'
+
+    t_items = doc.add_table(rows=3, cols=4)
+    for i, h in enumerate(['品目名称', '数量', '单价（元）', '合价（元）']):
+        t_items.cell(0, i).text = h
+    t_items.cell(1, 0).text = '核心交换机'
+    t_items.cell(1, 1).text = '1台'
+    t_items.cell(1, 2).text = '382,000.00'
+    t_items.cell(1, 3).text = '382,000.00'
+    t_items.cell(2, 0).text = '合计'
+    t_items.cell(2, 3).text = '382,000.00'
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['bid_total'] is None
+        assert len(chk['findings']) >= 1
+        assert all(f['severity'] == 'warning' for f in chk['findings'])
+        assert any(f['code'] == 'AMBIGUOUS_BID_TOTAL' for f in chk['findings'])
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_e7_primary_bid_summary_table_wins_over_self_check_table():
+    """E7 用例 ⑥：独立《开标一览表》与自洽表并存时，bid_total 只从开标一览表赋值，自洽表仅作交叉核验。"""
+    doc = Document()
+    # 先放一份自洽表（故意把自洽表里的响应金额写成 380,000.00 元，测试其既不会抢占赋值、不一致也只报 warning）
+    doc.add_paragraph('一、商务响应自洽表')
+    t_self = doc.add_table(rows=2, cols=3)
+    t_self.cell(0, 0).text = '承诺要点'
+    t_self.cell(0, 1).text = '招标文件要求'
+    t_self.cell(0, 2).text = '我方投标响应承诺'
+    t_self.cell(1, 0).text = '投标总报价'
+    t_self.cell(1, 1).text = '不得高于最高限价390,000.00元'
+    t_self.cell(1, 2).text = '人民币 380,000.00 元'
+
+    # 再放独立《开标一览表》（真实报价 382,000.00 元）
+    doc.add_paragraph('二、开标一览表')
+    t_primary = doc.add_table(rows=3, cols=2)
+    t_primary.cell(0, 0).text = '项目名称'
+    t_primary.cell(0, 1).text = '某市政务云扩容采购项目'
+    t_primary.cell(1, 0).text = '投标总报价（小写）'
+    t_primary.cell(1, 1).text = '382,000.00元'
+    t_primary.cell(2, 0).text = '投标总报价（大写）'
+    t_primary.cell(2, 1).text = '人民币叁拾捌万贰仟元整'
+
+    # 分项报价表与开标一览表一致（382,000.00 元）
+    doc.add_paragraph('三、分项报价表')
+    t_items = doc.add_table(rows=3, cols=4)
+    for i, h in enumerate(['货物名称', '数量', '投标单价(元)', '投标合价(元)']):
+        t_items.cell(0, i).text = h
+    t_items.cell(1, 0).text = '云平台虚拟化套件'
+    t_items.cell(1, 1).text = '1套'
+    t_items.cell(1, 2).text = '382,000.00'
+    t_items.cell(1, 3).text = '382,000.00'
+    t_items.cell(2, 0).text = '合计'
+    t_items.cell(2, 3).text = '382,000.00'
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['status'] == 'OK'
+        # bid_total 严格取自独立《开标一览表》的 382000.00，而非前面自洽表的 380000.00
+        assert chk['bid_total'] == '382000.00'
+        assert chk['bid_total_upper'] == '叁拾捌万贰仟元整'
+        # 自洽表与开标一览表差异仅产出 warning 级 CROSS_TABLE_BID_WARNING，0 条 error
+        errors = [f for f in chk['findings'] if f['severity'] == 'error']
+        warnings = [f for f in chk['findings'] if f['severity'] == 'warning']
+        assert errors == []
+        assert len(warnings) == 1
+        assert warnings[0]['code'] == 'CROSS_TABLE_BID_WARNING'
+    finally:
+        p.unlink(missing_ok=True)

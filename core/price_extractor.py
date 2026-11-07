@@ -27,6 +27,10 @@
      以及正文跨换行/分包小节的预算提取。
 6. **E3 修复 1（docx 表格与 PDF 文本双路径空白格式表/行号序列防线）**：
    - 严格拦截数量/单价/合价为 1/2/3 等连续递增小整数序列、含省略号占位符或表头词黑名单的伪报价行。
+7. **E7 开标一览表提取鲁棒性（限价/报价同行防误判与多源分级核验）**：
+   - 数字与大写分支统一按格剔除含限价/预算/保证金语境词的单元格（及同格内的限价分句）；
+   - 同行值区出现 >=2 个不同金额且无语境词消歧时，严守宁缺毋滥，不赋值 bid_total（置 None）并产出 warning 级 finding；
+   - 独立《开标一览表》作为唯一主赋值源，商务自洽表/应答表降级为交叉核验源（不一致产出 warning 级 finding）。
 """
 import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -93,9 +97,15 @@ _UPPER_AMOUNT_RE = re.compile(
 # 开标一览表总价文本行匹配（要求明确冒号与货币单位，防止误匹配"投标报价×30分"等评分公式）
 _BID_TOTAL_LINE_RE = re.compile(
     r'(?:投标总报价|投标总价|报价总计|总报价|投标报价)'
-    r'\s*(?:[（(][^）)\n]{0,12}[）)])?\s*[：:]\s*'
+    r'\s*(?:[（(][^）)\n]{0,16}[）)])?\s*[：:]\s*'
     r'(?:小写[：:\s]*|人民币\s*|[￥¥]\s*)?'
     r'([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|元)'
+)
+
+# 自由文本中带单位金额全局扫描正则（供单格/同行多金额歧义检测）
+_MONEY_WITH_UNIT_SCAN_RE = re.compile(
+    r'(?:[￥¥]\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|万|元)?)'
+    r'|(?<![0-9.])([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|万|元)'
 )
 
 # 表头列角色关键词
@@ -111,6 +121,9 @@ _CAP_LABEL_HIGH_KEYS = ('最高限价', '最高投标限价', '招标控制价',
 _CAP_LABEL_BUDGET_KEYS = ('采购预算', '预算金额', '项目预算', '预算总价')
 _CAP_LABEL_ALL_KEYS = _CAP_LABEL_HIGH_KEYS + _CAP_LABEL_BUDGET_KEYS
 
+# 投标总价标签关键词
+_BID_TOTAL_LABEL_KEYS = ('投标总价', '投标总报价', '报价总计', '总报价', '投标报价')
+
 # 汇总行识别
 _SUMMARY_ROW_RE = re.compile(
     r'^\s*(?:合\s*计|总\s*计|报价合计|投标总价|投标总报价|总报价|分项合计|小\s*计|总金额|大\s*写)',
@@ -119,10 +132,22 @@ _SUMMARY_ROW_RE = re.compile(
 # 纯序号判定
 _SEQ_ONLY_RE = re.compile(r'^\s*(?:[0-9]{1,3}|[一二三四五六七八九十]+|[（(][0-9一二三四五六七八九十]+[)）])\s*$')
 # 说明性长句排除词（防把招标须知/评分说明当成报价数值）
-_INSTRUCTION_NOISE_KEYS = ('不得超过', '超过最高限价', '无效标', '废标', '得分', '评标基准价',
+_INSTRUCTION_NOISE_KEYS = ('不得超过', '不得高于', '不高于', '不超过', '超过最高限价',
+                           '无效标', '废标', '投标无效', '得分', '评标基准价',
                            '计算公式', '保留两位小数', '满分为', '扣完为止', '保证金')
-# 非投标报价的大写上下文排除词（防把最高限价/预算/保证金的大写误提为 bid_total_upper）
-_NON_BID_UPPER_KEYS = ('最高限价', '最高投标限价', '采购预算', '预算金额', '控制价', '保证金')
+# E7 扩充：非投标报价的数字与大写上下文排除词（防把最高限价/预算/控制价/保证金的数字或大写误提为 bid_total / bid_total_upper）
+_NON_BID_UPPER_KEYS = (
+    '最高限价', '最高投标限价', '采购预算', '预算金额', '项目预算', '预算总价', '最高预算',
+    '招标控制价', '控制价', '拦标价', '最高限额', '保证金',
+    '不得超过', '不得高于', '不高于', '不超过', '超过最高限价',
+    '无效标', '废标', '投标无效', '否决投标',
+)
+
+# 自洽表 / 商务应答表表头特征词（用于区分独立《开标一览表》与自洽核验表）
+_SELF_CHECK_HEADER_KEYS = (
+    '招标文件要求', '招标要求', '承诺要点', '响应承诺', '投标响应',
+    '响应情况', '偏离情况', '偏离说明', '核验内容', '自洽', '符合性',
+)
 
 # 空白格式表防线：表头词黑名单（在 docx 表格路径与 PDF 文本路径共同生效）
 _HEADER_NAME_BLACKLIST = frozenset({
@@ -152,16 +177,7 @@ def _is_bogus_price_row(
     unit_val: Decimal,
     total_val: Decimal,
 ) -> bool:
-    """E3 修复 1 核心守卫：判断候选分项行是否为空白模板行号序列（如 1/2/3）、列号指引行或表头黑名单。
-
-    拦截规则：
-    1. 品目名称为空、含省略号（… / ...）、或命中 _HEADER_NAME_BLACKLIST 列头词黑名单；
-    2. 数量/单价/合价任一原始单元格含省略号占位符（… / ...）；
-    3. 行号序列形态：
-       - (qty, unit, total) 恰为连续递增小整数（如 1, 2, 3 或 2, 3, 4 等，即 unit == qty + 1 且 total == unit + 1，且 qty <= 50），
-         无论单元格写成 "1 / 2 / 3" 还是 "1 / 2.00 / 3.00"；
-       - 或者单价与合价均为 <= 10 的整数且不满足算术等式 qty * unit == total（典型如表格列编号指引行 (1) (2) (3) (4)）。
-    """
+    """E3 修复 1 核心守卫：判断候选分项行是否为空白模板行号序列（如 1/2/3）、列号指引行或表头黑名单。"""
     clean_name = re.sub(r'\s+', '', item_name or '')
     if not clean_name:
         return True
@@ -169,7 +185,6 @@ def _is_bogus_price_row(
         return True
     if clean_name in _HEADER_NAME_BLACKLIST or any(k == clean_name for k in _HEADER_NAME_BLACKLIST):
         return True
-    # 若品目名称只是两个以上表头词拼接（如 "分项名称 服务费用报价依据"）
     if any(k in clean_name for k in ('报价依据', '证书有效期', '单价（元）', '金额（元）', '合价（元）')):
         return True
 
@@ -178,7 +193,6 @@ def _is_bogus_price_row(
         if '…' in s_txt or '...' in s_txt:
             return True
 
-    # 检查是否为整数值（如 Decimal('2.00') == 2）
     is_int_qty = (qty_val == int(qty_val))
     is_int_unit = (unit_val == int(unit_val))
     is_int_total = (total_val == int(total_val))
@@ -187,10 +201,8 @@ def _is_bogus_price_row(
         iq = int(qty_val)
         iu = int(unit_val)
         it = int(total_val)
-        # 形态 A：1 / 2 / 3 或 n / n+1 / n+2 连续递增行号/列号序列
         if 1 <= iq <= 50 and iu == iq + 1 and it == iu + 1:
             return True
-        # 形态 B：单价与合价均为 <= 10 的极小整数且单价×数量 != 合价（列编号行或示例序号行）
         if 1 <= iq <= 10 and 1 <= iu <= 10 and 1 <= it <= 10 and (iq * iu != it):
             return True
 
@@ -199,18 +211,60 @@ def _is_bogus_price_row(
 
 def _parse_money_str(raw: str, default_wan: bool = False,
                      require_unit: bool = False) -> Decimal | None:
-    """从单元格或文本片段解析金额并统一转为元；非有效数字返回 None。
-
-    require_unit=True 用于**自由文本语境**（邻格说明文字、标签后随文）：
-    数字必须紧邻 元/万元/￥ 才采信——防止"第9条要求""评标基准价×30分"等
-    说明性数字被当成金额（滁州托育实测：'第9条' 被解析成 9.00 元）。
-    """
+    """从单元格或文本片段解析金额并统一转为元；非有效数字返回 None。"""
     if not raw:
         return None
     s = str(raw).strip()
     if not s or s in _PLACEHOLDER_CELL_TOKENS or '…' in s or '...' in s:
         return None
     if any(k in s for k in _INSTRUCTION_NOISE_KEYS):
+        return None
+    # 限价语境排除不在纯解析层做（E7 验收修正）：_parse_money_str 是无语境语义的
+    # 纯值解析器，限价/预算上下文拒绝统一由调用点 _has_non_bid_context/
+    # _strip_non_bid_clauses/_is_tender_requirement_column_header 负责——
+    # 否则 extract_price_cap 等合法消费方（'最高限价145万元'）会被误杀。
+
+    is_wan = default_wan
+    if '万元' in s or re.search(r'[0-9]\s*万(?![0-9])', s):
+        is_wan = True
+    elif '元' in s and '万元' not in s:
+        is_wan = False
+
+    if require_unit:
+        m = (re.search(r'([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|万|元)', s)
+             or re.search(r'[￥¥]\s*([0-9][0-9,]*(?:\.[0-9]+)?)', s))
+        if not m:
+            return None
+        num_str = m.group(1).replace(',', '')
+        if '万元' in m.group(0) or '万' in (m.group(2) if m.lastindex and m.lastindex > 1 else ''):
+            is_wan = True
+        elif '元' in m.group(0):
+            is_wan = False
+    else:
+        m = re.search(r'([0-9][0-9,]*(?:\.[0-9]+)?)', s)
+        if not m:
+            return None
+        num_str = m.group(1).replace(',', '')
+    try:
+        d = Decimal(num_str)
+    except InvalidOperation:
+        return None
+    if d < 0:
+        return None
+    if is_wan:
+        d = d * WAN
+    return d.quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def _parse_cap_money_str(raw: str, default_wan: bool = False,
+                         require_unit: bool = False) -> Decimal | None:
+    """专用于最高限价/预算单元格的金额解析（允许格内含'最高限价/不得高于'等限价词，但排除评分公式噪声）。"""
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s or s in _PLACEHOLDER_CELL_TOKENS or '…' in s or '...' in s:
+        return None
+    if any(k in s for k in ('得分', '评标基准价', '计算公式', '保留两位小数', '满分为', '扣完为止', '保证金')):
         return None
 
     is_wan = default_wan
@@ -284,7 +338,6 @@ def extract_price_cap(text: str) -> str | None:
                 unit, num_s = g1, g2
             else:
                 num_s, unit = g1, g2
-            # 校验提取的数字字面量确实存在于原文切片中（防幻影数字铁律）
             if num_s not in m.group(0):
                 continue
             try:
@@ -298,7 +351,6 @@ def extract_price_cap(text: str) -> str | None:
             if val >= Decimal('100'):
                 return _fmt_yuan(val)
 
-    # 分包小节预算兜底（如按分包1/分包2分别列出采购预算而无总述句）
     pkg_matches = list(_PACKAGE_BUDGET_RE.finditer(text))
     if pkg_matches:
         for m in pkg_matches:
@@ -346,18 +398,14 @@ def _detect_header_map(cells_text: list[str]) -> dict | None:
 
 
 def _try_parse_cap_cell_value(cell_txt: str, label_has_unit: bool, label_is_wan: bool) -> Decimal | None:
-    """从表格目标单元格提取限价/预算金额。
-    - 若标签格已显式带单位（如"预算金额（万元）"或"最高限价（元）"），目标格允许为纯数字；
-    - 若标签格未带单位，则目标格必须自身带单位（require_unit=True），防止误抓序号/包号。
-    """
+    """从表格目标单元格提取限价/预算金额。"""
     txt = (cell_txt or '').strip()
     if not txt:
         return None
-    # 排除纯分包号或纯小序号（如 "包1"、"1"、"第1包"）
     if re.match(r'^(?:(?:采购)?包|分包|标段)?\s*[0-9一二三四五六七八九十]{1,2}\s*$', txt):
         if not label_has_unit:
             return None
-    v = _parse_money_str(
+    v = _parse_cap_money_str(
         txt,
         default_wan=(label_is_wan or '万元' in txt),
         require_unit=(not label_has_unit),
@@ -367,17 +415,217 @@ def _try_parse_cap_cell_value(cell_txt: str, label_has_unit: bool, label_is_wan:
     return None
 
 
+# ── E7 限价语境剔除、多金额歧义护栏与开标一览表分级辅助函数 ───────────────
+
+def _has_non_bid_context(text: str) -> bool:
+    """判断文本片段是否含最高限价/预算/控制价/不得高于/保证金等非投标报价语境词。"""
+    if not text:
+        return False
+    return any(k in text for k in _NON_BID_UPPER_KEYS) or any(k in text for k in _INSTRUCTION_NOISE_KEYS)
+
+
+def _strip_non_bid_clauses(cell_text: str) -> str:
+    """从单元格文本中剥离含限价/预算语境词的分句或括号注记，仅保留纯投标响应分句。
+    若整格均为限价说明（如"不得高于最高限价390,000.00元（叁拾玖万元整）"），剥离后返回空串 ''。
+    """
+    raw = (cell_text or '').strip()
+    if not raw:
+        return ''
+    if not _has_non_bid_context(raw):
+        return raw
+
+    # 先剥离括号内含限价词的注记（如 "人民币382,000.00元（低于最高限价390,000.00元）"）
+    def _clean_paren(m: re.Match) -> str:
+        inner = m.group(0)
+        return '' if _has_non_bid_context(inner) else inner
+
+    cleaned = re.sub(r'[（(][^）)]*[）)]', _clean_paren, raw)
+    # 再按分号、句号、逗号、换行拆分分句，剔除含限价语境词的分句
+    clauses = re.split(r'[；;。\n，,]+', cleaned)
+    kept = [c.strip() for c in clauses if c.strip() and not _has_non_bid_context(c)]
+    return ' '.join(kept).strip()
+
+
+def _extract_all_money_values_from_cell(
+    cell_text: str,
+    default_wan: bool = False,
+    require_unit: bool = True,
+) -> list[Decimal]:
+    """从单个已剥离限价语境的单元格中提取所有有效金额（统一折算为元，去重保序）。"""
+    clean_txt = _strip_non_bid_clauses(cell_text)
+    if not clean_txt or clean_txt in _PLACEHOLDER_CELL_TOKENS or '…' in clean_txt or '...' in clean_txt:
+        return []
+
+    found: list[Decimal] = []
+    for m in _MONEY_WITH_UNIT_SCAN_RE.finditer(clean_txt):
+        num_s = m.group(1) or m.group(3)
+        unit_s = m.group(2) or m.group(4) or ''
+        if not num_s:
+            continue
+        try:
+            d = Decimal(num_s.replace(',', ''))
+        except InvalidOperation:
+            continue
+        if d <= 0:
+            continue
+        is_w = ('万' in unit_s) or (not unit_s and default_wan)
+        if is_w:
+            d = d * WAN
+        q_val = d.quantize(CENT, rounding=ROUND_HALF_UP)
+        if q_val >= Decimal('50') and q_val not in found:
+            found.append(q_val)
+
+    if not found and not require_unit:
+        v = _parse_money_str(clean_txt, default_wan=default_wan, require_unit=False)
+        if v is not None and v >= Decimal('50'):
+            found.append(v)
+
+    return found
+
+
+def _extract_all_upper_values_from_cell(cell_text: str) -> list[str]:
+    """从单个已剥离限价语境的单元格中提取所有大写金额字符串（去重保序）。"""
+    clean_txt = _strip_non_bid_clauses(cell_text)
+    if not clean_txt:
+        return []
+    uppers: list[str] = []
+    for m_u in _UPPER_AMOUNT_RE.finditer(clean_txt):
+        u_str = m_u.group(2).strip()
+        if u_str and u_str not in uppers:
+            uppers.append(u_str)
+    return uppers
+
+
+def _is_bid_total_label_cell(label_text: str) -> tuple[bool, bool]:
+    """判断单元格是否为「投标总报价」标签格。
+
+    支持标签格自身带括号限价提醒（如 "投标总报价（不得高于最高限价）"），
+    但排除标签主干本身就是限价/控制价/保证金的单元格（如 "最高投标限价"、"投标报价控制价"）。
+
+    Returns:
+        (is_bid_label, unit_is_wan)
+    """
+    clean_lbl = re.sub(r'\s+', '', label_text or '')
+    if not clean_lbl or len(clean_lbl) > 42:
+        return False, False
+
+    # 剥离括号注记与冒号后随内容，只看标签主干
+    core_no_paren = re.sub(r'[（(][^）)]*[）)]', '', clean_lbl)
+    head_core = re.split(r'[：:]', core_no_paren, maxsplit=1)[0].strip()
+    if not head_core or len(head_core) > 20:
+        return False, False
+
+    if not any(k in head_core for k in _BID_TOTAL_LABEL_KEYS):
+        return False, False
+
+    # 若主干自身含限价/预算/控制价/保证金/不得超过，说明是限价标签而非投标报价标签
+    if _has_non_bid_context(head_core):
+        return False, False
+
+    # 判断单位"万元"是否修饰标签主干（排除括号内"最高限价39万元"里的万元）
+    parens = re.findall(r'[（(]([^）)]*)[）)]', clean_lbl)
+    unit_is_wan = ('万元' in head_core) or any(
+        '万元' in p and not _has_non_bid_context(p) for p in parens
+    )
+    return True, unit_is_wan
+
+
+def _is_tender_requirement_column_header(header_text: str) -> bool:
+    """判断表头列是否为"招标文件要求 / 最高限价"列（而非我方投标响应列）。"""
+    h = re.sub(r'\s+', '', header_text or '')
+    if not h:
+        return False
+    if any(k in h for k in ('招标文件要求', '招标要求', '最高限价', '控制价', '采购预算', '预算金额')):
+        if not any(k in h for k in ('我方', '响应', '承诺', '投标人填写')):
+            return True
+    return False
+
+
+def _classify_table_priority(deduped_rows: list[list[str]], prev_heading: str = '') -> str:
+    """E7 §3.3：判定表格属于独立《开标一览表》主源 ('primary') 还是自洽表/应答表 ('secondary')。
+
+    判定准则：
+    - 若表格首行表头含"招标文件要求/承诺要点/响应承诺/偏离/自洽/核验"等比对列 -> 'secondary'；
+    - 若前序段落标题或表内首行含"开标一览/报价一览/唱标一览" -> 'primary'；
+    - 若表头同时含"项目名称/标段"与"投标总价/投标报价"列（标准横向开标一览表） -> 'primary'；
+    - 若为双列键值表且首行含"项目名称"、后续行含"投标总报价"（标准纵向开标一览表） -> 'primary'；
+    - 其余含"投标总报价"行的表格归为 'secondary'。
+    """
+    if not deduped_rows:
+        return 'secondary'
+
+    first_row = [re.sub(r'\s+', '', c) for c in deduped_rows[0]]
+    first_row_joined = ' '.join(first_row)
+    top_two_joined = ' '.join(' '.join(r) for r in deduped_rows[:2])
+
+    # 凡表头含"招标文件要求/承诺要点/响应承诺/偏离/核验"特征，必为自洽表/应答表
+    if any(k in first_row_joined for k in _SELF_CHECK_HEADER_KEYS):
+        return 'secondary'
+
+    if any(k in prev_heading for k in ('开标一览', '报价一览', '唱标一览')):
+        return 'primary'
+    if any(k in top_two_joined for k in ('开标一览', '报价一览', '唱标一览')):
+        return 'primary'
+
+    # 横向标准开标一览表：表头同时含项目名称与投标报价列
+    has_proj_col = any(any(pk in c for pk in ('项目名称', '项目编号', '品目名称', '标段', '包号')) for c in first_row)
+    has_bid_col = any(
+        any(bk in c for bk in _BID_TOTAL_LABEL_KEYS) and not _has_non_bid_context(c)
+        for c in first_row
+    )
+    if has_proj_col and has_bid_col and len(first_row) >= 2:
+        return 'primary'
+
+    # 纵向标准两列开标一览表：第 1 行是项目名称，后续行是投标总报价（小写/大写）
+    if len(first_row) == 2 and any('项目名称' in c for c in first_row):
+        all_labels = [re.sub(r'\s+', '', r[0]) for r in deduped_rows if r]
+        if any(any(bk in lbl for bk in _BID_TOTAL_LABEL_KEYS) for lbl in all_labels):
+            return 'primary'
+
+    return 'secondary'
+
+
+def _iter_doc_tables_with_prev_heading(doc) -> list[tuple[object, str]]:
+    """按文档块顺序遍历 doc.tables，并附带每个表格紧邻的上方非空段落文本（用于识别"一、开标一览表"标题）。"""
+    from docx.oxml.ns import qn
+
+    tbl_by_el = {t._tbl: t for t in doc.tables}
+    out: list[tuple[object, str]] = []
+    last_para_txt = ''
+
+    body = getattr(doc.element, 'body', None)
+    if body is not None:
+        for child in body.iterchildren():
+            if child.tag == qn('w:p'):
+                txt = ''.join(t.text or '' for t in child.iter(qn('w:t'))).strip()
+                if txt:
+                    last_para_txt = txt
+            elif child.tag == qn('w:tbl') and child in tbl_by_el:
+                out.append((tbl_by_el[child], last_para_txt))
+
+    if len(out) != len(doc.tables):
+        return [(t, '') for t in doc.tables]
+    return out
+
+
 def _extract_from_docx_tables(doc) -> dict:
-    """遍历 python-docx 的所有表格，提取开标一览表、分项报价明细表及跨格/分包预算限价。"""
+    """遍历 python-docx 的所有表格，提取开标一览表、分项报价明细表、跨格预算限价及多源分级核验结果。"""
     items = []
     table_total = None
-    bid_total = None
-    bid_total_upper = None
     high_cap_in_table = None
     budget_cap_in_table = None
     has_price_table_skeleton = False
 
-    for table in doc.tables:
+    # E7 分级收集容器：primary 存独立《开标一览表》候选，secondary 存自洽表/应答表候选
+    primary_bid_totals: list[str] = []
+    primary_bid_uppers: list[str] = []
+    secondary_bid_totals: list[str] = []
+    secondary_bid_uppers: list[str] = []
+    item_table_uppers: list[str] = []
+    warnings: list[dict] = []
+    bid_total_ambiguous = False
+
+    for table, prev_heading in _iter_doc_tables_with_prev_heading(doc):
         rows = table.rows
         if not rows:
             continue
@@ -410,8 +658,8 @@ def _extract_from_docx_tables(doc) -> dict:
                 lbl_is_wan = ('万元' in clean_lbl) or table_is_wan
                 lbl_has_unit = ('万元' in clean_lbl) or ('元' in clean_lbl)
 
-                # (a) 先看标签格自身是否已包含金额（如 "采购预算：180万元"）
-                cand_self = _parse_money_str(label, default_wan=lbl_is_wan, require_unit=True)
+                # (a) 先看标签格自身是否已包含金额（如 "采购预算：180万元" 或 "不得高于最高限价390,000.00元"）
+                cand_self = _parse_cap_money_str(label, default_wan=lbl_is_wan, require_unit=True)
                 if cand_self is not None and cand_self >= Decimal('100'):
                     if is_high_key and high_cap_in_table is None:
                         high_cap_in_table = _fmt_yuan(cand_self)
@@ -419,7 +667,7 @@ def _extract_from_docx_tables(doc) -> dict:
                         budget_cap_in_table = _fmt_yuan(cand_self)
                     continue
 
-                # (b) 横向跨格查找：向后扫描同行 i+1 .. i+3（容忍中间隔着空串、"人民币"或"采购包1"格）
+                # (b) 横向跨格查找：向后扫描同行 i+1 .. i+3
                 matched_horiz = None
                 for step in range(1, 4):
                     if c_idx + step >= len(uniq_cells):
@@ -436,7 +684,7 @@ def _extract_from_docx_tables(doc) -> dict:
                         budget_cap_in_table = _fmt_yuan(matched_horiz)
                     continue
 
-                # (c) 纵向跨行查找：当前格是表头列（如第 r_idx 行第 c_idx 列为 "预算金额（万元）"），数值在下一行同列
+                # (c) 纵向跨行查找：当前格是表头列，数值在下一行同列
                 if r_idx + 1 < len(deduped_rows):
                     next_row = deduped_rows[r_idx + 1]
                     if c_idx < len(next_row):
@@ -482,10 +730,10 @@ def _extract_from_docx_tables(doc) -> dict:
                 unique_tcs = {c._tc for c in cells}
                 row_full_text = ' '.join(dict.fromkeys(c.text.strip() for c in cells if c.text.strip()))
 
-                if not any(k in row_full_text for k in _NON_BID_UPPER_KEYS):
+                if not _has_non_bid_context(row_full_text):
                     m_up = _UPPER_AMOUNT_RE.search(row_full_text)
-                    if m_up and not bid_total_upper:
-                        bid_total_upper = m_up.group(2).strip()
+                    if m_up and not item_table_uppers:
+                        item_table_uppers.append(m_up.group(2).strip())
 
                 first_non_empty = next((c.text.strip() for c in cells if c.text.strip()), '')
                 name_cell_txt = cells[name_i].text.strip()
@@ -523,7 +771,6 @@ def _extract_from_docx_tables(doc) -> dict:
                 if total_val is None and unit_val is None:
                     continue
                 if total_val is not None and unit_val is not None and qty_val is not None:
-                    # E3 修复 1：在 docx 表格路径同样拦截列头黑名单、省略号与 1/2/3 行号序列
                     if _is_bogus_price_row(
                         item_name=item_name,
                         qty_raw=raw_qty_txt,
@@ -542,65 +789,221 @@ def _extract_from_docx_tables(doc) -> dict:
                     })
             continue
 
-        # ── 2. 尝试作为《开标一览表》解析投标报价 ──
+        # ── 2. 作为《开标一览表》或《商务承诺自洽表/应答表》解析投标总报价 ──
+        tbl_priority = _classify_table_priority(deduped_rows, prev_heading=prev_heading)
+        target_totals = primary_bid_totals if tbl_priority == 'primary' else secondary_bid_totals
+        target_uppers = primary_bid_uppers if tbl_priority == 'primary' else secondary_bid_uppers
+
+        # 2a. 横向表头式《开标一览表》（第 0 行是列头，第 1 行是对应数值）
         header_cells = [re.sub(r'\s+', '', c.text) for c in rows[0].cells]
         bid_col = None
         upper_col = None
-        for idx, h in enumerate(header_cells):
-            if len(h) <= 20 and any(k in h for k in ('投标总价', '投标报价', '投标总报价', '总报价')):
-                if '大写' in h:
-                    upper_col = idx
-                elif bid_col is None:
-                    bid_col = idx
-                else:
-                    upper_col = idx
+        if tbl_priority == 'primary' and len(header_cells) >= 2:
+            for idx, h in enumerate(header_cells):
+                is_lbl, _ = _is_bid_total_label_cell(h)
+                if is_lbl:
+                    if '大写' in h and '小写' not in h:
+                        upper_col = idx
+                    elif bid_col is None:
+                        bid_col = idx
+                    else:
+                        upper_col = idx
+
         if bid_col is not None and len(rows) >= 2:
             has_price_table_skeleton = True
             row1 = rows[1].cells
             if bid_col < len(row1):
                 cell_txt = row1[bid_col].text.strip()
-                v = _parse_money_str(cell_txt, default_wan=('万元' in header_cells[bid_col]))
-                # 防呆：一览表空白模板若填入行号/列号 "1"、"2"、"3"（< 50 元且无货币符号），不作为总报价
-                if v is not None and v >= Decimal('50') and bid_total is None:
-                    bid_total = _fmt_yuan(v)
-                m_u = _UPPER_AMOUNT_RE.search(cell_txt)
-                if m_u and not bid_total_upper:
-                    bid_total_upper = m_u.group(2).strip()
-            if upper_col is not None and upper_col < len(row1) and not bid_total_upper:
-                m_u = _UPPER_AMOUNT_RE.search(row1[upper_col].text)
-                if m_u:
-                    bid_total_upper = m_u.group(2).strip()
+                col_is_wan = ('万元' in header_cells[bid_col])
+                vals = _extract_all_money_values_from_cell(
+                    cell_txt, default_wan=col_is_wan, require_unit=False
+                )
+                if len(vals) == 1:
+                    target_totals.append(_fmt_yuan(vals[0]))
+                elif len(vals) >= 2:
+                    bid_total_ambiguous = True
+                    warnings.append({
+                        'code': 'AMBIGUOUS_BID_TOTAL',
+                        'severity': 'warning',
+                        'message': (
+                            f"开标一览表总价单元格存在多个不同金额（{'、'.join(_fmt_yuan(v) + '元' for v in vals)}），"
+                            f"无法自动消歧，已跳过总价自动赋值，请人工复核"
+                        ),
+                    })
+                ups = _extract_all_upper_values_from_cell(cell_txt)
+                if len(ups) == 1:
+                    target_uppers.append(ups[0])
+            if upper_col is not None and upper_col < len(row1):
+                ups = _extract_all_upper_values_from_cell(row1[upper_col].text)
+                if len(ups) == 1:
+                    target_uppers.append(ups[0])
 
-        for uniq_cells in deduped_rows:
+        # 2b. 逐行扫描标签格（"投标总报价" / "大写" 等行）
+        table_header_row = deduped_rows[0] if len(deduped_rows) >= 2 else []
+
+        for r_idx, uniq_cells in enumerate(deduped_rows):
             row_joined = ' '.join(uniq_cells)
             if any(k in row_joined for k in ('开标一览表', '报价一览表', '投标总价', '投标总报价')):
                 has_price_table_skeleton = True
 
+            # 若第 0 行已被 2a 作为横向列头消费过，跳过第 0 行
+            if r_idx == 0 and bid_col is not None:
+                continue
+
             for i, label in enumerate(uniq_cells):
                 clean_lbl = re.sub(r'\s+', '', label)
-                if len(clean_lbl) > 30:
+                if len(clean_lbl) > 42:
                     continue
-                if any(k in clean_lbl for k in ('投标总价', '投标总报价', '报价总计', '总报价', '投标报价')):
-                    if any(k in clean_lbl for k in _NON_BID_UPPER_KEYS):
-                        continue
+
+                is_bid_lbl, lbl_is_wan = _is_bid_total_label_cell(label)
+                if is_bid_lbl:
                     if i + 1 >= len(uniq_cells) and '：' not in clean_lbl and ':' not in clean_lbl:
                         continue
-                    val_part = ' '.join(uniq_cells[i + 1:]) if i + 1 < len(uniq_cells) else label
-                    m_u = _UPPER_AMOUNT_RE.search(val_part)
-                    if m_u and not bid_total_upper:
-                        bid_total_upper = m_u.group(2).strip()
-                    if '大写' not in clean_lbl or '小写' in val_part:
-                        v_bid = _parse_money_str(val_part,
-                                                 default_wan=('万元' in clean_lbl),
-                                                 require_unit=True)
-                        if v_bid is not None and v_bid > 0 and bid_total is None:
-                            bid_total = _fmt_yuan(v_bid)
 
-                elif '大写' in clean_lbl and not any(k in clean_lbl for k in _NON_BID_UPPER_KEYS) and not bid_total_upper:
-                    val_part = uniq_cells[i + 1] if i + 1 < len(uniq_cells) else label
-                    m_u = _UPPER_AMOUNT_RE.search(val_part)
-                    if m_u:
-                        bid_total_upper = m_u.group(2).strip()
+                    # 组装候选值格列表（按格独立检查，剔除"招标文件要求"列与含限价语境词的单元格）
+                    candidate_cells: list[str] = []
+                    if i + 1 < len(uniq_cells):
+                        for j in range(i + 1, len(uniq_cells)):
+                            if j < len(table_header_row) and _is_tender_requirement_column_header(table_header_row[j]):
+                                continue
+                            stripped_cell = _strip_non_bid_clauses(uniq_cells[j])
+                            if stripped_cell:
+                                candidate_cells.append(stripped_cell)
+                    else:
+                        # 单格冒号形态（如 "投标总报价：382,000.00元"）
+                        # 若标签格自身带限价语境词（如 "投标总报价（不得高于最高限价）：390,000.00元"），严禁把后面的数字当报价
+                        if _has_non_bid_context(label):
+                            continue
+                        after_colon = re.split(r'[：:]', label, maxsplit=1)[1].strip()
+                        stripped_after = _strip_non_bid_clauses(after_colon)
+                        if stripped_after:
+                            candidate_cells.append(stripped_after)
+
+                    if not candidate_cells:
+                        continue
+
+                    # 提取候选值格中的所有有效金额与大写金额
+                    core_lbl_no_paren = re.sub(r'[（(][^）)]*[）)]', '', clean_lbl)
+                    allow_unitless = (
+                        len(candidate_cells) == 1
+                        and ('元' in core_lbl_no_paren or '万元' in core_lbl_no_paren or '小写' in clean_lbl)
+                        and not _has_non_bid_context(label)
+                    )
+
+                    row_money_vals: list[Decimal] = []
+                    row_upper_vals: list[str] = []
+                    for c_txt in candidate_cells:
+                        for v in _extract_all_money_values_from_cell(
+                            c_txt, default_wan=lbl_is_wan, require_unit=(not allow_unitless)
+                        ):
+                            if v not in row_money_vals:
+                                row_money_vals.append(v)
+                        for u in _extract_all_upper_values_from_cell(c_txt):
+                            if u not in row_upper_vals:
+                                row_upper_vals.append(u)
+
+                    # E7 §3.2 同行多金额歧义护栏：>=2 个不同金额且无法靠语境词消歧时，绝不猜，置 None + warning
+                    if '大写' not in core_lbl_no_paren or '小写' in ' '.join(candidate_cells):
+                        if len(row_money_vals) >= 2:
+                            bid_total_ambiguous = True
+                            warnings.append({
+                                'code': 'AMBIGUOUS_BID_TOTAL',
+                                'severity': 'warning',
+                                'message': (
+                                    f"投标总报价同行存在多个不同金额（{'、'.join(_fmt_yuan(v) + '元' for v in row_money_vals)}）"
+                                    f"且缺少限价/报价语境词消歧，已跳过总价自动赋值，请人工复核"
+                                ),
+                            })
+                        elif len(row_money_vals) == 1:
+                            fmt_v = _fmt_yuan(row_money_vals[0])
+                            if fmt_v not in target_totals:
+                                target_totals.append(fmt_v)
+
+                    # E7 §3.4 大写分支同步应用排除与多值歧义护栏
+                    if len(row_upper_vals) >= 2:
+                        warnings.append({
+                            'code': 'AMBIGUOUS_BID_UPPER',
+                            'severity': 'warning',
+                            'message': (
+                                f"投标总报价同行存在多个不同大写金额（{'、'.join(row_upper_vals)}），"
+                                f"已跳过大写自动赋值，请人工复核"
+                            ),
+                        })
+                    elif len(row_upper_vals) == 1 and len(row_money_vals) <= 1:
+                        if row_upper_vals[0] not in target_uppers:
+                            target_uppers.append(row_upper_vals[0])
+
+                elif '大写' in clean_lbl and not _has_non_bid_context(clean_lbl):
+                    cand_up_cells: list[str] = []
+                    if i + 1 < len(uniq_cells):
+                        for j in range(i + 1, len(uniq_cells)):
+                            if j < len(table_header_row) and _is_tender_requirement_column_header(table_header_row[j]):
+                                continue
+                            sc = _strip_non_bid_clauses(uniq_cells[j])
+                            if sc:
+                                cand_up_cells.append(sc)
+                    elif '：' in clean_lbl or ':' in clean_lbl:
+                        sc = _strip_non_bid_clauses(re.split(r'[：:]', label, maxsplit=1)[1])
+                        if sc:
+                            cand_up_cells.append(sc)
+
+                    up_list: list[str] = []
+                    for c_txt in cand_up_cells:
+                        for u in _extract_all_upper_values_from_cell(c_txt):
+                            if u not in up_list:
+                                up_list.append(u)
+                    if len(up_list) >= 2:
+                        warnings.append({
+                            'code': 'AMBIGUOUS_BID_UPPER',
+                            'severity': 'warning',
+                            'message': (
+                                f"大写金额行存在多个不同大写值（{'、'.join(up_list)}），"
+                                f"已跳过大写自动赋值，请人工复核"
+                            ),
+                        })
+                    elif len(up_list) == 1:
+                        if up_list[0] not in target_uppers:
+                            target_uppers.append(up_list[0])
+
+    # ── 3. E7 §3.3 汇总 primary（独立《开标一览表》）与 secondary（自洽表/应答表）结果 ──
+    bid_total = None
+    bid_total_upper = None
+
+    if primary_bid_totals:
+        bid_total = primary_bid_totals[0]
+        # 自洽表/应答表仅作交叉核验源：若与开标一览表不一致，产出 warning 级 finding（非 error）
+        for sec_val in secondary_bid_totals:
+            if sec_val != bid_total:
+                warnings.append({
+                    'code': 'CROSS_TABLE_BID_WARNING',
+                    'severity': 'warning',
+                    'message': (
+                        f"商务自洽表/应答表中的投标总报价（{sec_val}元）"
+                        f"与开标一览表总报价（{bid_total}元）不一致，已以开标一览表为准，请人工复核"
+                    ),
+                })
+    elif not bid_total_ambiguous and secondary_bid_totals:
+        if len(secondary_bid_totals) == 1:
+            bid_total = secondary_bid_totals[0]
+        else:
+            # 多个自洽表给出不同报价且无主开标一览表 -> 宁缺毋滥置 None + warning
+            bid_total = None
+            bid_total_ambiguous = True
+            warnings.append({
+                'code': 'AMBIGUOUS_BID_TOTAL',
+                'severity': 'warning',
+                'message': (
+                    f"多处应答表出现不同投标总报价（{'、'.join(secondary_bid_totals)}）"
+                    f"且未定位到独立开标一览表，已跳过总价自动赋值，请人工复核"
+                ),
+            })
+
+    if primary_bid_uppers:
+        bid_total_upper = primary_bid_uppers[0]
+    elif not bid_total_ambiguous and secondary_bid_uppers:
+        bid_total_upper = secondary_bid_uppers[0]
+    elif not bid_total_ambiguous and item_table_uppers:
+        bid_total_upper = item_table_uppers[0]
 
     price_cap_in_table = high_cap_in_table if high_cap_in_table is not None else budget_cap_in_table
 
@@ -611,6 +1014,8 @@ def _extract_from_docx_tables(doc) -> dict:
         'bid_total_upper': bid_total_upper,
         'price_cap': price_cap_in_table,
         'has_price_table_skeleton': has_price_table_skeleton,
+        'bid_total_ambiguous': bid_total_ambiguous,
+        'warnings': warnings,
     }
 
 
@@ -621,26 +1026,51 @@ def extract_price_from_text(text: str) -> dict:
     bid_total_upper = None
     table_total = None
     items = []
+    warnings: list[dict] = []
 
     if text:
-        for m_bid in _BID_TOTAL_LINE_RE.finditer(text):
-            line_ctx = m_bid.group(0)
-            if any(k in line_ctx for k in _INSTRUCTION_NOISE_KEYS):
+        for line in text.splitlines():
+            if not any(k in line for k in _BID_TOTAL_LABEL_KEYS):
                 continue
+            is_lbl, _ = _is_bid_total_label_cell(line)
+            # 若整行含限价语境词，先剥离限价分句再匹配
+            clean_line = _strip_non_bid_clauses(line) if _has_non_bid_context(line) else line
+            if not clean_line:
+                continue
+            m_bid = _BID_TOTAL_LINE_RE.search(clean_line)
+            if not m_bid:
+                continue
+            # 检查同一行冒号后是否出现 >=2 个不同金额
+            after_colon = re.split(r'[：:]', clean_line, maxsplit=1)[-1]
+            all_vals = _extract_all_money_values_from_cell(after_colon, require_unit=True)
+            if len(all_vals) >= 2:
+                warnings.append({
+                    'code': 'AMBIGUOUS_BID_TOTAL',
+                    'severity': 'warning',
+                    'message': (
+                        f"文本行存在多个不同报价金额（{'、'.join(_fmt_yuan(v) + '元' for v in all_vals)}），"
+                        f"已跳过总价自动赋值，请人工复核"
+                    ),
+                })
+                bid_total = None
+                break
             num_s, unit = m_bid.group(1), (m_bid.group(2) or '元')
             v = _parse_money_str(num_s + unit)
-            if v is not None and v > 0:
+            if v is not None and v > 0 and is_lbl:
                 bid_total = _fmt_yuan(v)
                 break
 
-        # 逐行扫描投标大写金额（排除最高限价/预算/保证金所在行的大写金额）
+        # 逐行扫描投标大写金额（排除最高限价/预算/保证金所在行或分句的大写金额）
         for line in text.splitlines():
-            if any(k in line for k in _NON_BID_UPPER_KEYS):
+            clean_line = _strip_non_bid_clauses(line)
+            if not clean_line:
                 continue
-            if any(k in line for k in ('投标', '报价', '总价', '合计', '大写')):
-                m_up = _UPPER_AMOUNT_RE.search(line)
-                if m_up:
-                    bid_total_upper = m_up.group(2).strip()
+            if any(k in clean_line for k in ('投标', '报价', '总价', '合计', '大写')):
+                ups = _extract_all_upper_values_from_cell(clean_line)
+                if len(ups) == 1:
+                    bid_total_upper = ups[0]
+                    break
+                if len(ups) >= 2:
                     break
 
         line_item_re = re.compile(
@@ -698,6 +1128,7 @@ def extract_price_from_text(text: str) -> dict:
         'bid_total': bid_total,
         'bid_total_upper': bid_total_upper,
         'price_cap': price_cap,
+        'warnings': warnings,
     }
 
 
@@ -716,6 +1147,7 @@ def extract_price_data(file_path: str | Path, tender_path: str | Path | None = N
         'bid_total_upper': text_res['bid_total_upper'],
         'price_cap': text_res['price_cap'],
         'has_price_table_skeleton': False,
+        'warnings': list(text_res.get('warnings') or []),
     }
 
     if path.suffix.lower() == '.docx':
@@ -723,16 +1155,25 @@ def extract_price_data(file_path: str | Path, tender_path: str | Path | None = N
         doc = Document(str(path))
         tbl_res = _extract_from_docx_tables(doc)
         res['has_price_table_skeleton'] = tbl_res['has_price_table_skeleton']
+        if tbl_res.get('warnings'):
+            res['warnings'] = list(tbl_res['warnings'])
         if tbl_res['items']:
             res['items'] = tbl_res['items']
         elif tbl_res['has_price_table_skeleton']:
             res['items'] = []
         if tbl_res['table_total'] is not None:
             res['table_total'] = tbl_res['table_total']
-        if tbl_res['bid_total'] is not None:
-            res['bid_total'] = tbl_res['bid_total']
-        if tbl_res['bid_total_upper'] is not None:
-            res['bid_total_upper'] = tbl_res['bid_total_upper']
+
+        # E7：若表格检出多金额歧义，强制置 bid_total=None，严禁被展平文本误回填
+        if tbl_res.get('bid_total_ambiguous'):
+            res['bid_total'] = None
+            res['bid_total_upper'] = None
+        else:
+            if tbl_res['bid_total'] is not None:
+                res['bid_total'] = tbl_res['bid_total']
+            if tbl_res['bid_total_upper'] is not None:
+                res['bid_total_upper'] = tbl_res['bid_total_upper']
+
         if res['price_cap'] is None and tbl_res['price_cap'] is not None:
             res['price_cap'] = tbl_res['price_cap']
 
@@ -760,10 +1201,11 @@ def extract_price_data(file_path: str | Path, tender_path: str | Path | None = N
 
 
 def run_price_check(bid_path: str | Path, tender_path: str | Path | None = None) -> dict:
-    """端到端辅助入口：提取报价结构 -> 若 status=='OK' 则送入 PriceSandbox 核验。"""
+    """端到端辅助入口：提取报价结构 -> 若 status=='OK' 则送入 PriceSandbox 核验，并合并提取层 warning。"""
     extracted = extract_price_data(bid_path, tender_path=tender_path)
+    extractor_warnings = list(extracted.get('warnings') or [])
     if extracted['status'] != 'OK':
-        extracted['findings'] = []
+        extracted['findings'] = extractor_warnings
         return extracted
     sandbox = PriceSandbox(
         items=extracted['items'],
@@ -772,7 +1214,7 @@ def run_price_check(bid_path: str | Path, tender_path: str | Path | None = None)
         bid_total_upper=extracted['bid_total_upper'],
         price_cap=extracted['price_cap'],
     )
-    extracted['findings'] = sandbox.run()
+    extracted['findings'] = extractor_warnings + sandbox.run()
     return extracted
 
 
