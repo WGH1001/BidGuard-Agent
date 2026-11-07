@@ -18,3 +18,4 @@ data/*.db-wal
 派发归档/
 .slidep/
 *.media.ocr.json
+data/corpus/sim_bids/
