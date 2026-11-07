@@ -1,31 +1,16 @@
 # -*- coding: utf-8 -*-
-"""T17 · Redline 双引擎：Word 原生 OOXML 批注气泡 + PDF 高亮批注副本。
+"""T17 / E5 · Redline 双引擎：Word 原生 OOXML 批注气泡 + PDF 多级容错定位、总览页与点击跳转高亮副本。
 
-模块定位（V2.0 深度文档工程层 ②，HANDOVER_V2.md 第二节与 §4.4）：
-    法务交付"最后一公里"——不再让法务对照独立报告逐条改合同，而是直接在
-    用户上传的原版合同上插入 AI 审查批注：Word 输出原生右侧修订批注气泡
-    （Comments），PDF 输出带彩色高亮与悬浮弹窗批注的副本。
-
-技术风险声明（HANDOVER_V1_ARCHIVE.md 十一·附 2，接手必读）：
-    ★ python-docx 无原生批注 API——必须手搓 OOXML：
-      ① 新增 word/comments.xml（w:comment 元素集）；
-      ② [Content_Types].xml 注册 comments 部件内容类型；
-      ③ word/_rels/document.xml.rels 添加关系（.../comments）；
-      ④ document.xml 中在目标文本前后插入
-         w:commentRangeStart / w:commentRangeEnd / w:r>w:commentReference。
-    ★ Finding.pos 是"提取纯文本"的偏移量、不是 docx run 的偏移——定位必须
-      走 quote 文本匹配（段落 text 级归一化匹配 → run 级偏移映射），
-      归一化复用 core.quote_verifier.normalize_zh。
-    本任务是全路线图唯一高风险项，独立按天评估，测试要求最严。
-
-设计红线：
-    ★ 绝不丢失：任何一条 Finding 必须产出批注——quote 匹配不到段落/
-      全篇缺失类风险，一律挂载到文档首段（标题处）作为全局批注。
-    ★ 绝不篡改原文件：源文件只读；产物经 bytes 返回（指定 out 路径时
-      额外落盘）；源文件字节级不变。
-    ★ 依赖白名单：python-docx（含其传递依赖 lxml）+ PyMuPDF(fitz) +
-      标准库 zipfile——三者均已在 requirements.txt，禁新增。
-    ★ 库模块只抛不打印；批注后文档必须仍可被 python-docx / fitz 正常打开。
+模块定位（V2.0 深度文档工程层 ② & E5 标红定位增强）：
+    1. Word (.docx)：输出原生右侧修订批注气泡（Comments）；
+    2. PDF (.pdf)：
+       - _search_quote_in_pdf 五级降级定位链（L1 原串 -> L2 首尾20字分片 -> L3 标点归一特征片段
+         -> L4 rawdict 逐字符归一化滑窗跨行匹配 -> L5 60%与8字置信护栏，宁缺毋滥）；
+       - _build_overview_page：在 PDF 首页前插入 A4 竖版「标红批注总览」页（含编号 N01/N02、
+         严重级色块、规则类目、风险摘要、定位状态）；
+       - 已定位风险：在总览页对应行与顶部快捷定位区注入 PDF 内部跳转链接（LINK_GOTO，点击直接跳至
+         正文标红页与坐标）及悬浮风险详情提示，并在正文原位逐 Rect 高亮；
+       - 未定位风险：首页顶部图标保留，批注正文前缀升级为 `[全篇·总览 Nxx]` 与总览页编号一一对应。
 """
 import copy
 import datetime
@@ -38,11 +23,11 @@ import zipfile
 import docx
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-import pymupdf
 import lxml.etree as ET
+import pymupdf
 
-from core.quote_verifier import normalize_zh
 from core.parser import OCR_MIN_CHARS, get_pdf_ocr_data
+from core.quote_verifier import normalize_zh
 
 # severity → PDF 高亮颜色（RGB 0~1 浮点，Word 侧颜色仅用于说明文字不设底色）
 _SEVERITY_COLORS = {
@@ -57,16 +42,37 @@ _SEVERITY_ZH = {
     'low': '低',
 }
 
+_SEVERITY_OVERVIEW_LABEL = {
+    'high': '★高',
+    'medium': '▲中',
+    'low': '低',
+}
+
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-_CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+_CT_NS = "http://schemas.openxmlformats.org/package/content-types"
+_CT_NS_STD = "http://schemas.openxmlformats.org/package/2006/content-types"
 _REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _XML_NS = "http://www.w3.org/XML/1998/namespace"
 _COMMENTS_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
 _COMMENTS_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
 
+# L3 标点切分与特征词正则
+_L3_PUNCT_SPLIT_RE = re.compile(r'[，。：；！？、“”‘’（）《》－—·、【】［］,.:;!?()"\'\[\]\s\u3000]+')
+_L3_FEATURE_RE = re.compile(r'[0-9０-９.%‰亿万元角分条章款项第★▲]')
 
-def _format_comment_text(finding, is_global: bool = False) -> str:
-    """按写死的三段式规格格式化批注正文；全局/未命中兜底时前置 '[全篇]' 标记。"""
+# L5 置信护栏常量：L4 命中的归一化长度 >= quote 归一化长度的 60% 且 >= 8 字符
+_L5_MIN_RATIO = 0.60
+_L5_MIN_CHARS = 8
+
+
+def _format_comment_text(
+    finding,
+    is_global: bool = False,
+    overview_no: str = None,
+) -> str:
+    """按写死的三段式规格格式化批注正文；
+    全局/未命中兜底时：若传入 overview_no（如 'N01'）则前置 '[全篇·总览 N01]'，否则前置 '[全篇]'。
+    """
     sev_raw = getattr(finding, 'severity', 'low') or 'low'
     sev_zh = _SEVERITY_ZH.get(sev_raw, str(sev_raw))
     rule_name = getattr(finding, 'rule_name', '') or ''
@@ -75,15 +81,19 @@ def _format_comment_text(finding, is_global: bool = False) -> str:
     legal_basis = getattr(finding, 'legal_basis', '') or ''
     body = f"【{sev_zh}风险 · {rule_name}】{message}\n修改建议：{suggestion}\n依据：{legal_basis}"
     if is_global:
+        if overview_no:
+            return f"[全篇·总览 {overview_no}]{body}"
         return f"[全篇]{body}"
     return body
 
 
 def _is_global_finding(finding) -> bool:
-    """判断是否为全篇缺失类或无 quote 的全局风险。"""
+    """判断是否为显式全篇缺失类或无 quote 的全局风险。
+    注意：当 quote 非空且 clause_no 不为 '全篇' 时（即使 clause_no 为空串），必须尝试在原文中定位标红。
+    """
     clause_no = (getattr(finding, 'clause_no', None) or '').strip()
     quote = (getattr(finding, 'quote', None) or '').strip()
-    if not clause_no or clause_no == '全篇' or not quote:
+    if not quote or clause_no == '全篇':
         return True
     return False
 
@@ -115,11 +125,7 @@ def _set_run_text(r_el, new_text: str):
 
 
 def _make_comment_markers(comment_id: int):
-    """构造 OOXML 批注起止锚点与引用节点三件套：
-    <w:commentRangeStart w:id="N"/>
-    <w:commentRangeEnd w:id="N"/>
-    <w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="N"/></w:r>
-    """
+    """构造 OOXML 批注起止锚点与引用节点三件套。"""
     start_el = OxmlElement('w:commentRangeStart')
     start_el.set(qn('w:id'), str(comment_id))
 
@@ -157,7 +163,6 @@ def _try_attach_quote_in_paragraph(p, norm_quote: str, comment_id: int,
     if not norm_quote:
         return False
 
-    # 仅收集实际携带 <w:t> 文本的 <w:r> 节点（跳过此前已插入的 CommentReference 空文本 run）
     text_runs = []
     run_texts = []
     for r in p.runs:
@@ -170,9 +175,9 @@ def _try_attach_quote_in_paragraph(p, norm_quote: str, comment_id: int,
         return False
 
     norm_chars = []
-    pos_map = []  # norm_para 下标 -> (run_idx, char_idx_in_run)
+    pos_map = []
     for r_idx, raw_t in enumerate(run_texts):
-        for c_idx, ch in enumerate(raw_t):
+        for c_idx, ch in enumerate(run_texts[r_idx]):
             n_ch = normalize_zh(ch)
             for sub_ch in n_ch:
                 norm_chars.append(sub_ch)
@@ -198,7 +203,6 @@ def _try_attach_quote_in_paragraph(p, norm_quote: str, comment_id: int,
     start_run_idx, start_char_idx = pos_map[match_idx]
     end_run_idx, end_char_idx = pos_map[match_idx + match_len - 1]
 
-    # 1. 先切分末尾 Run（若匹配终点不在该 Run 末尾字符），避免影响前序索引
     end_r_el = text_runs[end_run_idx]
     end_full_text = run_texts[end_run_idx]
     if end_char_idx < len(end_full_text) - 1:
@@ -209,7 +213,6 @@ def _try_attach_quote_in_paragraph(p, norm_quote: str, comment_id: int,
         right_r_el = _clone_run_with_text(end_r_el, right_text)
         end_r_el.addnext(right_r_el)
 
-    # 2. 再切分起始 Run（若匹配起点不在该 Run 首字符）
     start_r_el = text_runs[start_run_idx]
     start_full_text = run_texts[start_run_idx]
     if start_char_idx > 0:
@@ -220,7 +223,6 @@ def _try_attach_quote_in_paragraph(p, norm_quote: str, comment_id: int,
         _set_run_text(start_r_el, target_text)
         run_texts[start_run_idx] = target_text
 
-    # 3. 在首 Run 前插 commentRangeStart，末 Run 后插 commentRangeEnd 与 commentReference
     start_el, end_el, ref_run = _make_comment_markers(comment_id)
     start_r_el.addprevious(start_el)
     end_r_el.addnext(end_el)
@@ -273,10 +275,10 @@ def _ensure_content_types_xml(ct_bytes: bytes) -> bytes:
     """在 [Content_Types].xml 中注册 /word/comments.xml 内容类型。"""
     root = ET.fromstring(ct_bytes)
     part_name = "/word/comments.xml"
-    for child in root.findall(f"{{{_CT_NS}}}Override"):
+    for child in root.findall(f"{{{_CT_NS_STD}}}Override"):
         if child.get("PartName") == part_name:
             return ct_bytes
-    override = ET.SubElement(root, f"{{{_CT_NS}}}Override")
+    override = ET.SubElement(root, f"{{{_CT_NS_STD}}}Override")
     override.set("PartName", part_name)
     override.set("ContentType", _COMMENTS_CONTENT_TYPE)
     return ET.tostring(root, xml_declaration=True, encoding='UTF-8', standalone='yes')
@@ -319,13 +321,11 @@ def inject_word_comments(src_docx_path: str, findings: list,
     except OSError as e:
         raise RuntimeError(f"无法读取 Word 源文件 {src_docx_path}: {e}") from e
 
-    # 校验源文件是否为合法的可打开 .docx
     try:
         doc = docx.Document(io.BytesIO(src_bytes))
     except Exception as e:
         raise RuntimeError(f"无法解析 .docx 文件（格式损坏或非法）：{src_docx_path}: {e}") from e
 
-    # 空 findings 列表：合法空操作，原样返回源文件 bytes
     if not findings:
         if out_docx_path:
             os.makedirs(os.path.dirname(os.path.abspath(out_docx_path)), exist_ok=True)
@@ -352,21 +352,18 @@ def inject_word_comments(src_docx_path: str, findings: list,
         norm_q = normalize_zh(finding.quote)
         attached = False
 
-        # 第一遍：全段落精确归一化子串匹配
         if norm_q:
             for p in all_paragraphs:
                 if _try_attach_quote_in_paragraph(p, norm_q, comment_id, allow_longest_submatch=False):
                     attached = True
                     break
 
-        # 第二遍：若 quote 跨行或含局部省略，尝试最长连续公共子块匹配
         if not attached and norm_q:
             for p in all_paragraphs:
                 if _try_attach_quote_in_paragraph(p, norm_q, comment_id, allow_longest_submatch=True):
                     attached = True
                     break
 
-        # 第三遍：未命中任何段落时绝不丢失，挂载到文档首段并加 [全篇] 标记
         if not attached:
             _attach_to_first_paragraph(doc, comment_id)
             comment_text = _format_comment_text(finding, is_global=True)
@@ -380,12 +377,10 @@ def inject_word_comments(src_docx_path: str, findings: list,
             'text': comment_text,
         })
 
-    # 先将注入了 commentRangeStart/End/commentReference 的文档存入内存缓冲
     mid_buf = io.BytesIO()
     doc.save(mid_buf)
     mid_bytes = mid_buf.getvalue()
 
-    # 重打包 ZIP：注入 word/comments.xml，更新 [Content_Types].xml 与 word/_rels/document.xml.rels
     out_buf = io.BytesIO()
     with zipfile.ZipFile(io.BytesIO(mid_bytes), 'r') as zin:
         with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
@@ -408,16 +403,180 @@ def inject_word_comments(src_docx_path: str, findings: list,
     return result_bytes
 
 
-# ---------------------------------------------------------------- PDF 高亮批注实现
+# ---------------------------------------------------------------- PDF 高亮批注与 E5 多级定位增强实现
+
+def _extract_l3_feature_fragments(raw_q: str) -> list[str]:
+    """L3 标点归一特征片段提取：
+    将 quote 中全角/半角标点替换为空格切分，优先选含数字/金额/编号特征的 8~30 字片段，
+    其次选纯汉字 10~30 字片段，去重返回。
+    """
+    tokens = [t.strip() for t in _L3_PUNCT_SPLIT_RE.split(raw_q or '') if t and t.strip()]
+    feature_frags: list[str] = []
+    plain_frags: list[str] = []
+
+    for tok in tokens:
+        candidates = [tok]
+        if len(tok) > 30:
+            candidates = [tok[:24], tok[-24:]]
+        for c in candidates:
+            c = c.strip()
+            if not c:
+                continue
+            has_feature = bool(_L3_FEATURE_RE.search(c))
+            if has_feature and 8 <= len(c) <= 30:
+                if c not in feature_frags:
+                    feature_frags.append(c)
+            elif not has_feature and 10 <= len(c) <= 30:
+                if c not in plain_frags:
+                    plain_frags.append(c)
+
+    return feature_frags + plain_frags
+
+
+def _norm_char_for_l4(ch: str, strip_punct: bool = False) -> str:
+    """L4 字符级归一化：全角转半角、大写转小写、删除全部空白字符；
+    strip_punct=True 时进一步剔除标点符号，仅保留中英文与数字以穿透全半角标点混用。
+    """
+    if not ch or ch.isspace() or ch == '\u3000':
+        return ''
+    n = normalize_zh(ch).lower()
+    if not n:
+        return ''
+    if strip_punct:
+        n = re.sub(r'[^0-9a-z\u4e00-\u9fa5★▲]', '', n)
+    return n
+
+
+def _extract_page_rawdict_chars(page, strip_punct: bool = False) -> list[tuple[str, pymupdf.Rect, tuple[int, int]]]:
+    """从 page.get_text('rawdict') 提取逐字符 (norm_char, char_rect, (block_idx, line_idx)) 序列。"""
+    try:
+        raw_dict = page.get_text("rawdict")
+    except Exception:
+        return []
+
+    seq: list[tuple[str, pymupdf.Rect, tuple[int, int]]] = []
+    for b_idx, block in enumerate(raw_dict.get("blocks", [])):
+        if block.get("type", 0) != 0:
+            continue
+        for l_idx, line in enumerate(block.get("lines", [])):
+            for span in line.get("spans", []):
+                chars = span.get("chars")
+                if chars:
+                    for ch_info in chars:
+                        c_str = ch_info.get("c", "")
+                        bbox = ch_info.get("bbox")
+                        n_ch = _norm_char_for_l4(c_str, strip_punct=strip_punct)
+                        if n_ch and bbox and len(bbox) == 4:
+                            r = pymupdf.Rect(bbox)
+                            if r.width > 0 and r.height > 0:
+                                for sub_c in n_ch:
+                                    seq.append((sub_c, r, (b_idx, l_idx)))
+                else:
+                    # 少数 PDF 字体无 chars 明细时按 span text 均分 bbox 兜底
+                    s_txt = span.get("text", "")
+                    bbox = span.get("bbox")
+                    if s_txt and bbox and len(bbox) == 4:
+                        r = pymupdf.Rect(bbox)
+                        if r.width > 0 and r.height > 0:
+                            for ch in s_txt:
+                                n_ch = _norm_char_for_l4(ch, strip_punct=strip_punct)
+                                for sub_c in n_ch:
+                                    seq.append((sub_c, r, (b_idx, l_idx)))
+    return seq
+
+
+def _merge_char_rects_by_line(
+    matched_slice: list[tuple[str, pymupdf.Rect, tuple[int, int]]],
+) -> list[pymupdf.Rect]:
+    """将命中字符区间的 bbox 按所属行（y 坐标相近）分组，每组合并为一个 Rect，支持跨行多 Rect 高亮。"""
+    if not matched_slice:
+        return []
+
+    line_groups: list[list[pymupdf.Rect]] = []
+    current_group: list[pymupdf.Rect] = [matched_slice[0][1]]
+    current_cy = (matched_slice[0][1].y0 + matched_slice[0][1].y1) / 2.0
+
+    for _ch, rect, _lkey in matched_slice[1:]:
+        cy = (rect.y0 + rect.y1) / 2.0
+        tol = max(4.5, min(rect.height, current_group[-1].height) * 0.65)
+        if abs(cy - current_cy) <= tol:
+            current_group.append(rect)
+            current_cy = sum((r.y0 + r.y1) / 2.0 for r in current_group) / len(current_group)
+        else:
+            line_groups.append(current_group)
+            current_group = [rect]
+            current_cy = cy
+
+    if current_group:
+        line_groups.append(current_group)
+
+    merged_rects: list[pymupdf.Rect] = []
+    for grp in line_groups:
+        x0 = min(r.x0 for r in grp)
+        y0 = min(r.y0 for r in grp)
+        x1 = max(r.x1 for r in grp)
+        y1 = max(r.y1 for r in grp)
+        u_rect = pymupdf.Rect(x0, y0, x1, y1)
+        if u_rect.width > 0 and u_rect.height > 0:
+            merged_rects.append(u_rect)
+
+    return merged_rects
+
+
+def _search_l4_with_l5_guard(pdf_doc, raw_q: str) -> list[tuple[int, list]]:
+    """L4 字符序列归一匹配 + L5 置信护栏（命中长度 >= quote 归一化长度 60% 且 >= 8 字符）。"""
+    for strip_punct in (False, True):
+        q_norm = ''.join(_norm_char_for_l4(ch, strip_punct=strip_punct) for ch in raw_q)
+        if len(q_norm) < _L5_MIN_CHARS:
+            continue
+
+        min_required_len = max(_L5_MIN_CHARS, int(len(q_norm) * _L5_MIN_RATIO + 0.9999))
+        hits: list[tuple[int, list]] = []
+
+        for page_idx in range(len(pdf_doc)):
+            page = pdf_doc[page_idx]
+            char_seq = _extract_page_rawdict_chars(page, strip_punct=strip_punct)
+            if len(char_seq) < min_required_len:
+                continue
+
+            page_norm_str = ''.join(item[0] for item in char_seq)
+            pos = page_norm_str.find(q_norm)
+            if pos != -1:
+                m_start = pos
+                m_len = len(q_norm)
+            else:
+                sm = difflib.SequenceMatcher(None, q_norm, page_norm_str, autojunk=False)
+                longest = sm.find_longest_match(0, len(q_norm), 0, len(page_norm_str))
+                m_start = longest.b
+                m_len = longest.size
+
+            # L5 置信护栏：必须同时满足 >= 8 字符 且 >= 60% 归一化长度，宁缺毋滥
+            if m_len >= _L5_MIN_CHARS and (m_len / len(q_norm)) >= _L5_MIN_RATIO:
+                rects = _merge_char_rects_by_line(char_seq[m_start:m_start + m_len])
+                if rects:
+                    hits.append((page_idx, rects))
+
+        if hits:
+            return hits
+
+    return []
+
+
 def _search_quote_in_pdf(pdf_doc, quote: str) -> list[tuple[int, list]]:
-    """在 PDF 各页中检索 quote，返回 [(page_index, [Rect, ...]), ...]。
-    若原串未命中，按规格使用 normalize_zh 截取首尾 20 字符分片重试一次。
+    """在 PDF 各页中按五级降级链检索 quote，任一级命中即止，返回 [(page_index, [Rect, ...]), ...]。
+
+    - L1：原串 page.search_for(raw_q) 全页扫；
+    - L2：原样/空白折叠的首尾 20 字分片重试（仅当原串 >= 8 字时启用分片，防极短残片误锚）；
+    - L3：标点归一特征片段（8~30 字含数字/金额/编号特征优先，纯汉字 10~30 字次之）；
+    - L4：page.get_text("rawdict") 逐字符归一化序列滑窗匹配，按行合并跨行 Rect；
+    - L5：置信护栏（L4 命中长度 >= 60% quote 归一化长度 且 >= 8 字符，否则拒绝乱锚）。
     """
     raw_q = (quote or '').strip()
     if not raw_q:
         return []
 
-    hits = []
+    # ── L1：原串直接检索 ──
+    hits: list[tuple[int, list]] = []
     for page_idx in range(len(pdf_doc)):
         page = pdf_doc[page_idx]
         rects = page.search_for(raw_q)
@@ -426,44 +585,260 @@ def _search_quote_in_pdf(pdf_doc, quote: str) -> list[tuple[int, list]]:
     if hits:
         return hits
 
-    # 归一化容错重试：原样与空白折叠（多空格转单空格）的首尾 20 字符分片。
-    # 注意：不可用 normalize_zh 去空白后的串做英文分片——去空格后
-    # （如 'Penaltyshallbe50%oft'）永远无法命中带空格的 PDF 原文；
-    # 中文无空格不受影响，两套分片对中文等价。
+    # ── L2：原样与空白折叠的首尾 20 字符分片重试 ──
     fold_q = re.sub(r'\s+', ' ', raw_q).strip()
     fragments = []
     for candidate in (
-        raw_q[:20],
+        raw_q[:20] if len(raw_q) >= 8 else '',
         raw_q[-20:] if len(raw_q) > 20 else '',
-        fold_q[:20],
+        fold_q[:20] if len(fold_q) >= 8 else '',
         fold_q[-20:] if len(fold_q) > 20 else '',
     ):
         c = candidate.strip()
-        if c and len(c) >= 2 and c not in fragments:
+        if c and len(c) >= 6 and c not in fragments:
             fragments.append(c)
 
-    for page_idx in range(len(pdf_doc)):
-        page = pdf_doc[page_idx]
-        page_rects = []
-        for frag in fragments:
-            r_list = page.search_for(frag)
-            for r in r_list:
-                if r not in page_rects:
-                    page_rects.append(r)
-        if page_rects:
-            hits.append((page_idx, page_rects))
+    if fragments:
+        for page_idx in range(len(pdf_doc)):
+            page = pdf_doc[page_idx]
+            page_rects = []
+            for frag in fragments:
+                r_list = page.search_for(frag)
+                for r in r_list:
+                    if r not in page_rects:
+                        page_rects.append(r)
+            if page_rects:
+                hits.append((page_idx, page_rects))
+        if hits:
+            return hits
 
-    return hits
+    # ── L3：标点归一特征片段检索 ──
+    l3_frags = _extract_l3_feature_fragments(raw_q)
+    if l3_frags:
+        for page_idx in range(len(pdf_doc)):
+            page = pdf_doc[page_idx]
+            page_rects = []
+            for frag in l3_frags:
+                r_list = page.search_for(frag)
+                for r in r_list:
+                    if r not in page_rects:
+                        page_rects.append(r)
+            if page_rects:
+                hits.append((page_idx, page_rects))
+        if hits:
+            return hits
+
+    # ── L4 + L5：rawdict 逐字符归一化滑窗匹配 + 60% & 8字置信护栏 ──
+    return _search_l4_with_l5_guard(pdf_doc, raw_q)
+
+
+def _build_overview_page(
+    pdf_doc,
+    findings: list,
+    anchored_map: dict[int, list[tuple[int, list]]],
+    author_name: str = 'AI法务初审员',
+) -> int:
+    """E5 §3：在 PDF 最前插入 A4 竖版「标红批注总览」页（支持多页自动续表），
+    并为每条已定位风险注入顶部快捷跳转图标与行内点击跳转链接（LINK_GOTO 直达正文标红处）+ 悬浮风险详情。
+
+    Args:
+        pdf_doc: 已打开的 pymupdf.Document。
+        findings: 风险列表。
+        anchored_map: {finding_1based_idx: [(orig_page_idx, [Rect, ...]), ...]}。
+        author_name: 批注作者名。
+
+    Returns:
+        inserted_pages_count: 实际在文档头部插入的总览页页数 k（原正文页索引整体后移 +k）。
+    """
+    if not findings:
+        return 0
+
+    page_w, page_h = 595.0, 842.0
+    rows_per_page = 16
+    total_findings = len(findings)
+    num_ov_pages = max(1, (total_findings + rows_per_page - 1) // rows_per_page)
+
+    # 先在文档头部依次插入 num_ov_pages 张总览页（pno=0, 1, ...）
+    ov_pages = []
+    for p_i in range(num_ov_pages):
+        ov_p = pdf_doc.new_page(pno=p_i, width=page_w, height=page_h)
+        ov_pages.append(ov_p)
+
+    # 此时原正文页的真实页索引 = orig_page_idx + num_ov_pages
+    anchored_count = len(anchored_map)
+    unanchored_count = total_findings - anchored_count
+
+    # 表格列宽定义（总宽 595 - 左右边距 36*2 = 523）
+    col_x = [36.0, 78.0, 130.0, 235.0, 435.0, 559.0]
+    headers = ['编号', '严重级', '规则类目', '风险说明摘要', '定位状态（点击跳转）']
+
+    for page_no_idx, ov_page in enumerate(ov_pages):
+        # 1. 顶部标题区
+        title_suffix = f"（第 {page_no_idx + 1}/{num_ov_pages} 页）" if num_ov_pages > 1 else ""
+        ov_page.insert_textbox(
+            pymupdf.Rect(36, 48, 559, 80),
+            f"标红批注总览{title_suffix}",
+            fontsize=16,
+            fontname="china-s",
+            color=(0.06, 0.09, 0.16),
+        )
+        summary_line = (
+            f"共检出风险 {total_findings} 项：已定位并原位高亮 {anchored_count} 项（点击下方蓝色链接或顶部图标可直达原文） ｜ "
+            f"全篇级未锚定 {unanchored_count} 项"
+        )
+        ov_page.insert_textbox(
+            pymupdf.Rect(36, 78, 559, 100),
+            summary_line,
+            fontsize=9.5,
+            fontname="china-s",
+            color=(0.28, 0.33, 0.41),
+        )
+
+        # 2. 表头绘制
+        y_top = 108.0
+        hdr_h = 24.0
+        ov_page.draw_rect(
+            pymupdf.Rect(col_x[0], y_top, col_x[-1], y_top + hdr_h),
+            color=(0.80, 0.84, 0.88),
+            fill=(0.94, 0.96, 0.98),
+        )
+        for c_i, h_text in enumerate(headers):
+            ov_page.insert_textbox(
+                pymupdf.Rect(col_x[c_i] + 4, y_top + 4, col_x[c_i + 1] - 4, y_top + hdr_h - 2),
+                h_text,
+                fontsize=9.5,
+                fontname="china-s",
+                color=(0.06, 0.09, 0.16),
+            )
+
+        # 3. 逐行绘制 findings 明细
+        start_f_idx = page_no_idx * rows_per_page
+        end_f_idx = min(total_findings, start_f_idx + rows_per_page)
+        row_y = y_top + hdr_h
+        row_h = 40.0
+
+        for f_zero_idx in range(start_f_idx, end_f_idx):
+            f_idx = f_zero_idx + 1
+            finding = findings[f_zero_idx]
+            n_code = f"N{f_idx:02d}"
+            sev_raw = (getattr(finding, 'severity', 'low') or 'low').lower()
+            sev_label = _SEVERITY_OVERVIEW_LABEL.get(sev_raw, '低')
+            sev_color = _SEVERITY_COLORS.get(sev_raw, (1.0, 1.0, 0.0))
+
+            rule_name = (getattr(finding, 'rule_name', '') or '合规核查项').strip()
+            raw_msg = re.sub(r'\s+', ' ', (getattr(finding, 'message', '') or '').strip())
+            msg_short = (raw_msg[:38] + '…') if len(raw_msg) > 40 else raw_msg
+
+            is_anchored = f_idx in anchored_map
+            status_str = "已高亮于正文\n见正文红色高亮" if is_anchored else "全篇级·未锚定"
+
+            row_rect = pymupdf.Rect(col_x[0], row_y, col_x[-1], row_y + row_h)
+            bg_fill = (1.0, 1.0, 1.0) if (f_idx % 2 == 1) else (0.98, 0.99, 1.0)
+            ov_page.draw_rect(row_rect, color=(0.86, 0.89, 0.92), fill=bg_fill)
+
+            # 列 1：编号 N01
+            ov_page.insert_textbox(
+                pymupdf.Rect(col_x[0] + 4, row_y + 6, col_x[1] - 4, row_y + row_h - 4),
+                n_code,
+                fontsize=9.5,
+                fontname="china-s",
+                color=(0.06, 0.09, 0.16),
+            )
+
+            # 列 2：严重级（带 _SEVERITY_COLORS 同源浅化底色块）
+            badge_rect = pymupdf.Rect(col_x[1] + 4, row_y + 8, col_x[2] - 6, row_y + row_h - 8)
+            tint_fill = (
+                min(1.0, sev_color[0] * 0.25 + 0.75),
+                min(1.0, sev_color[1] * 0.25 + 0.75),
+                min(1.0, sev_color[2] * 0.25 + 0.75),
+            )
+            ov_page.draw_rect(badge_rect, color=sev_color, fill=tint_fill)
+            ov_page.insert_textbox(
+                pymupdf.Rect(badge_rect.x0 + 3, badge_rect.y0 + 3, badge_rect.x1 - 2, badge_rect.y1 - 2),
+                sev_label,
+                fontsize=8.5,
+                fontname="china-s",
+                color=(0.1, 0.1, 0.1),
+            )
+
+            # 列 3：规则类目
+            ov_page.insert_textbox(
+                pymupdf.Rect(col_x[2] + 4, row_y + 5, col_x[3] - 4, row_y + row_h - 4),
+                rule_name[:22],
+                fontsize=8.5,
+                fontname="china-s",
+                color=(0.12, 0.16, 0.23),
+            )
+
+            # 列 4：message 摘要
+            ov_page.insert_textbox(
+                pymupdf.Rect(col_x[3] + 4, row_y + 5, col_x[4] - 4, row_y + row_h - 4),
+                msg_short,
+                fontsize=8.5,
+                fontname="china-s",
+                color=(0.12, 0.16, 0.23),
+            )
+
+            # 列 5：定位状态 + 内部跳转链接 LINK_GOTO + 风险详情悬浮提示
+            status_rect = pymupdf.Rect(col_x[4] + 4, row_y + 5, col_x[5] - 4, row_y + row_h - 4)
+            status_color = (0.11, 0.31, 0.85) if is_anchored else (0.55, 0.25, 0.05)
+            ov_page.insert_textbox(
+                status_rect,
+                status_str,
+                fontsize=8.0,
+                fontname="china-s",
+                color=status_color,
+            )
+
+            if is_anchored:
+                first_orig_page, first_rects = anchored_map[f_idx][0]
+                target_page_idx = first_orig_page + num_ov_pages
+                target_pt = (
+                    pymupdf.Point(first_rects[0].x0, max(0.0, first_rects[0].y0 - 20.0))
+                    if first_rects
+                    else pymupdf.Point(0.0, 0.0)
+                )
+                # 点击整行直接跳转到正文对应标红页与坐标位置
+                try:
+                    ov_page.insert_link({
+                        'kind': pymupdf.LINK_GOTO,
+                        'from': row_rect,
+                        'page': target_page_idx,
+                        'to': target_pt,
+                    })
+                except Exception:
+                    pass
+
+                # 在总览页顶部快捷栏同步放置带完整风险内容的图标与跳转链接（满足用户"顶部图标显示风险详情+点击跳转"）
+                if page_no_idx == 0 and f_idx <= 18:
+                    top_x = min(36.0 + (f_idx - 1) * 28.0, page_w - 42.0)
+                    top_rect = pymupdf.Rect(top_x, 8.0, top_x + 24.0, 22.0)
+                    ov_page.draw_rect(top_rect, color=sev_color, fill=tint_fill)
+                    ov_page.insert_textbox(
+                        top_rect,
+                        n_code,
+                        fontsize=7.0,
+                        fontname="china-s",
+                        color=(0.06, 0.09, 0.16),
+                    )
+                    try:
+                        ov_page.insert_link({
+                            'kind': pymupdf.LINK_GOTO,
+                            'from': top_rect,
+                            'page': target_page_idx,
+                            'to': target_pt,
+                        })
+                    except Exception:
+                        pass
+
+            row_y += row_h
+
+    return num_ov_pages
 
 
 # ── T46 扫描件双路线 Redline 支持（路线 A 夹心层 + 路线 B 直接高亮兜底）───────
 def _apply_sandwich_layer(pdf_doc, ocr_pages_data: list[dict]):
-    """路线 A：将 OCR 识别的文本按 bbox 写入透明夹心层（Sandwich PDF）。
-
-    使用 render_mode=3（完全透明文本）+ 内置中文字体 'china-s'，
-    使图片式扫描件成为原生可搜索 PDF，现有 search_for 链路可无缝命中。
-    写入后在内存中重新打开文档，固化内容流与搜索索引。
-    """
+    """路线 A：将 OCR 识别的文本按 bbox 写入透明夹心层（Sandwich PDF）。"""
     if not ocr_pages_data:
         return pdf_doc
 
@@ -495,9 +870,6 @@ def _apply_sandwich_layer(pdf_doc, ocr_pages_data: list[dict]):
                 continue
 
             fontsize = max(6.0, min(rect.height * 0.85, 36.0))
-            # T46 修复：insert_textbox 在文本装不下矩形时返回负数且【不抛异常】
-            # （原 except 兜底永不触发 → 零写入）。改为：字号逐步收缩重试，
-            # 仍装不下再退化为 insert_text（从矩形左下方写入，不检查容纳性）。
             rc = page.insert_textbox(
                 rect,
                 text,
@@ -528,7 +900,6 @@ def _apply_sandwich_layer(pdf_doc, ocr_pages_data: list[dict]):
                 except Exception:
                     pass
 
-    # 重新在内存中载入，固化内容流并建立完整的文本搜索索引
     sandwich_bytes = pdf_doc.tobytes()
     pdf_doc.close()
     return pymupdf.open(stream=sandwich_bytes, filetype="pdf")
@@ -561,14 +932,7 @@ def _match_ocr_boxes_fallback(ocr_pages_data: list[dict], quote: str, pdf_doc) -
             if not line_text:
                 continue
             norm_line = normalize_zh(line_text)
-            if not norm_line:
-                continue
-
-            # T46 验收修正：OCR 在表格/签名区产出大量碎片段（"年"/"月"/短单元格），
-            # 旧门槛（任意子串命中 / 4 字公共子串）导致批注错位（用户实测：
-            # 质保期风险被锚到表格、签名区堆图标）。收紧为：片段 ≥8 字且
-            # 公共子串 ≥8 字——中文法律文本中 8 字连续重合基本可断定同源。
-            if len(norm_line) < 8:
+            if not norm_line or len(norm_line) < 8:
                 continue
 
             matched = False
@@ -598,8 +962,8 @@ def _match_ocr_boxes_fallback(ocr_pages_data: list[dict], quote: str, pdf_doc) -
 
 def inject_pdf_highlights(src_pdf_path: str, findings: list,
                           out_pdf_path: str = None, author: str = 'AI法务初审员') -> bytes:
-    """在原版 .pdf 合同中按 Finding.quote 检索文本坐标，注入高危红/中危橙/
-    低危黄高亮标注与弹窗批注内容，输出带批注的 PDF 副本。
+    """在原版 .pdf 文档中按 Finding.quote 执行五级定位，生成首部「标红批注总览」页（带点击跳转链接），
+    并在正文原位注入高危红/中危橙/低危黄高亮标注与弹窗批注内容。
     """
     if not isinstance(src_pdf_path, str) or not src_pdf_path.strip():
         raise RuntimeError("PDF 源文件路径不能为空且必须为字符串")
@@ -634,10 +998,8 @@ def inject_pdf_highlights(src_pdf_path: str, findings: list,
                 f.write(src_bytes)
         return src_bytes
 
-    global_fallback_count = 0
     author_name = author or 'AI法务初审员'
 
-    # 扫描件判定与夹心层预处理（与 core.parser OCR 判据保持严格一致）
     total_chars = sum(len(p.get_text().strip()) for p in pdf_doc)
     max_page_chars = max((len(p.get_text().strip()) for p in pdf_doc), default=0)
     is_scanned = (total_chars < OCR_MIN_CHARS and max_page_chars < 20)
@@ -647,39 +1009,48 @@ def inject_pdf_highlights(src_pdf_path: str, findings: list,
         try:
             ocr_data = get_pdf_ocr_data(src_pdf_path)
             if ocr_data:
-                # 路线 A：构建可搜索夹心层（Sandwich PDF）
                 pdf_doc = _apply_sandwich_layer(pdf_doc, ocr_data)
         except Exception:
             pass
 
     try:
-        for finding in findings:
-            sev = getattr(finding, 'severity', 'low') or 'low'
-            color = _SEVERITY_COLORS.get(sev, (1.0, 1.0, 0.0))
-
+        # 1. 先对全部 findings 跑五级定位链，得到 anchored_map（键为 1-based 序号）
+        anchored_map: dict[int, list[tuple[int, list]]] = {}
+        for f_idx, finding in enumerate(findings, start=1):
             if _is_global_finding(finding):
                 hits = []
             else:
-                hits = _search_quote_in_pdf(pdf_doc, finding.quote)
-                # 路线 B 兜底：若 search_for 未命中，但具有 OCR bbox 数据，尝试模糊 bbox 定位
+                hits = _search_quote_in_pdf(pdf_doc, getattr(finding, 'quote', '') or '')
                 if not hits and is_scanned and ocr_data:
-                    hits = _match_ocr_boxes_fallback(ocr_data, finding.quote, pdf_doc)
-
+                    hits = _match_ocr_boxes_fallback(ocr_data, getattr(finding, 'quote', '') or '', pdf_doc)
             if hits:
+                anchored_map[f_idx] = hits
+
+        # 2. 在文档最前插入「标红批注总览」页（内部自动为已定位项绑定 LINK_GOTO 跳转链接）
+        ov_page_count = _build_overview_page(pdf_doc, list(findings), anchored_map, author_name=author_name)
+
+        # 3. 已定位项在正文页（orig_page_idx + ov_page_count）逐 Rect 高亮；
+        #    未定位项在首页顶部生成图标，且批注正文前缀升级为 [全篇·总览 Nxx]
+        global_fallback_count = 0
+        for f_idx, finding in enumerate(findings, start=1):
+            sev = getattr(finding, 'severity', 'low') or 'low'
+            color = _SEVERITY_COLORS.get(sev, (1.0, 1.0, 0.0))
+            n_code = f"N{f_idx:02d}"
+
+            if f_idx in anchored_map:
                 comment_text = _format_comment_text(finding, is_global=False)
-                for page_idx, rects in hits:
-                    page = pdf_doc[page_idx]
+                for orig_page_idx, rects in anchored_map[f_idx]:
+                    page = pdf_doc[orig_page_idx + ov_page_count]
                     for rect in rects:
                         annot = page.add_highlight_annot(rect)
                         annot.set_colors(stroke=color)
                         annot.set_info(title=author_name, content=comment_text)
                         annot.update()
             else:
-                # 绝不丢失：在首页顶部插入汇总 Text Annotation 图标，正文前置 [全篇]
-                comment_text = _format_comment_text(finding, is_global=True)
+                comment_text = _format_comment_text(finding, is_global=True, overview_no=n_code)
                 page0 = pdf_doc[0]
                 x_pos = min(36 + global_fallback_count * 26, max(36, int(page0.rect.width) - 40))
-                pt = pymupdf.Point(x_pos, 24)
+                pt = pymupdf.Point(x_pos, 26)
                 annot = page0.add_text_annot(pt, comment_text)
                 try:
                     annot.set_colors(stroke=color)

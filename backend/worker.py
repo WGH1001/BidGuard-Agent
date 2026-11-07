@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""B2 / E3R · 进程内线程池任务执行器 + SSE 进度广播总线 + 三级 LLM 客户端降级解析器。
+"""B2 / E3R / E5 · 进程内线程池任务执行器 + SSE 进度广播总线 + 三级 LLM 客户端降级解析器。
 
-严格遵循 INTERFACE.md §1、§3.3 与 E3R 实锤 B 修复：
+严格遵循 INTERFACE.md §1、§3.3、E3R 实锤 B 与 E5 措辞动态化：
 1. 状态机五态推进：created -> extracting -> checking -> grading -> delivered（异常转 failed）；
 2. SSE 三种标准事件：event: progress / event: done / event: error；
 3. E3R 实锤 B 修复：同一任务再次触发 run 时，submit_check_task 立即调用 broadcaster.clear(task_id)
-   清除上一轮残留的 done/error 终态帧，并将数据库 status 同步重置为 'extracting'、progress=0，
-   确保第二次运行进度条从 0 实时推进到 100；
-4. 溯源章铁律：F2 算术与 F3 效期/串名计算类发现 quote_verified=False（不盖原文溯源章）。
+   清除上一轮残留的 done/error 终态帧，并将数据库 status 同步重置为 'extracting'、progress=0；
+4. 溯源章铁律：F2 算术与 F3 效期/串名计算类发现 quote_verified=False（不盖原文溯源章）；
+5. E5 措辞动态化：F4 发现的 category 与 suggestion 按条款符号（★ / ▲ / ★或▲）动态生成。
 """
 from __future__ import annotations
 
@@ -46,6 +46,41 @@ def resolve_project_path(rel_or_abs: Optional[str | Path]) -> Path:
     if p.is_absolute():
         return p
     return (PROJECT_ROOT / p).resolve()
+
+
+def resolve_f4_category_and_suggestion(f4_item: dict[str, Any]) -> tuple[str, str]:
+    """E5 ⑤ & ⑥：按 f4_item 的 mark 或 clause_no 前缀动态生成 category 与 suggestion。
+
+    规则：
+    - 含 '★' -> category='★条款响应核验', suggestion 含 '对该 ★ 条款'
+    - 含 '▲' -> category='▲条款响应核验', suggestion 含 '对该 ▲ 条款'
+    - 无法判定 -> category='★/▲条款响应核验', suggestion 含 '对该 ★或▲ 条款'
+    （注：若为投标书内部前后承诺矛盾 scope=='bid_internal'，category 仍为 '前后承诺矛盾检测'）
+    """
+    code_str = str(f4_item.get('code') or 'MISSING_RESPONSE')
+    mark_str = str(f4_item.get('mark') or '').strip()
+    clause_no_str = str(f4_item.get('clause_no') or '').strip()
+    combined_prefix = f"{mark_str}{clause_no_str}"
+
+    if '★' in combined_prefix:
+        cat_label = '★条款响应核验'
+        sym_label = '★'
+    elif '▲' in combined_prefix:
+        cat_label = '▲条款响应核验'
+        sym_label = '▲'
+    else:
+        cat_label = '★/▲条款响应核验'
+        sym_label = '★或▲'
+
+    if code_str == 'CONTRADICTION' and f4_item.get('scope') == 'bid_internal':
+        category = '前后承诺矛盾检测'
+    elif code_str == 'CONTRADICTION' and not combined_prefix:
+        category = '前后承诺矛盾检测'
+    else:
+        category = cat_label
+
+    suggestion = f"请在投标书中补齐对该 {sym_label} 条款的明确正面响应与证明材料，并统一前后章节承诺参数"
+    return category, suggestion
 
 
 def resolve_effective_llm_client(session: Session, user_id: Optional[int] = None) -> tuple[Any, str]:
@@ -191,7 +226,6 @@ class BidTaskWorker:
                 return
             self._in_flight.add(tid)
 
-        # 在异步线程启动前同步清理上一轮 done 终态帧并重置 DB 状态为 progress=0
         self._reset_task_for_rerun(tid)
 
         try:
@@ -276,7 +310,7 @@ class BidTaskWorker:
             f1_requirements = marked_clauses + invalid_bid_clauses
 
             # ── 阶段 2：checking（F2 报价沙盒 + F3 证照/串名 + F4 双书逐条响应核验）──
-            self._emit_stage(session, task, 'checking', 55, 'F2/F3/F4 正在并行执行报价算术、证照效期与 ★ 条款逐条核验')
+            self._emit_stage(session, task, 'checking', 55, 'F2/F3/F4 正在并行执行报价算术、证照效期与 ★/▲ 条款逐条核验')
 
             f2_res = run_price_check(bid_abs, tender_path=tender_abs)
             bid_parsed = parse_document(str(bid_abs))
@@ -300,7 +334,7 @@ class BidTaskWorker:
             session.query(BidFinding).filter_by(task_id=task.id).delete()
             new_findings: list[BidFinding] = []
 
-            # (a) F2 报价算术发现（溯源铁律：计算类风险 quote_verified=False，不伪装成原文溯源）
+            # (a) F2 报价算术发现
             for f2_item in f2_res.get('findings') or []:
                 new_findings.append(
                     BidFinding(
@@ -319,7 +353,7 @@ class BidTaskWorker:
                     )
                 )
 
-            # (b) F3 证照效期与串名穿帮发现（计算/规则类 quote_verified=False）
+            # (b) F3 证照效期与串名穿帮发现
             for f3_item in f3_findings or []:
                 new_findings.append(
                     BidFinding(
@@ -339,17 +373,18 @@ class BidTaskWorker:
                     )
                 )
 
-            # (c) F4 ★条款响应核验、缺佐证与标书前后矛盾发现
+            # (c) F4 条款响应核验、缺佐证与标书前后矛盾发现（E5：按条目符号动态生成 category 与 suggestion）
             for f4_item in f4_res.get('findings') or []:
                 code_str = str(f4_item.get('code') or 'MISSING_RESPONSE')
                 sev_str = str(f4_item.get('severity') or 'error')
+                dyn_category, dyn_suggestion = resolve_f4_category_and_suggestion(f4_item)
                 new_findings.append(
                     BidFinding(
                         task_id=task.id,
                         source_module='F4',
                         code=code_str,
                         severity=sev_str,
-                        category='★条款响应核验' if code_str != 'CONTRADICTION' else '前后承诺矛盾检测',
+                        category=dyn_category,
                         clause_no=str(f4_item.get('clause_no') or f4_item.get('mark') or ''),
                         quote=str(f4_item.get('tender_quote') or ''),
                         bid_quote=str(f4_item.get('bid_quote') or ''),
@@ -357,7 +392,7 @@ class BidTaskWorker:
                         quote_verified=bool(f4_item.get('quote_verified', True)),
                         page=f4_item.get('bid_page') if f4_item.get('bid_page') is not None else f4_item.get('tender_page'),
                         message=str(f4_item.get('message') or ''),
-                        suggestion='请在投标书中补齐对该 ★ 条款的明确正面响应与证明材料，并统一前后章节承诺参数',
+                        suggestion=dyn_suggestion,
                         consequence='veto' if sev_str == 'error' else 'deduction',
                         detail_json=f4_item,
                     )
