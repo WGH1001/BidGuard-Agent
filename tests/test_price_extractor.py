@@ -12,6 +12,7 @@
 8. E8 多明细表小计聚合与分项汇总表权威源核验（单表全分项、多分表+小计聚合、多分表+小计+汇总表权威源、Σ小计与汇总表不一致报 warning 非 error、小计行混限价语境词排除、防双重计数）。
 9. E9 明细行收集完整性（子序号 1.1/2.1、多字符单位如人月/个月/式、纵向合并分类格下探取名、无单价列小计分表）与租赁时长/服务期限定价算术核验（元/年×3年、36个月折年、期限不可解析时 warning 跳过算术硬判）。
 10. E13 双胞胎明细表去重（滁州物业实锤：两张明细表 8 行金额完全一致但名称略有详简差异 -> 去重保留 8 条并报 DUPLICATE_DETAIL_TABLE warning；差 1 条金额不触发去重仍报 TOTAL_MISMATCH；三表同现及列更全者优先保留）。
+11. E14 汇总行后缀识别（芜湖无为实锤：首格"--"、行名"年度投标报价合计"按后缀识别为汇总行隔离出 table_total=679200.00，items 保持 2 条零报错；含"合计"但不以合计结尾的"合计金额校验服务"仍作明细行收集）。
 """
 import os
 import sys
@@ -1058,3 +1059,148 @@ def test_e13_three_tables_coexist_and_column_completeness_priority():
         assert any(f['code'] == 'DUPLICATE_DETAIL_TABLE' for f in chk['findings'])
     finally:
         p.unlink(missing_ok=True)
+
+
+# ── 12. E14 新增测试集：汇总行后缀识别（芜湖无为实锤）─────────────────────
+
+def test_e14_wuhu_suffix_summary_row_isolated_as_table_total():
+    """E14 验收标准 1（芜湖无为实锤）：合计行首格为 '--'、行名为'年度投标报价合计' -> 准确识别为汇总行，items 恰 2 条、table_total=679200.00、零报错。"""
+    doc = Document()
+    doc.add_paragraph('一、开标一览表')
+    t_bid = doc.add_table(rows=3, cols=2)
+    t_bid.cell(0, 0).text = '项目名称'
+    t_bid.cell(0, 1).text = '无为市档案数字化加工服务采购项目'
+    t_bid.cell(1, 0).text = '投标总报价（小写）'
+    t_bid.cell(1, 1).text = '679,200.00元'
+    t_bid.cell(2, 0).text = '投标总报价（大写）'
+    t_bid.cell(2, 1).text = '陆拾柒万玖仟贰佰元整'
+
+    doc.add_paragraph('二、分项报价明细表')
+    t = doc.add_table(rows=4, cols=7)
+    headers = ['序号', '分项名称', '工作内容说明', '服务期限', '预估工作量', '综合单价(元)', '合价(元)']
+    for i, h in enumerate(headers):
+        t.cell(0, i).text = h
+
+    # 明细 1：0.35 × 300,000 = 105,000.00
+    t.cell(1, 0).text = '1'
+    t.cell(1, 1).text = '纸质档案整理及装订'
+    t.cell(1, 2).text = '全宗卷整理、分类、编号、装订'
+    t.cell(1, 3).text = '1年'
+    t.cell(1, 4).text = '300000页'
+    t.cell(1, 5).text = '0.35'
+    t.cell(1, 6).text = '105,000.00'
+
+    # 明细 2：0.33 × 1,740,000 = 574,200.00
+    t.cell(2, 0).text = '2'
+    t.cell(2, 1).text = '档案数字化扫描及挂接'
+    t.cell(2, 2).text = '高清扫描、图像处理、目录著录与质检'
+    t.cell(2, 3).text = '1年'
+    t.cell(2, 4).text = '1740000页'
+    t.cell(2, 5).text = '0.33'
+    t.cell(2, 6).text = '574,200.00'
+
+    # 芜湖无为原貌汇总行：首格 "--"，行名 "年度投标报价合计"，单价与数量填 "--"，合价 "679,200.00 元"
+    t.cell(3, 0).text = '--'
+    t.cell(3, 1).text = '年度投标报价合计'
+    t.cell(3, 2).text = '上述1、2项工作量按采购人年度预估任务量测算，最终结算按中标单价据实核算，且不超过年度合同总价。'
+    t.cell(3, 3).text = '三年（1+1+1模式）'
+    t.cell(3, 4).text = '--'
+    t.cell(3, 5).text = '--'
+    t.cell(3, 6).text = '679,200.00 元'
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['status'] == 'OK'
+        assert len(chk['items']) == 2
+        assert chk['table_total'] == '679200.00'
+        assert chk['bid_total'] == '679200.00'
+        assert chk['bid_total_upper'] == '陆拾柒万玖仟贰佰元整'
+        assert chk['findings'] == []
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_e14_item_with_heji_not_at_suffix_kept_as_normal_item():
+    """E14 验收标准 2（反向防误判用例）：
+    - '合计金额校验服务'（前缀命中+标准明细特征 1项×120,000=120,000）保留为明细；
+    - '提供报表数据小计'（后缀命中+动词+标准明细特征 2套×80,000=160,000）保留为明细；
+    - 无独立单价的 '本项目报价总计' / '合计金额校验' / '校验金额合计' 仍判为汇总行。
+    """
+    doc = Document()
+    doc.add_paragraph('一、开标一览表')
+    t_bid = doc.add_table(rows=2, cols=2)
+    t_bid.cell(0, 0).text = '项目名称'
+    t_bid.cell(0, 1).text = '财务稽核软件采购项目'
+    t_bid.cell(1, 0).text = '投标总报价（小写）'
+    t_bid.cell(1, 1).text = '280,000.00元'
+
+    t = doc.add_table(rows=4, cols=5)
+    for i, h in enumerate(['序号', '品目名称', '数量', '单价（元）', '合价（元）']):
+        t.cell(0, i).text = h
+    t.cell(1, 0).text = '--'
+    t.cell(1, 1).text = '合计金额校验服务'
+    t.cell(1, 2).text = '1项'
+    t.cell(1, 3).text = '120,000.00'
+    t.cell(1, 4).text = '120,000.00'
+
+    t.cell(2, 0).text = '--'
+    t.cell(2, 1).text = '提供报表数据小计'
+    t.cell(2, 2).text = '2套'
+    t.cell(2, 3).text = '80,000.00'
+    t.cell(2, 4).text = '160,000.00'
+
+    t.cell(3, 0).text = '--'
+    t.cell(3, 1).text = '本项目报价总计'
+    t.cell(3, 2).text = '--'
+    t.cell(3, 3).text = '--'
+    t.cell(3, 4).text = '280,000.00'
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['status'] == 'OK'
+        assert len(chk['items']) == 2
+        assert chk['items'][0]['name'] == '合计金额校验服务'
+        assert chk['items'][1]['name'] == '提供报表数据小计'
+        assert chk['table_total'] == '280000.00'
+        assert chk['bid_total'] == '280000.00'
+        assert chk['findings'] == []
+    finally:
+        p.unlink(missing_ok=True)
+
+    # 形态 2：当无独立单价（数量/单价为 '--'）时，'合计金额校验' 与 '校验金额合计' 仍判为汇总行
+    for summary_row_name in ('合计金额校验', '校验金额合计'):
+        doc2 = Document()
+        doc2.add_paragraph('一、开标一览表')
+        tb2 = doc2.add_table(rows=2, cols=2)
+        tb2.cell(0, 0).text = '项目名称'
+        tb2.cell(0, 1).text = '财务稽核软件采购项目'
+        tb2.cell(1, 0).text = '投标总报价（小写）'
+        tb2.cell(1, 1).text = '120,000.00元'
+
+        t2 = doc2.add_table(rows=3, cols=5)
+        for i, h in enumerate(['序号', '品目名称', '数量', '单价（元）', '合价（元）']):
+            t2.cell(0, i).text = h
+        t2.cell(1, 0).text = '1'
+        t2.cell(1, 1).text = '核心引擎模块'
+        t2.cell(1, 2).text = '1项'
+        t2.cell(1, 3).text = '120,000.00'
+        t2.cell(1, 4).text = '120,000.00'
+
+        t2.cell(2, 0).text = '--'
+        t2.cell(2, 1).text = summary_row_name
+        t2.cell(2, 2).text = '--'
+        t2.cell(2, 3).text = '--'
+        t2.cell(2, 4).text = '120,000.00'
+
+        p2 = _save_temp_docx(doc2)
+        try:
+            chk2 = run_price_check(p2)
+            assert chk2['status'] == 'OK'
+            assert len(chk2['items']) == 1
+            assert chk2['items'][0]['name'] == '核心引擎模块'
+            assert chk2['table_total'] == '120000.00'
+            assert chk2['findings'] == []
+        finally:
+            p2.unlink(missing_ok=True)
