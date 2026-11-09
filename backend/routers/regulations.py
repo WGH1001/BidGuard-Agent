@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from backend.auth import AuthUser, get_current_user, record_audit, require_admin
 from backend.database import get_db
 from backend.models import RegulationArticle, RegulationLaw
+from backend.schemas import OkResponse
 from core.regulation_crawler import crawl_all_configured_sources
 from core.regulation_library import import_regulation_file, verify_article
 
@@ -294,4 +295,45 @@ def crawl_regulations_endpoint(
         updated_laws_count=report['updated_laws_count'],
         unconfigured_count=report['unconfigured_count'],
         results=[CrawlSourceResultItem(**item) for item in report['results']],
+    )
+
+
+@router.delete('/laws/{law_id}', response_model=OkResponse)
+def delete_regulation_law(
+    law_id: int,
+    current_user: AuthUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> OkResponse:
+    """管理员删除指定法规及该法全部条文（级联清理 RegulationArticle）。"""
+    law = db.query(RegulationLaw).filter_by(id=law_id).first()
+    if law is None:
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'LAW_NOT_FOUND', 'message': f"未找到 ID={law_id} 的法规记录"},
+        )
+
+    law_name = law.name
+    article_count = int(law.article_count or 0)
+    deleted_articles = (
+        db.query(RegulationArticle)
+        .filter_by(law_id=law_id)
+        .delete(synchronize_session=False)
+    )
+    db.delete(law)
+    db.commit()
+
+    record_audit(
+        db,
+        action='delete_regulation',
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.get('id'),
+        target=law_name,
+        detail_json={
+            'law_id': law_id,
+            'deleted_articles': int(deleted_articles or article_count),
+        },
+    )
+    return OkResponse(
+        ok=True,
+        message=f"已删除《{law_name}》及全部 {int(deleted_articles or article_count)} 条条文",
     )

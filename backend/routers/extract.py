@@ -73,13 +73,23 @@ def extract_tender_checklists(
             llm_structured = []
             llm_status = 'skipped'
 
+        marked_list = list(res.get('marked_clauses') or [])
+        invalid_list = list(res.get('invalid_bid_clauses') or [])
+        qual_list = list(res.get('qualification_hits') or [])
+        comp_list = list(res.get('compliance_hits') or [])
+
         record_audit(
             db,
             action='extract_tender',
             tenant_id=current_user.tenant_id,
             user_id=current_user.get('id'),
             target=orig_name,
-            detail_json={'llm_status': llm_status, 'marked_count': len(res.get('marked_clauses') or [])},
+            detail_json={
+                'llm_status': llm_status,
+                'marked_count': len(marked_list),
+                'invalid_count': len(invalid_list),
+                'total_extracted': len(marked_list) + len(invalid_list) + len(qual_list) + len(comp_list),
+            },
         )
 
         return ExtractChecklistOut(
@@ -89,10 +99,10 @@ def extract_tender_checklists(
             chars=int(res.get('chars') or 0),
             llm_status=llm_status,
             chapters=list(res.get('chapters') or []),
-            marked_clauses=list(res.get('marked_clauses') or []),
-            invalid_bid_clauses=list(res.get('invalid_bid_clauses') or []),
-            qualification_hits=list(res.get('qualification_hits') or []),
-            compliance_hits=list(res.get('compliance_hits') or []),
+            marked_clauses=marked_list,
+            invalid_bid_clauses=invalid_list,
+            qualification_hits=qual_list,
+            compliance_hits=comp_list,
             eval_chapter=res.get('eval_chapter'),
             scoring_tables=list(res.get('scoring_tables') or []),
             scoring_prose=scoring_prose,
@@ -100,3 +110,5 @@ def extract_tender_checklists(
         )
     finally:
         tmp_path.unlink(missing_ok=True)
+        for sfx in ('.ocr.txt', '.ocr.json', '.media.ocr.json'):
+            Path(str(tmp_path) + sfx).unlink(missing_ok=True)

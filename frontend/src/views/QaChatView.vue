@@ -29,6 +29,7 @@ function resetQaModuleCache(): void {
 <script setup lang="ts">
 import { computed, onActivated, onBeforeUnmount, onMounted, ref as localRef } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { checksApi, qaApi } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -138,6 +139,19 @@ async function handleCreateSession(): Promise<void> {
 
 async function handleDeleteSession(sess: QaSessionOut): Promise<void> {
   if (asking.value) return
+  try {
+    await ElMessageBox.confirm(
+      `确认删除专家问答会话「#${sess.id} ${sess.title}」及其全部对话记录吗？删除后不可恢复。`,
+      '确认删除问答会话',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
   await qaApi.deleteSession(sess.id)
   sessions.value = sessions.value.filter((s) => s.id !== sess.id)
   if (activeSessionId.value === sess.id) {

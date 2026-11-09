@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { auditApi, checksApi, reportsApi } from '@/api'
 import type { AuditLogItemOut, BidTaskOut } from '@/api/types'
+import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 
 defineOptions({ name: 'ReportsAndAuditView' })
 
 const authStore = useAuthStore()
+const appStore = useAppStore()
 
 const activeTab = ref<'deliver' | 'audit'>('deliver')
 
@@ -87,6 +90,33 @@ async function handleDownloadDeliverZip(task: Partial<BidTaskOut>): Promise<void
   } finally {
     busyDownload.value[key] = false
   }
+}
+
+async function handleDeleteDeliveredTask(task: Partial<BidTaskOut>): Promise<void> {
+  if (task.id === undefined) return
+  if (task.status && ['extracting', 'checking', 'grading'].includes(task.status)) {
+    ElMessage.warning('任务正在运行中，请先等待完成')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认删除体检任务「#${task.id} ${task.title ?? ''}」及其全部风险发现、偏离表与交付产物吗？删除后不可恢复。`,
+      '确认删除体检任务',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+  await checksApi.remove(task.id)
+  if (appStore.activeTaskId === task.id) {
+    appStore.setActiveTaskId(null)
+  }
+  ElMessage.success(`体检任务 #${task.id} 已删除`)
+  await fetchDeliveredTasks()
 }
 
 // ── 页签 ②：安全审计日志状态（member 非管理员显示“仅管理员可见”，不弹错误） ──
@@ -207,7 +237,7 @@ onMounted(() => {
                 </template>
               </el-table-column>
 
-              <el-table-column label="封标交付物下载（文件名自动附带项目名）" width="380" fixed="right">
+              <el-table-column label="封标交付物下载与管理（文件名自动附带项目名）" width="440" fixed="right">
                 <template #default="{ row }">
                   <div class="dl-btn-group">
                     <el-button
@@ -233,6 +263,15 @@ onMounted(() => {
                       @click="handleDownloadDeliverZip(row)"
                     >
                       交付包 ZIP
+                    </el-button>
+                    <el-button
+                      size="small"
+                      type="danger"
+                      plain
+                      :disabled="['extracting', 'checking', 'grading'].includes(row.status)"
+                      @click="handleDeleteDeliveredTask(row)"
+                    >
+                      删除
                     </el-button>
                   </div>
                 </template>

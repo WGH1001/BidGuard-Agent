@@ -5,15 +5,18 @@ import * as echarts from 'echarts/core'
 import { BarChart, PieChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { dashboardApi, deviationApi } from '@/api'
+import { checksApi, dashboardApi, deviationApi } from '@/api'
 import type { BidTaskOut, DashboardStatsOut } from '@/api/types'
+import { useAppStore } from '@/stores/app'
 import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 
 echarts.use([BarChart, PieChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
 defineOptions({ name: 'DashboardView' })
 
 const router = useRouter()
+const appStore = useAppStore()
 const loading = ref(false)
 const stats = ref<DashboardStatsOut | null>(null)
 
@@ -119,6 +122,46 @@ async function handleExportDeviation(task: { id?: number | string; title?: strin
   }
 }
 
+function handleEnterTask(row: Partial<BidTaskOut>): void {
+  if (row.task_type === 'radar') {
+    void router.push('/radar')
+    return
+  }
+  if (row.id !== undefined) {
+    appStore.setActiveTaskId(row.id)
+  }
+  void router.push('/checks')
+}
+
+async function handleDeleteTask(row: Partial<BidTaskOut>): Promise<void> {
+  if (row.id === undefined) return
+  if (row.status && ['extracting', 'checking', 'grading'].includes(row.status)) {
+    ElMessage.warning('任务正在运行中，请先等待完成')
+    return
+  }
+  const typeLabel = row.task_type === 'radar' ? 'F6 控标雷达记录' : '封标防废标体检任务'
+  try {
+    await ElMessageBox.confirm(
+      `确认删除${typeLabel}「#${row.id} ${row.title ?? ''}」及其关联风险发现与上传文件吗？删除后不可恢复。`,
+      '确认删除任务记录',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+
+  await checksApi.remove(row.id)
+  if (appStore.activeTaskId === row.id) {
+    appStore.setActiveTaskId(null)
+  }
+  ElMessage.success(`任务 #${row.id} 已删除`)
+  await loadDashboard()
+}
+
 function handleResize(): void {
   matrixChart?.resize()
   severityChart?.resize()
@@ -211,7 +254,7 @@ onBeforeUnmount(() => {
         <div class="sec-hd">
           <div>
             <h3>封标前六大一票否决防线健康度矩阵（F1 ~ F6 引擎分工）</h3>
-            <p>实时聚合本租户各防线模块检出与生成指标</p>
+            <p>实时聚合本租户各防线指标（F1 统计提取红线/★▲条款数 · F2~F4/F6 统计检出风险项 · F5 统计已交付偏离表数）</p>
           </div>
           <span class="sev-pill info">6 大防线在线</span>
         </div>
@@ -333,10 +376,10 @@ onBeforeUnmount(() => {
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="220" fixed="right">
+        <el-table-column label="操作" width="260" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="router.push('/checks')">
-              进入体检台
+            <el-button link type="primary" @click="handleEnterTask(row)">
+              {{ row.task_type === 'radar' ? '查看雷达' : '进入体检台' }}
             </el-button>
             <el-button
               v-if="row.task_type === 'pre_check'"
@@ -346,7 +389,21 @@ onBeforeUnmount(() => {
             >
               导出偏离表
             </el-button>
-            <el-button link @click="router.push('/reports')">交付包</el-button>
+            <el-button
+              v-if="row.task_type === 'pre_check'"
+              link
+              @click="router.push('/reports')"
+            >
+              交付包
+            </el-button>
+            <el-button
+              link
+              type="danger"
+              :disabled="['extracting', 'checking', 'grading'].includes(row.status)"
+              @click="handleDeleteTask(row)"
+            >
+              删除
+            </el-button>
           </template>
         </el-table-column>
       </el-table>

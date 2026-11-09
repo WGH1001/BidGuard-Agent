@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import queue
+import shutil
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -12,8 +13,8 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from backend.auth import AuthUser, get_current_user, record_audit
-from backend.database import PROJECT_ROOT, get_db
-from backend.models import BidCheckTask, BidFinding
+from backend.database import PROJECT_ROOT, SessionLocal, get_db
+from backend.models import BidCheckTask, BidFinding, QaSession
 from backend.schemas import (
     BidFindingOut,
     BidTaskDetailOut,
@@ -325,11 +326,12 @@ def stream_check_progress(
             )
             yield f"event: progress\ndata: {first_payload}\n\n"
 
-            # 3. 持续监听广播总线或轮询 DB 终态
+            # 3. 持续监听广播总线或轮询 DB 终态（上限 360s 覆盖长耗时大模型核验，每 15s 发送 keep-alive 注释帧）
             ticks = 0
-            while ticks < 100:
+            max_ticks = 720
+            while ticks < max_ticks:
                 try:
-                    ev_name, ev_data = q.get(timeout=0.2)
+                    ev_name, ev_data = q.get(timeout=0.5)
                     data_str = json.dumps(ev_data, ensure_ascii=False)
                     yield f"event: {ev_name}\ndata: {data_str}\n\n"
                     if ev_name in ('done', 'error'):
@@ -341,6 +343,32 @@ def stream_check_progress(
                         yield f"event: {ev_name}\ndata: {json.dumps(ev_data, ensure_ascii=False)}\n\n"
                         return
                     ticks += 1
+                    if ticks % 30 == 0:
+                        yield ': keep-alive\n\n'
+                    if ticks % 6 == 0 and task_id not in worker._in_flight:
+                        check_sess = SessionLocal()
+                        try:
+                            cur = check_sess.query(BidCheckTask).filter_by(id=task_id).first()
+                            if cur is None:
+                                return
+                            if cur.status == 'delivered':
+                                payload = json.dumps(
+                                    {'task_id': task_id, 'status': 'delivered', 'stats': cur.stats_json or {}},
+                                    ensure_ascii=False,
+                                )
+                                yield f"event: done\ndata: {payload}\n\n"
+                                return
+                            if cur.status == 'failed':
+                                payload = json.dumps(
+                                    {'task_id': task_id, 'status': 'failed', 'error_msg': cur.error_msg or ''},
+                                    ensure_ascii=False,
+                                )
+                                yield f"event: error\ndata: {payload}\n\n"
+                                return
+                            if cur.status == 'created':
+                                return
+                        finally:
+                            check_sess.close()
         finally:
             worker.broadcaster.unsubscribe(task_id, q)
 
@@ -503,11 +531,38 @@ def delete_check_task(
     current_user: AuthUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> OkResponse:
-    """删除本租户下的指定任务（级联清理 findings 与 qa_sessions）。"""
+    """删除本租户下的指定任务（运行中任务拒删 409，终态任务级联清理 findings / qa_sessions 与落盘文件）。"""
     tenant_id = int(current_user.tenant_id)
     task = _get_tenant_task_or_404(db, task_id, tenant_id)
+
+    worker = get_worker()
+    if task.status in ('extracting', 'checking', 'grading') or task_id in worker._in_flight:
+        raise HTTPException(
+            status_code=409,
+            detail={'code': 'TASK_RUNNING', 'message': '任务正在运行中，请先等待完成或取消'},
+        )
+
+    db.query(QaSession).filter_by(task_id=task_id).delete(synchronize_session=False)
+    db.query(BidFinding).filter_by(task_id=task_id).delete(synchronize_session=False)
     db.delete(task)
     db.commit()
+
+    worker.broadcaster.clear(task_id)
+
+    # 清理上传目录及 OCR 伴生缓存文件
+    task_upload_dir = (_UPLOADS_ROOT / str(tenant_id) / str(task_id)).resolve()
+    if task_upload_dir.is_dir() and str(task_upload_dir).startswith(str(_UPLOADS_ROOT)):
+        shutil.rmtree(task_upload_dir, ignore_errors=True)
+
+    # 清理导出的偏离表、红线批注件与交付压缩包产物
+    for sub in ('deviation', 'redline', 'deliver'):
+        out_dir = (PROJECT_ROOT / 'output' / sub).resolve()
+        if out_dir.is_dir():
+            for artifact in out_dir.glob(f"{task_id}_*"):
+                try:
+                    artifact.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     record_audit(
         db,

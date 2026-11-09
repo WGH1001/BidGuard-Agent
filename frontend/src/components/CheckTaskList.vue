@@ -17,6 +17,7 @@ const emit = defineEmits<{
   (e: 'select', task: BidTaskOut): void
   (e: 'page-change', page: number): void
   (e: 'created', task: BidTaskOut, autoRun: boolean): void
+  (e: 'delete', task: BidTaskOut): void
   (e: 'refresh'): void
 }>()
 
@@ -139,9 +140,22 @@ defineExpose({
       >
         <div class="ri-row1">
           <span class="ri-id mono-num">#{{ item.id }}</span>
-          <span class="sev-pill" :class="statusMeta(item.status).cls">
-            {{ statusMeta(item.status).label }}
-          </span>
+          <div class="ri-row1-right">
+            <span class="sev-pill" :class="statusMeta(item.status).cls">
+              {{ statusMeta(item.status).label }}
+            </span>
+            <el-button
+              type="danger"
+              link
+              size="small"
+              class="ri-del-btn"
+              :disabled="['extracting', 'checking', 'grading'].includes(item.status)"
+              title="删除该体检任务"
+              @click.stop="emit('delete', item)"
+            >
+              删除
+            </el-button>
+          </div>
         </div>
 
         <div class="ri-title" :title="item.title">{{ item.title }}</div>
@@ -325,6 +339,17 @@ defineExpose({
   justify-content: space-between;
   align-items: center;
   margin-bottom: 6px;
+}
+
+.ri-row1-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ri-del-btn {
+  font-size: 11.5px;
+  padding: 0 2px;
 }
 
 .ri-id {

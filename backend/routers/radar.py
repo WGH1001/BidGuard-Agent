@@ -12,8 +12,19 @@ from sqlalchemy.orm import Session
 from backend.auth import AuthUser, get_current_user, record_audit
 from backend.database import get_db
 from backend.models import BidCheckTask, BidFinding
-from backend.routers.checks import _save_validated_upload
-from backend.schemas import RadarConclusionOut, RadarScanOut, SuspiciousParamOut
+from backend.routers.checks import (
+    _get_tenant_task_or_404,
+    _save_validated_upload,
+    _task_to_out,
+    delete_check_task,
+)
+from backend.schemas import (
+    BidTaskListOut,
+    OkResponse,
+    RadarConclusionOut,
+    RadarScanOut,
+    SuspiciousParamOut,
+)
 from backend.worker import resolve_effective_llm_client, resolve_project_path
 from core.rigging_radar import scan_rigging_radar
 
@@ -22,6 +33,87 @@ router = APIRouter(prefix='/api/radar', tags=['radar'])
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+@router.get('', response_model=BidTaskListOut)
+def list_radar_tasks(
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> BidTaskListOut:
+    """列出当前租户下的 F6 控标雷达扫描历史任务。"""
+    tenant_id = int(current_user.tenant_id)
+    rows = (
+        db.query(BidCheckTask)
+        .filter_by(tenant_id=tenant_id, task_type='radar')
+        .order_by(BidCheckTask.id.desc())
+        .all()
+    )
+    return BidTaskListOut(items=[_task_to_out(t) for t in rows], total=len(rows))
+
+
+@router.get('/{task_id}', response_model=RadarScanOut)
+def get_radar_scan_detail(
+    task_id: int,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> RadarScanOut:
+    """按 task_id 回放历史 F6 控标雷达扫描结果（从 BidCheckTask + BidFinding 还原 RadarScanOut）。"""
+    tenant_id = int(current_user.tenant_id)
+    task = _get_tenant_task_or_404(db, task_id, tenant_id)
+    if task.task_type != 'radar':
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'TASK_NOT_FOUND', 'message': '该任务不是控标雷达扫描记录'},
+        )
+
+    stats = task.stats_json or {}
+    llm_status = str(stats.get('llm_status') or 'skipped')
+    recommendation = str(stats.get('recommendation') or '值得投')
+    summary = str(stats.get('summary') or '未检出明显疑似排他性参数（仅供参考）。')
+
+    findings = (
+        db.query(BidFinding)
+        .filter_by(task_id=task.id, source_module='F6')
+        .order_by(BidFinding.id.asc())
+        .all()
+    )
+
+    suspicious_params: list[SuspiciousParamOut] = []
+    for f in findings:
+        detail = f.detail_json if isinstance(f.detail_json, dict) else {}
+        suspicious_params.append(
+            SuspiciousParamOut(
+                quote=str(f.quote or ''),
+                offset=int(f.quote_offset or 0),
+                page=f.page,
+                exclusive_type=str(detail.get('exclusive_type') or f.category or '参数定向'),
+                confidence=float(detail.get('confidence') if detail.get('confidence') is not None else 0.8),
+                reason=str(f.message or ''),
+                quote_verified=bool(f.quote_verified),
+                llm_status=str(detail.get('llm_status') or llm_status),
+            )
+        )
+
+    return RadarScanOut(
+        task_id=task.id,
+        title=task.title,
+        llm_status=llm_status,
+        suspicious_params=suspicious_params,
+        conclusion=RadarConclusionOut(
+            recommendation=recommendation,
+            summary=summary,
+        ),
+    )
+
+
+@router.delete('/{task_id}', response_model=OkResponse)
+def delete_radar_task(
+    task_id: int,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> OkResponse:
+    """删除本租户下指定的 F6 控标雷达历史记录（复用 checks 级联删除逻辑）。"""
+    return delete_check_task(task_id=task_id, current_user=current_user, db=db)
 
 
 @router.post('', response_model=RadarScanOut)

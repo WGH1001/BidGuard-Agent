@@ -2,6 +2,7 @@
 import { onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { checksApi, reportsApi } from '@/api'
 import type {
   BidFindingOut,
@@ -154,6 +155,41 @@ function handlePageChange(newPage: number): void {
   void loadTaskList(false)
 }
 
+async function handleDeleteTask(task: BidTaskOut): Promise<void> {
+  if (['extracting', 'checking', 'grading'].includes(task.status)) {
+    ElMessage.warning('任务正在运行中，请先等待完成')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认删除体检任务「#${task.id} ${task.title}」及其全部风险发现、偏离表与上传标书原件吗？删除后不可恢复。`,
+      '确认删除体检任务',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+
+  await checksApi.remove(task.id)
+  ElMessage.success(`体检任务 #${task.id} 已删除`)
+
+  if (currentTask.value?.id === task.id) {
+    sseRef.value?.closeActiveStream()
+    currentTask.value = null
+    findings.value = []
+    if (appStore.activeTaskId === task.id) {
+      appStore.setActiveTaskId(null)
+    }
+    await loadTaskList(true)
+  } else {
+    await loadTaskList(false)
+  }
+}
+
 onMounted(() => {
   void loadTaskList(true)
 })
@@ -173,6 +209,7 @@ onMounted(() => {
       @select="selectTask"
       @page-change="handlePageChange"
       @created="handleTaskCreated"
+      @delete="handleDeleteTask"
       @refresh="loadTaskList(false)"
     />
 
@@ -256,6 +293,14 @@ onMounted(() => {
             </el-button>
             <el-button @click="handleDownloadRedline">
               下载标红批注件
+            </el-button>
+            <el-button
+              type="danger"
+              plain
+              :disabled="['extracting', 'checking', 'grading'].includes(currentTask.status)"
+              @click="handleDeleteTask(currentTask)"
+            >
+              删除任务
             </el-button>
           </div>
         </section>

@@ -298,13 +298,18 @@ def _bigram_jaccard(b1: frozenset[str], b2: frozenset[str]) -> float:
 
 
 def _seq_ratio(s1: str, s2: str) -> float:
-    """计算两个字符串的 SequenceMatcher 相似度。"""
+    """计算两个字符串的 SequenceMatcher 相似度（超长文本自动分块防 O(N*M) 单字链爆 CPU）。"""
     if not s1 and not s2:
         return 1.0
     if not s1 or not s2:
         return 0.0
     if s1 == s2:
         return 1.0
+    if max(len(s1), len(s2)) > 2000:
+        step = 8
+        c1 = [s1[i:i + step] for i in range(0, len(s1), step)]
+        c2 = [s2[i:i + step] for i in range(0, len(s2), step)]
+        return SequenceMatcher(None, c1, c2, autojunk=False).ratio()
     return SequenceMatcher(None, s1, s2, autojunk=False).ratio()
 
 
@@ -341,11 +346,17 @@ def _compute_clause_similarity(u: _ClauseUnit, v: _ClauseUnit) -> tuple[float, f
     Returns:
         (S, body_sim, is_title_exact_and_body_ok)
     """
+    jaccard = _bigram_jaccard(u.bigrams, v.bigrams)
+    if (
+        max(len(u.pure_body_norm), len(v.pure_body_norm)) > 800
+        and jaccard < 0.04
+        and (not u.title_norm or u.title_norm != v.title_norm)
+    ):
+        return 0.0, 0.0, False
+
     body_sim = _seq_ratio(u.pure_body_norm, v.pure_body_norm)
     if _is_conflicting_template_clause(u, v, body_sim):
         return 0.0, body_sim, False
-
-    jaccard = _bigram_jaccard(u.bigrams, v.bigrams)
 
     if not u.title_norm and not v.title_norm:
         s = 0.80 * body_sim + 0.20 * jaccard
@@ -379,6 +390,11 @@ def _combine_units(units: list[_ClauseUnit]) -> _ClauseUnit:
     combined_core_title = ''.join(u.core_title_norm for u in units if u.core_title_norm)
     combined_body_norm = ''.join(u.body_norm for u in units)
     combined_pure_body_norm = ''.join(u.pure_body_norm for u in units)
+    boundary_bgs = {
+        units[k].body_norm[-1] + units[k + 1].body_norm[0]
+        for k in range(len(units) - 1)
+        if units[k].body_norm and units[k + 1].body_norm
+    }
     return _ClauseUnit(
         idx=first.idx,
         no=combined_no,
@@ -392,7 +408,7 @@ def _combine_units(units: list[_ClauseUnit]) -> _ClauseUnit:
         body_norm=combined_body_norm,
         pure_body_norm=combined_pure_body_norm,
         token='',
-        bigrams=_make_bigrams(combined_body_norm),
+        bigrams=frozenset(boundary_bgs).union(*(u.bigrams for u in units)),
         archetypes=frozenset().union(*(u.archetypes for u in units)),
     )
 

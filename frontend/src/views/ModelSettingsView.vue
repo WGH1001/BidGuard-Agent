@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { modelConfigApi } from '@/api'
 
 const loading = ref(false)
@@ -184,6 +185,19 @@ async function handleTest(): Promise<void> {
 }
 
 async function handleUnbind(): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      '确认解绑并清空当前账号保存的个人大模型服务配置吗？解绑后将自动回退使用系统默认网关。',
+      '确认解绑模型配置',
+      {
+        type: 'warning',
+        confirmButtonText: '确认解绑',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
   deleting.value = true
   try {
     await modelConfigApi.remove()

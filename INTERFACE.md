@@ -200,3 +200,4 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 | 2026-11-05 | B1 卡审前修订：① §1 降级声明按模块分列 ② users.username 改全局唯一 ③ bid_findings 增 detail_json 兜底列 ④ 令牌 payload 键名锁死 sub/tenant_id/role/exp | 架构侧 |
 | 2026-11-05 | B1 验收修正：① users.username 落实全局唯一 ② create_token payload 仅留 sub/tenant_id/role/exp；保留 bid_quote 列与 BidFinding 只读属性 | 架构侧 |
 | 2026-11-06 | E4 法规库与法条核验卡：① §1.10 新增 `core/regulation_library.py` 与 `core/regulation_crawler.py` 契约签名，F7 新增第 6 工具 `cite_regulation` ② §2 新增第 10、11 表 `regulation_laws` 与 `regulation_articles` ③ 挂载 `/api/regulations` 路由组 | 实现侧 |
+| 2026-11-09 | E10 前端功能走查与并发稳定性卡：① `/api/radar` 补齐 `GET /api/radar`（历史列表）、`GET /api/radar/{task_id}`（回放 `RadarScanOut`）、`DELETE /api/radar/{task_id}` ② `DELETE /api/checks/{task_id}` 补齐运行中任务 `409 TASK_RUNNING` 拒删守卫与上传文件/导出产物级联清理 ③ `/api/regulations` 新增 `DELETE /api/regulations/laws/{law_id}`（`require_admin` 级联清理条文） ④ `/api/dashboard` 将 F1 提取条款数纳入 `defense_matrix` 统计 | 实现侧 |

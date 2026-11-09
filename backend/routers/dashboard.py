@@ -75,7 +75,12 @@ def get_dashboard_stats(
     veto_count = sum(1 for f in findings if f.severity == 'error' and f.feedback != 'rejected')
     warning_count = sum(1 for f in findings if f.severity == 'warning' and f.feedback != 'rejected')
 
-    mod_counts = {'F1': 0, 'F2': 0, 'F3': 0, 'F4': 0, 'F5': delivered_count, 'F6': 0}
+    f1_task_extracted = sum(
+        int((t.stats_json or {}).get('f1_extracted_count') or (t.stats_json or {}).get('total_requirements') or 0)
+        for t in tasks
+        if t.task_type == 'pre_check'
+    )
+    mod_counts = {'F1': f1_task_extracted, 'F2': 0, 'F3': 0, 'F4': 0, 'F5': delivered_count, 'F6': 0}
     for f in findings:
         if f.source_module in mod_counts:
             mod_counts[f.source_module] += 1

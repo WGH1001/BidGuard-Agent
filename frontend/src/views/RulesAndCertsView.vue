@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { regulationsApi, rulesApi } from '@/api'
 import {
   formatMoneyDisplay,
@@ -174,6 +175,19 @@ async function handleSaveCert(): Promise<void> {
 
 async function handleDeleteCert(row: Partial<CertificateOut>): Promise<void> {
   if (row.id === undefined) return
+  try {
+    await ElMessageBox.confirm(
+      `确认删除企业投标证照「${row.cert_name ?? ''}」吗？删除后不可恢复。`,
+      '确认删除证照记录',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
   await rulesApi.deleteCertificate(row.id)
   ElMessage.success(`已删除证照「${row.cert_name ?? ''}」`)
   await fetchCerts()
@@ -231,6 +245,35 @@ async function handleSelectLaw(law: RegulationLawOut): Promise<void> {
   selectedLaw.value = law
   articlePage.value = 1
   await fetchLawArticles()
+}
+
+async function handleDeleteLaw(law: RegulationLawOut): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `将级联删除《${law.name}》及该法全部 ${law.article_count} 条条文（种子法规删除后可通过重新上传/导入恢复），是否确认删除？`,
+      '确认级联删除法规',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+
+  await regulationsApi.deleteLaw(law.id)
+  ElMessage.success(`已删除《${law.name}》及全部 ${law.article_count} 条条文`)
+
+  if (selectedLawId.value === law.id) {
+    selectedLawId.value = null
+    selectedLaw.value = null
+    articles.value = []
+    totalArticles.value = 0
+    await fetchLaws(true)
+  } else {
+    await fetchLaws(false)
+  }
 }
 
 async function fetchLawArticles(): Promise<void> {
@@ -650,7 +693,19 @@ onMounted(() => {
                 >
                   <div class="lc-row1">
                     <span class="lc-name">{{ law.name }}</span>
-                    <span class="sev-pill info">{{ law.article_count }} 条</span>
+                    <div class="lc-row1-right">
+                      <span class="sev-pill info">{{ law.article_count }} 条</span>
+                      <el-button
+                        v-if="authStore.isAdmin"
+                        type="danger"
+                        link
+                        size="small"
+                        title="删除该部法规及全部条文"
+                        @click.stop="handleDeleteLaw(law)"
+                      >
+                        删除
+                      </el-button>
+                    </div>
                   </div>
                   <div class="lc-meta">
                     <div>发文机关：{{ law.issuing_body || '国家立法机关' }}</div>
@@ -1067,6 +1122,13 @@ onMounted(() => {
   align-items: flex-start;
   gap: 8px;
   margin-bottom: 6px;
+}
+
+.lc-row1-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .lc-name {

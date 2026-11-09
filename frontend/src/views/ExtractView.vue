@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { extractApi, validateUploadFile } from '@/api'
 import {
   formatPageOrOffset,
@@ -19,9 +20,93 @@ const kindFilter = ref<'ALL' | 'requirement' | 'non_req'>('ALL')
 const result = ref<ExtractChecklistOut | null>(null)
 const selectedFile = ref<File | null>(null)
 
+interface ExtractHistoryItem {
+  id: string
+  createdAt: string
+  data: ExtractChecklistOut
+}
+
+const historyList = ref<ExtractHistoryItem[]>([])
+const activeHistoryId = ref<string>('')
+
 interface CachedExtractPayload {
   username: string
   data: ExtractChecklistOut
+}
+
+function getHistoryStorageKey(): string {
+  const curUser = authStore.user?.username || 'default'
+  return `bidguard_extract_history_v1_${curUser}`
+}
+
+function loadHistoryFromStorage(): void {
+  try {
+    const raw = localStorage.getItem(getHistoryStorageKey())
+    if (!raw) {
+      historyList.value = []
+      return
+    }
+    const parsed = JSON.parse(raw) as ExtractHistoryItem[]
+    historyList.value = Array.isArray(parsed) ? parsed : []
+  } catch {
+    historyList.value = []
+  }
+}
+
+function persistHistoryToStorage(): void {
+  try {
+    localStorage.setItem(getHistoryStorageKey(), JSON.stringify(historyList.value.slice(0, 8)))
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function pushToHistory(data: ExtractChecklistOut): void {
+  const nowStr = new Date().toISOString().slice(0, 16).replace('T', ' ')
+  const id = `${data.filename}_${Date.now()}`
+  const filtered = historyList.value.filter((h) => h.data.filename !== data.filename)
+  historyList.value = [{ id, createdAt: nowStr, data }, ...filtered].slice(0, 8)
+  activeHistoryId.value = id
+  persistHistoryToStorage()
+}
+
+function handleSelectHistoryItem(item: ExtractHistoryItem): void {
+  activeHistoryId.value = item.id
+  result.value = item.data
+  saveToSessionStorage(item.data)
+}
+
+async function handleDeleteHistoryItem(item: ExtractHistoryItem): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除招标文件「${item.data.filename}」的 F1 四张清单提取记录吗？`,
+      '确认删除提取记录',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+
+  historyList.value = historyList.value.filter((h) => h.id !== item.id)
+  persistHistoryToStorage()
+
+  if (activeHistoryId.value === item.id || result.value?.filename === item.data.filename) {
+    if (historyList.value.length > 0) {
+      const next = historyList.value[0]
+      if (next) {
+        handleSelectHistoryItem(next)
+      }
+    } else {
+      activeHistoryId.value = ''
+      result.value = null
+      sessionStorage.removeItem(EXTRACT_CACHE_KEY)
+    }
+  }
+  ElMessage.success(`已删除「${item.data.filename}」提取记录`)
 }
 
 function saveToSessionStorage(data: ExtractChecklistOut): void {
@@ -37,25 +122,43 @@ function saveToSessionStorage(data: ExtractChecklistOut): void {
 }
 
 function restoreFromSessionStorage(): void {
+  loadHistoryFromStorage()
   if (result.value) return
   try {
     const raw = sessionStorage.getItem(EXTRACT_CACHE_KEY)
-    if (!raw) return
-    const parsed = JSON.parse(raw) as Partial<CachedExtractPayload>
-    const curUser = authStore.user?.username || ''
-    if (parsed && parsed.data && (!parsed.username || parsed.username === curUser)) {
-      result.value = parsed.data
-    } else {
-      sessionStorage.removeItem(EXTRACT_CACHE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<CachedExtractPayload>
+      const curUser = authStore.user?.username || ''
+      if (parsed && parsed.data && (!parsed.username || parsed.username === curUser)) {
+        result.value = parsed.data
+        const matched = historyList.value.find((h) => h.data.filename === parsed.data?.filename)
+        if (matched) {
+          activeHistoryId.value = matched.id
+        } else {
+          pushToHistory(parsed.data)
+        }
+        return
+      } else {
+        sessionStorage.removeItem(EXTRACT_CACHE_KEY)
+      }
     }
   } catch {
     // 忽略损坏缓存
+  }
+  if (!result.value && historyList.value.length > 0) {
+    const first = historyList.value[0]
+    if (first) {
+      handleSelectHistoryItem(first)
+    }
   }
 }
 
 function handleAuthChanged(): void {
   result.value = null
   selectedFile.value = null
+  historyList.value = []
+  activeHistoryId.value = ''
+  loadHistoryFromStorage()
 }
 
 function onFileChange(ev: Event): void {
@@ -81,6 +184,7 @@ async function handleRunExtract(): Promise<void> {
     const extracted = await extractApi.extract(selectedFile.value)
     result.value = extracted
     saveToSessionStorage(extracted)
+    pushToHistory(extracted)
     ElMessage.success(`成功提取「${extracted.filename}」四张必审红线清单`)
   } finally {
     loading.value = false
@@ -192,6 +296,34 @@ onBeforeUnmount(() => {
         <el-button type="primary" :loading="loading" @click="handleRunExtract">
           立即提取四张清单
         </el-button>
+      </div>
+    </section>
+
+    <!-- F1 提取历史记录条（支持点击切换查看 + 二次确认删除） -->
+    <section v-if="historyList.length > 0" class="bg-panel ext-history-bar">
+      <div class="ehb-label">近期提取记录（{{ historyList.length }}）：</div>
+      <div class="ehb-chips">
+        <div
+          v-for="item in historyList"
+          :key="item.id"
+          class="ehb-chip"
+          :class="{ active: item.id === activeHistoryId || result?.filename === item.data.filename }"
+          @click="handleSelectHistoryItem(item)"
+        >
+          <span class="ehb-name" :title="item.data.filename">{{ item.data.filename }}</span>
+          <span class="sev-pill ok">★▲ {{ item.data.marked_clauses.length }}</span>
+          <span class="ehb-time mono-num">{{ item.createdAt }}</span>
+          <el-button
+            type="danger"
+            link
+            size="small"
+            class="ehb-del"
+            title="删除该条提取记录"
+            @click.stop="handleDeleteHistoryItem(item)"
+          >
+            删除
+          </el-button>
+        </div>
       </div>
     </section>
 
@@ -437,6 +569,70 @@ onBeforeUnmount(() => {
 
 .ext-file-input {
   font-size: 12.5px;
+}
+
+.ext-history-bar {
+  padding: 10px 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ehb-label {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--txt-sec);
+  flex-shrink: 0;
+}
+
+.ehb-chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ehb-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-line);
+  background: var(--bg-subtle);
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.15s;
+}
+
+.ehb-chip:hover {
+  border-color: var(--brand);
+  background: #ffffff;
+}
+
+.ehb-chip.active {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.ehb-name {
+  font-weight: 700;
+  color: var(--txt-strong);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ehb-time {
+  font-size: 11px;
+  color: var(--txt-muted);
+}
+
+.ehb-del {
+  font-size: 11.5px;
+  padding: 0 2px;
 }
 
 .det-mode-banner {

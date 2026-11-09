@@ -189,6 +189,15 @@ export const radarApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
   },
+  list(): Promise<BidTaskListOut> {
+    return get<BidTaskListOut>('/radar')
+  },
+  detail(taskId: number): Promise<RadarScanOut> {
+    return get<RadarScanOut>(`/radar/${taskId}`)
+  },
+  remove(taskId: number): Promise<OkResponse> {
+    return del<OkResponse>(`/radar/${taskId}`)
+  },
 }
 
 export const qaApi = {
@@ -300,5 +309,8 @@ export const regulationsApi = {
   },
   crawlUpdates(): Promise<RegulationCrawlOut> {
     return post<RegulationCrawlOut>('/regulations/crawl')
+  },
+  deleteLaw(lawId: number): Promise<RegulationLawOut | OkResponse> {
+    return del<OkResponse>(`/regulations/laws/${lawId}`)
   },
 }

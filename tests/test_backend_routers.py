@@ -359,3 +359,112 @@ def test_extract_radar_rules_and_model_config_routes(client_env: TestClient):
     assert r_dash.status_code == 200
     assert r_dash.json()['total_projects'] >= 1
     assert len(r_dash.json()['defense_matrix']) == 6
+
+
+# ── 6. E10：F6 历史列表/详情/删除、任务运行中 409 拒删与级联清理、法规级联删除、大盘 F1 统计与清零归零 ──
+
+def test_e10_radar_history_task_delete_guard_regulation_delete_and_dashboard_zero(client_env: TestClient):
+    tc = client_env
+    member_hdrs = _login_headers(tc, 'liming')
+    admin_hdrs = _login_headers(tc, 'admin')
+    tenant_b_hdrs = _login_headers(tc, 'bob_tenant_b')
+
+    tender_bytes = _make_docx_bytes([
+        '第一章 采购需求',
+        '★1. 核心交换机须参照中兴品牌 ZXR10 型号进行选型配置。',
+        '上述为设备选型要求。',
+        '★2. 系统须支持国产化银河麒麟操作系统 V10。',
+        '上述为信创要求。',
+    ])
+    bid_bytes = _make_docx_bytes([
+        '一、技术要求响应表',
+        '★1. 核心交换机须参照中兴品牌 ZXR10 型号进行选型配置。（完全满足）',
+        '★2. 系统须支持国产化银河麒麟操作系统 V10。（完全满足）',
+    ])
+
+    # (a) F6 雷达扫描 -> 历史列表 -> 详情回放 -> 删除
+    r_rad = tc.post(
+        '/api/radar',
+        data={'title': 'E10雷达历史回放测试'},
+        files={'tender_file': ('tender.docx', tender_bytes, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')},
+        headers=member_hdrs,
+    )
+    assert r_rad.status_code == 200
+    rad_task_id = r_rad.json()['task_id']
+
+    r_rad_list = tc.get('/api/radar', headers=member_hdrs)
+    assert r_rad_list.status_code == 200
+    assert any(t['id'] == rad_task_id for t in r_rad_list.json()['items'])
+
+    r_rad_detail = tc.get(f"/api/radar/{rad_task_id}", headers=member_hdrs)
+    assert r_rad_detail.status_code == 200
+    assert r_rad_detail.json()['task_id'] == rad_task_id
+    assert r_rad_detail.json()['title'] == 'E10雷达历史回放测试'
+    assert len(r_rad_detail.json()['suspicious_params']) == 1
+
+    # 跨租户访问雷达详情或删除一律 404
+    assert tc.get(f"/api/radar/{rad_task_id}", headers=tenant_b_hdrs).status_code == 404
+    assert tc.delete(f"/api/radar/{rad_task_id}", headers=tenant_b_hdrs).status_code == 404
+
+    # (b) F2-F4 任务创建与运行 -> 大盘 F1 统计 > 0 -> 运行中 409 拒删 -> 终态级联删除
+    r_check = tc.post(
+        '/api/checks',
+        data={'title': 'E10体检删除与F1统计测试'},
+        files={
+            'tender_file': ('t.docx', tender_bytes, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+            'bid_file': ('b.docx', bid_bytes, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+        },
+        headers=member_hdrs,
+    )
+    assert r_check.status_code == 200
+    chk_id = r_check.json()['id']
+
+    r_run = tc.post(f"/api/checks/{chk_id}/run?sync=true", headers=member_hdrs)
+    assert r_run.status_code == 200
+
+    # 验证大盘 F1 防线统计已纳入 F1 提取条款数（不再恒为 0）
+    r_dash_before = tc.get('/api/dashboard', headers=member_hdrs).json()
+    f1_item = next(m for m in r_dash_before['defense_matrix'] if m['module'] == 'F1')
+    assert f1_item['hit_count'] >= 2
+
+    # 模拟任务处于运行中状态，验证 DELETE 返回 409
+    from backend.models import BidCheckTask
+    s = db_mod.SessionLocal()
+    try:
+        t_obj = s.query(BidCheckTask).filter_by(id=chk_id).first()
+        t_obj.status = 'checking'
+        s.commit()
+    finally:
+        s.close()
+
+    r_del_running = tc.delete(f"/api/checks/{chk_id}", headers=member_hdrs)
+    assert r_del_running.status_code == 409
+    assert r_del_running.json()['detail']['code'] == 'TASK_RUNNING'
+
+    # 恢复为 delivered 后删除全租户所有任务（含 radar 与 pre_check），验证大盘归零
+    s = db_mod.SessionLocal()
+    try:
+        t_obj = s.query(BidCheckTask).filter_by(id=chk_id).first()
+        t_obj.status = 'delivered'
+        s.commit()
+    finally:
+        s.close()
+
+    all_tasks = tc.get('/api/checks?page_size=100', headers=member_hdrs).json()['items']
+    for item in all_tasks:
+        r_del = tc.delete(f"/api/checks/{item['id']}", headers=member_hdrs)
+        assert r_del.status_code == 200
+
+    r_dash_zero = tc.get('/api/dashboard', headers=member_hdrs).json()
+    assert r_dash_zero['total_projects'] == 0
+    assert all(m['hit_count'] == 0 for m in r_dash_zero['defense_matrix'])
+
+    # (c) E4 法规库删除：member 403，admin 200 级联清理条文
+    laws = tc.get('/api/regulations/laws', headers=member_hdrs).json()
+    assert len(laws) >= 1
+    target_law_id = laws[-1]['id']
+
+    assert tc.delete(f"/api/regulations/laws/{target_law_id}", headers=member_hdrs).status_code == 403
+    r_del_law = tc.delete(f"/api/regulations/laws/{target_law_id}", headers=admin_hdrs)
+    assert r_del_law.status_code == 200
+    assert tc.get(f"/api/regulations/laws/{target_law_id}", headers=admin_hdrs).status_code == 404

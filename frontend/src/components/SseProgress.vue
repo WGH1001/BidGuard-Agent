@@ -35,6 +35,7 @@ const PIPELINE_STAGES: PipelineStageNode[] = [
 ]
 
 const streaming = ref(false)
+const streamExhaustedForTask = ref<number | null>(null)
 const localStatus = ref<string>(props.status)
 const localProgress = ref<number>(props.progress || 0)
 const localDetail = ref<string>(props.stageDetail || '')
@@ -75,6 +76,7 @@ const isDelivered = computed(() => localStatus.value === 'delivered')
 
 function startStream(resetZero = true): void {
   closeActiveStream()
+  streamExhaustedForTask.value = null
   if (resetZero) {
     localStatus.value = 'extracting'
     localProgress.value = 0
@@ -95,6 +97,7 @@ function startStream(resetZero = true): void {
     },
     onDone(frame) {
       streaming.value = false
+      streamExhaustedForTask.value = null
       localStatus.value = 'delivered'
       localProgress.value = 100
       localDetail.value = frame.stage_detail || '防废标核验全部完成'
@@ -102,6 +105,7 @@ function startStream(resetZero = true): void {
     },
     onError(errOrFrame) {
       streaming.value = false
+      streamExhaustedForTask.value = props.taskId
       localStatus.value = 'failed'
       const msg =
         errOrFrame instanceof Error
@@ -120,6 +124,7 @@ watch(
     const [oldId] = oldVals ?? []
     if (newId !== oldId) {
       closeActiveStream()
+      streamExhaustedForTask.value = null
     }
     if (!streaming.value) {
       localStatus.value = String(newSt || 'created')
@@ -128,7 +133,11 @@ watch(
       localError.value = String(newErr || '')
     }
 
-    if (localStatus.value in { extracting: 1, checking: 1, grading: 1 } && !streaming.value) {
+    if (
+      localStatus.value in { extracting: 1, checking: 1, grading: 1 } &&
+      !streaming.value &&
+      streamExhaustedForTask.value !== Number(newId)
+    ) {
       startStream(false)
     }
   },

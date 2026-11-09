@@ -434,6 +434,7 @@ class BidTaskWorker:
                 'total_findings': len(new_findings),
                 'error_count': err_cnt,
                 'warning_count': warn_cnt,
+                'f1_extracted_count': len(f1_requirements),
                 'total_requirements': int(align_sum.get('total_requirements', 0)),
                 'aligned_hits': int(align_sum.get('aligned_hits', 0)),
                 'hit_rate': float(align_sum.get('hit_rate', 1.0)),
