@@ -290,6 +290,12 @@ def _try_level2_embedding_rerank(
     if os.environ.get('BIDGUARD_FORCE_ZERO_TOKEN', '').strip() == '1':
         return None
 
+    # E12 快速失败：client 未配置向量模型（models.embedding 缺失）时不发起任何请求，
+    # 直接静默回退 Level 1——严禁因向量能力缺失报错中断体检/F7 追问
+    client_models = getattr(client, 'models', None)
+    if isinstance(client_models, dict) and not client_models.get('embedding'):
+        return None
+
     embed_fn = getattr(client, 'embed', None) or getattr(client, 'embeddings', None)
     if not callable(embed_fn):
         return None

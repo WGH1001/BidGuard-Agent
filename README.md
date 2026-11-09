@@ -55,6 +55,32 @@
 
 ---
 
+## 🧠 F7 六大工具与三级混合检索（Rerank）原理
+
+### F7 追问引擎的六大受控工具（`core/bid_react_agent.py`）
+
+工具层为**确定性函数**（老项目独立 `core/tools.py` 注册表模式的内嵌版），LLM 只决定"何时调哪个、怎么解读结果"，工具本身零幻觉、可单测：
+
+| # | 工具 | 职责 | 底层实现 |
+|---|---|---|---|
+| 1 | `search_tender` | 招标文件关键词检索 → ±200 字原文窗口 + 字符偏移 + PDF 页码 | `_search_text_windows` 确定性定位 |
+| 2 | `search_bid` | 投标文件关键词检索（同上） | 同上 |
+| 3 | `locate_chapter` | 章节标题定位 | `tender_extractor.locate_chapters` |
+| 4 | `recalc_price` | 报价算术复算 → 沙盒 findings | F2 `PriceSandbox`（Decimal，0 Token） |
+| 5 | `check_cert_expiry` | 证照效期/串名核验 | F3 `scan_qualifications`（0 Token） |
+| 6 | `cite_regulation` | 权威法条检索 → 条文原文 + 法律名 + 条号（库空诚实报"法规库为空"） | E4 法规库（大模型对法条真伪零裁决权） |
+
+ReAct 循环最多 6 轮；`final` 回答中的引文强制过 `verify_quote()` 原文逐字核验，杜绝编造；无模型网关时自动降级 `keyword_fallback` 确定性检索。
+
+### 三级自适应混合检索与 Rerank 原理（`core/hybrid_retriever.py`，E2 交付 / E12 激活）
+
+- **触发门控**：85%+ 规范条款在 F4 初筛（条款号/标题/2-gram 重合度）0ms 直通，仅"疑似漏应答"复核与 F7 自然语言提问才进入混合检索；
+- **Level 1（0 Token，<3ms）**：纯 Python Okapi BM25（k1=1.5, b=0.75）+ **45 组招投标领域同义词**双向扩展（如"质保期"↔"免费维保期"，同组命中映射共享概念 token 并获 2.2 倍加权）+ 中文 2-gram 分词；
+- **Level 2 = Rerank 精排**（配置了向量模型时自动激活，`models.yaml` 的 `models.embedding`）：全文按行切块 → embedding 向量化（**SHA256 文件级缓存** `data/cache/{hash}.emb.npy`，同一文档只算一次）→ 余弦相似度粗筛 Top-15 → 与 BM25 归一化得分**加权融合（0.55×语义分 + 0.45×字面分）** → 精排取 Top-3。本质：把"字面匹配度"与"语义相似度"两个维度融合后重新排序；
+- **Level 3 兜底**：无向量模型 / 切换无 embedding 的内网网关 / `BIDGUARD_FORCE_ZERO_TOKEN=1` / 任何 embedding 异常（404、超时等）→ **静默无感知回退 Level 1**，零报错、绝不中断体检与追问。
+
+---
+
 ## 🏗️ 系统架构与目录结构
 
 ### 4.1 五层技术栈

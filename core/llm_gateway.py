@@ -47,6 +47,7 @@ def build_client_from_user_config(
     model_flash: str,
     model_flagship: Optional[str] = None,
     supports_reasoning_effort: bool = False,
+    model_embedding: Optional[str] = None,
 ) -> 'LLMClient':
     """T60 根据用户级自定义配置构造 LLMClient 实例（不改既有 get_llm_client 签名）。
 
@@ -56,6 +57,8 @@ def build_client_from_user_config(
         model_flash: 快速模型名（用于问答、摘要提取、轻量评估）。
         model_flagship: 旗舰模型名（用于语义审查；缺省与 model_flash 相同）。
         supports_reasoning_effort: 是否支持 reasoning_effort 参数透传。
+        model_embedding: 可选向量模型名（E12：配置后激活 L2 混合检索 Rerank；
+            缺省 None = 不配置向量模型，检索自动停留 Level 1）。
     """
     if not base_url or not str(base_url).strip():
         raise ValueError("base_url 不能为空")
@@ -68,13 +71,17 @@ def build_client_from_user_config(
     flagship_clean = str(model_flagship or flash_clean).strip() or flash_clean
     chat_options = {'reasoning_effort': 'low'} if supports_reasoning_effort else {}
 
+    models_cfg = {
+        'flash': flash_clean,
+        'flagship': flagship_clean,
+    }
+    if model_embedding and str(model_embedding).strip():
+        models_cfg['embedding'] = str(model_embedding).strip()
+
     env_config = {
         'provider': 'user_custom',
         'base_url': str(base_url).strip().rstrip('/'),
-        'models': {
-            'flash': flash_clean,
-            'flagship': flagship_clean,
-        },
+        'models': models_cfg,
         'chat_options': chat_options,
         'pricing': {},
     }
@@ -348,3 +355,58 @@ class LLMClient:
     def total_usage(self) -> dict:
         """返回累计用量 {'prompt_tokens','completion_tokens','cost','calls'}。"""
         return self._usage.copy()
+
+    def embed(self, texts) -> list:
+        """E12：调用向量模型返回浮点向量列表（OpenAI 兼容 /v1/embeddings 规范）。
+
+        Args:
+            texts: 单个字符串或字符串列表。
+
+        Returns:
+            list[list[float]]：与输入顺序一一对应的向量列表。
+
+        Raises:
+            ValueError: 未在 models.yaml / 用户配置中配置 models.embedding 向量模型名
+                （调用方 hybrid_retriever 捕获后静默降级 Level 1，不会中断业务）。
+        """
+        model_name = self.models.get('embedding')
+        if not model_name:
+            raise ValueError("未配置 embedding 向量模型（models.yaml 或用户配置的 models.embedding），"
+                             "L2 混合检索不可用，调用方应降级 Level 1")
+
+        if isinstance(texts, str):
+            texts_list = [texts]
+        else:
+            texts_list = [str(t) for t in (texts or [])]
+        if not texts_list:
+            return []
+
+        if self.use_openai:
+            resp = self.client.embeddings.create(model=model_name, input=texts_list)
+            data = sorted(resp.data, key=lambda d: getattr(d, 'index', 0))
+            vecs = [list(map(float, d.embedding)) for d in data]
+            usage_obj = getattr(resp, 'usage', None)
+            prompt_tokens = int(getattr(usage_obj, 'prompt_tokens', 0) or 0)
+        else:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            resp = self.client.post(
+                f"{self.base_url}/embeddings",
+                headers=headers,
+                json={"model": model_name, "input": texts_list},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            items = sorted(data.get('data', []), key=lambda d: d.get('index', 0))
+            vecs = [[float(x) for x in d['embedding']] for d in items]
+            usage_obj = data.get('usage') or {}
+            prompt_tokens = int(usage_obj.get('prompt_tokens', 0) or 0)
+
+        if len(vecs) != len(texts_list):
+            raise RuntimeError(f"embeddings 返回数量与输入不一致：{len(vecs)} != {len(texts_list)}")
+
+        # embedding 仅消耗输入 token（completion 计 0），计入用量账本
+        self._calc_and_record_usage(model_name, prompt_tokens, 0)
+        return vecs

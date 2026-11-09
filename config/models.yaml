@@ -10,6 +10,9 @@ envs:
     models:
       flagship: glm-5.3-flash        # 统一使用极速 flash 模型，大幅提速语义审查与 ReAct 问答
       flash: glm-5.3-flash           # 全局定义提取、分类、轻量质检
+      embedding: embedding-3         # E12：向量模型（激活 L2 混合检索 Rerank）；
+                                     #   智谱官方支持 /v1/embeddings；切到无向量模型的公司
+                                     #   统一网关时删除本行即可全自动无感知降级回 Level 1
     chat_options:                    # 附加请求参数（经网关透传，max_tokens 除外）
       reasoning_effort: low          # v2.0.4：glm-5.3-flash 强制思考且量不可控
                                      #   （thinking.budget/effort 均被上游忽略，
