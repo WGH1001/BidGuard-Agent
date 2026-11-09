@@ -70,7 +70,7 @@ BidGuard-Agent/
 
 - **开发阶段**：3 周排期全部完成 + 十一轮增强升级（E1~E10、E12/E13）交付。系统已具备交付条件，处于语料扩充与仿真验证阶段（仿真标书 10/11 验收通过，剩芜湖无为）
 - **Git 最新 Commit**：`fca119d`（本地 main；远端同步状态以 `git log origin/main..HEAD` 实数为准）
-- **测试基线**：**146 项 pytest 全绿（零回归）**——第一验收线已从 60 项演进至 146 项
+- **测试基线**：**149 项 pytest 全绿（零回归）**——第一验收线已从 60 项演进至 149 项
 - **模型网关基线**：`config/models.yaml` 默认 `default_env: demo`（智谱 `glm-5.3-flash` 直连，`reasoning_effort: low`，`embedding: embedding-3` 已激活 L2 混合检索）；预留 `prod` 内网私有网关（`http://10.0.2.81:3000/v1`，无向量模型自动无感降级 Level 1）
 - **运行环境**：本机开发用项目自带 `.venv`（依赖已全量钉死）；生产走 Docker 四容器（`docker compose up -d --build`，层缓存全热时秒级）
 - **快速验收命令**：
@@ -169,13 +169,14 @@ BidGuard-Agent/
 | E9 | F2 明细行全量收集（多字量词/子序号/纵向合并下探）+ 元/年×租赁期限定价 + 父子表多重集防重 | `2137047` | 131 项 |
 | E12 | L2 混合检索激活（LLMClient.embed() + models.embedding 配置 + 降级守卫）+ Gemini 交叉复查加固（缓存维度失配作废重算/requests timeout） | `f2e1952`→`fca119d` | 146 项 |
 | E13 | F2 双胞胎明细表去重（金额多重集主键 + DUPLICATE_DETAIL_TABLE 提示 + 非双胞胎兜底） | `38bb1d1` | 146 项 |
+| E11 | 体检任务五阶段耗时统计（started_at/finished_at/duration_json + 老库平滑加列 + 前端最慢阶段高亮） | `b62887a` | 149 项 |
 | chore | requirements 全量钉死（`59e6b64`）、基础镜像 digest 钉死、弹窗会话记忆 | `90a1947` | — |
 
 ---
 
 ## 7. 协作纪律与工程红线（完整版见 `AGENTS.md`）
 
-1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线 **146 项**。
+1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线 **149 项**。
 2. **凡能算的绝不进大模型（0 Token 优先）**；金额全程 `Decimal` 禁 `float`（ROUND_HALF_UP 量化 0.01）。
 3. **LLM 只吃局部窗口 + 强制 `quote_verifier` 溯源**；严禁整本标书直塞。
 4. **宁缺毋滥显式降级**：无法对齐必返回 NEED_MANUAL；找不到位置绝不乱锚（E5 五级定位链 + 置信护栏）；页码诚实回退字符偏移并标"不一定准确"。
