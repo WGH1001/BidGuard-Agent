@@ -1,18 +1,21 @@
 # -*- coding: utf-8 -*-
-"""B2 / E3R / E5 · 进程内线程池任务执行器 + SSE 进度广播总线 + 三级 LLM 客户端降级解析器。
+"""B2 / E3R / E5 / E11 · 进程内线程池任务执行器 + SSE 进度广播总线 + 三级 LLM 客户端降级解析器 + 分阶段耗时统计。
 
-严格遵循 INTERFACE.md §1、§3.3、E3R 实锤 B 与 E5 措辞动态化：
+严格遵循 INTERFACE.md §1、§3.3、E3R 实锤 B、E5 措辞动态化与 E11 耗时可观测性：
 1. 状态机五态推进：created -> extracting -> checking -> grading -> delivered（异常转 failed）；
 2. SSE 三种标准事件：event: progress / event: done / event: error；
 3. E3R 实锤 B 修复：同一任务再次触发 run 时，submit_check_task 立即调用 broadcaster.clear(task_id)
    清除上一轮残留的 done/error 终态帧，并将数据库 status 同步重置为 'extracting'、progress=0；
 4. 溯源章铁律：F2 算术与 F3 效期/串名计算类发现 quote_verified=False（不盖原文溯源章）；
-5. E5 措辞动态化：F4 发现的 category 与 suggestion 按条款符号（★ / ▲ / ★或▲）动态生成。
+5. E5 措辞动态化：F4 发现的 category 与 suggestion 按条款符号（★ / ▲ / ★或▲）动态生成；
+6. E11 耗时可观测性：记录 started_at / finished_at（UTC）与 duration_json（f1_ms/f2_ms/f3_ms/f4_ms/grading_ms/total_ms），
+   重跑时自动清空旧耗时，异常失败路径亦保留已完成阶段耗时以便定位卡死点。
 """
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import queue
@@ -23,7 +26,13 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from backend.database import PROJECT_ROOT, get_session_factory
-from backend.models import BidCheckTask, BidFinding, BidRuleConfig, UserModelConfig
+from backend.models import (
+    BidCheckTask,
+    BidFinding,
+    BidRuleConfig,
+    UserModelConfig,
+    ensure_bid_check_tasks_columns,
+)
 from backend.utils.crypto import decrypt_api_key
 from core.llm_gateway import build_client_from_user_config, get_llm_client
 from core.parser import parse_document
@@ -187,16 +196,20 @@ class BidTaskWorker:
         self._shutdown = False
 
     def _reset_task_for_rerun(self, task_id: int) -> None:
-        """E3R 实锤 B：启动/重跑任务前，同步清除 SSE 上一轮终态帧并将 DB 状态置为 extracting(progress=0)。"""
+        """E3R 实锤 B + E11：启动/重跑任务前，同步清除 SSE 上一轮终态帧、清空旧耗时字段并将 DB 状态置为 extracting(progress=0)。"""
         self.broadcaster.clear(task_id)
         session: Session = self.session_factory()
         try:
+            ensure_bid_check_tasks_columns(session.get_bind())
             task = session.query(BidCheckTask).filter_by(id=task_id).first()
             if task is not None:
                 task.status = 'extracting'
                 task.progress = 0
                 task.stage_detail = '正在启动新一轮防废标核验流水线…'
                 task.error_msg = None
+                task.started_at = None
+                task.finished_at = None
+                task.duration_json = None
                 task.updated_at = _utc_now()
                 session.commit()
         except Exception:
@@ -242,23 +255,40 @@ class BidTaskWorker:
         task.stage_detail = detail
         task.updated_at = _utc_now()
         session.commit()
-        self.broadcaster.publish(
-            task.id,
-            'progress',
-            {
-                'task_id': task.id,
-                'status': status,
-                'progress': int(progress),
-                'stage_detail': detail,
-            },
-        )
+        frame_data: dict[str, Any] = {
+            'task_id': task.id,
+            'status': status,
+            'progress': int(progress),
+            'stage_detail': detail,
+        }
+        if task.started_at is not None:
+            frame_data['started_at'] = task.started_at.isoformat()
+        self.broadcaster.publish(task.id, 'progress', frame_data)
 
     def _run_pipeline(self, task_id: int) -> None:
         session: Session = self.session_factory()
+        pipeline_t0 = time.perf_counter()
+        duration_record: dict[str, Optional[int]] = {
+            'f1_ms': None,
+            'f2_ms': None,
+            'f3_ms': None,
+            'f4_ms': None,
+            'grading_ms': None,
+            'total_ms': None,
+        }
         try:
+            ensure_bid_check_tasks_columns(session.get_bind())
             task = session.query(BidCheckTask).filter_by(id=task_id).first()
             if task is None:
                 return
+
+            # E11：流水线开头写入 started_at（UTC）
+            started_utc = _utc_now()
+            task.started_at = started_utc
+            task.finished_at = None
+            task.duration_json = None
+            task.updated_at = started_utc
+            session.commit()
 
             tender_abs = resolve_project_path(task.tender_path)
             bid_abs = resolve_project_path(task.bid_path)
@@ -296,6 +326,7 @@ class BidTaskWorker:
 
             # ── 阶段 1：extracting（F1 招标红线与 ★/▲ 条款提取）──
             self._emit_stage(session, task, 'extracting', 20, 'F1 正在提取招标文件废标红线与 ★/▲ 实质性条款')
+            t_f1 = time.perf_counter()
             if client is not None:
                 try:
                     f1_res = extract_tender_with_llm(str(tender_abs), client=client)
@@ -308,11 +339,16 @@ class BidTaskWorker:
             marked_clauses = list(f1_res.get('marked_clauses') or [])
             invalid_bid_clauses = list(f1_res.get('invalid_bid_clauses') or [])
             f1_requirements = marked_clauses + invalid_bid_clauses
+            duration_record['f1_ms'] = max(0, int(round((time.perf_counter() - t_f1) * 1000)))
 
             # ── 阶段 2：checking（F2 报价沙盒 + F3 证照/串名 + F4 双书逐条响应核验）──
             self._emit_stage(session, task, 'checking', 55, 'F2/F3/F4 正在并行执行报价算术、证照效期与 ★/▲ 条款逐条核验')
 
+            t_f2 = time.perf_counter()
             f2_res = run_price_check(bid_abs, tender_path=tender_abs)
+            duration_record['f2_ms'] = max(0, int(round((time.perf_counter() - t_f2) * 1000)))
+
+            t_f3 = time.perf_counter()
             bid_parsed = parse_document(str(bid_abs))
             f3_findings = scan_qualifications(
                 text=bid_parsed.text,
@@ -321,15 +357,20 @@ class BidTaskWorker:
                 forbidden_names=forbidden_names,
                 target_buyer=buyer_name,
             )
+            duration_record['f3_ms'] = max(0, int(round((time.perf_counter() - t_f3) * 1000)))
+
+            t_f4 = time.perf_counter()
             f4_res = run_response_check(
                 tender_path=tender_abs,
                 bid_path=bid_abs,
                 requirements=f1_requirements,
                 client=client,
             )
+            duration_record['f4_ms'] = max(0, int(round((time.perf_counter() - t_f4) * 1000)))
 
             # ── 阶段 3：grading（风险分级汇总与自定义红线扫描）──
             self._emit_stage(session, task, 'grading', 85, '正在汇总一票否决废标项与扣分项分级')
+            t_grading = time.perf_counter()
 
             session.query(BidFinding).filter_by(task_id=task.id).delete()
             new_findings: list[BidFinding] = []
@@ -425,6 +466,13 @@ class BidTaskWorker:
 
             session.add_all(new_findings)
             session.flush()
+            duration_record['grading_ms'] = max(0, int(round((time.perf_counter() - t_grading) * 1000)))
+
+            stage_sum_ms = sum(
+                v for k, v in duration_record.items() if k != 'total_ms' and isinstance(v, int)
+            )
+            elapsed_total_ms = max(stage_sum_ms, int(round((time.perf_counter() - pipeline_t0) * 1000)))
+            duration_record['total_ms'] = elapsed_total_ms
 
             err_cnt = sum(1 for f in new_findings if f.severity == 'error')
             warn_cnt = sum(1 for f in new_findings if f.severity == 'warning')
@@ -445,13 +493,18 @@ class BidTaskWorker:
             }
 
             # ── 阶段 4：delivered（核验完成）──
+            finished_utc = _utc_now()
+            if task.started_at is not None and finished_utc < task.started_at:
+                finished_utc = task.started_at
             task.stats_json = stats_payload
             task.llm_usage_json = {'llm_status': llm_status}
             task.status = 'delivered'
             task.progress = 100
             task.stage_detail = f"体检完成：检出 {err_cnt} 处一票否决项、{warn_cnt} 处预警项"
-            task.delivered_at = _utc_now()
-            task.updated_at = _utc_now()
+            task.finished_at = finished_utc
+            task.duration_json = json.dumps(duration_record, ensure_ascii=False)
+            task.delivered_at = finished_utc
+            task.updated_at = finished_utc
             session.commit()
 
             self.broadcaster.publish(
@@ -461,18 +514,32 @@ class BidTaskWorker:
                     'task_id': task.id,
                     'status': 'delivered',
                     'stats': stats_payload,
+                    'started_at': task.started_at.isoformat() if task.started_at else None,
+                    'finished_at': finished_utc.isoformat(),
+                    'duration': duration_record,
                 },
             )
         except Exception as exc:
             session.rollback()
             err_msg = f"{type(exc).__name__}: {exc}"
+            stage_sum_ms = sum(
+                v for k, v in duration_record.items() if k != 'total_ms' and isinstance(v, int)
+            )
+            duration_record['total_ms'] = max(stage_sum_ms, int(round((time.perf_counter() - pipeline_t0) * 1000)))
+            finished_utc = _utc_now()
             try:
                 task = session.query(BidCheckTask).filter_by(id=task_id).first()
                 if task is not None:
+                    if task.started_at is None:
+                        task.started_at = finished_utc
+                    elif finished_utc < task.started_at:
+                        finished_utc = task.started_at
                     task.status = 'failed'
                     task.error_msg = err_msg
                     task.stage_detail = f"核验异常中断：{err_msg}"
-                    task.updated_at = _utc_now()
+                    task.finished_at = finished_utc
+                    task.duration_json = json.dumps(duration_record, ensure_ascii=False)
+                    task.updated_at = finished_utc
                     session.commit()
             except Exception:
                 session.rollback()
@@ -483,6 +550,8 @@ class BidTaskWorker:
                     'task_id': task_id,
                     'status': 'failed',
                     'error_msg': err_msg,
+                    'finished_at': finished_utc.isoformat(),
+                    'duration': duration_record,
                 },
             )
         finally:

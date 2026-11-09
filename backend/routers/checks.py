@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""B2 · 第 3 组路由：/api/checks（双书上传、任务 CRUD、流水线触发、SSE 流、反馈、NEED_MANUAL 人工回填）。"""
+"""B2 / E11 · 第 3 组路由：/api/checks（双书上传、任务 CRUD、流水线触发、SSE 流、反馈、NEED_MANUAL 人工回填、分阶段耗时透出）。"""
 from __future__ import annotations
 
 import json
 from pathlib import Path
 import queue
 import shutil
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
@@ -14,12 +14,12 @@ from sqlalchemy.orm import Session
 
 from backend.auth import AuthUser, get_current_user, record_audit
 from backend.database import PROJECT_ROOT, SessionLocal, get_db
-from backend.models import BidCheckTask, BidFinding, QaSession
+from backend.models import BidCheckTask, BidFinding, QaSession, ensure_bid_check_tasks_columns
 from backend.schemas import (
     BidFindingOut,
-    BidTaskDetailOut,
-    BidTaskListOut,
-    BidTaskOut,
+    BidTaskDetailOut as _BaseBidTaskDetailOut,
+    BidTaskListOut as _BaseBidTaskListOut,
+    BidTaskOut as _BaseBidTaskOut,
     FindingFeedbackRequest,
     FindingListOut,
     OkResponse,
@@ -35,6 +35,34 @@ router = APIRouter(prefix='/api/checks', tags=['checks'])
 _ALLOWED_EXTS = {'.docx', '.pdf', '.txt'}
 _MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100MB
 _UPLOADS_ROOT = (PROJECT_ROOT / 'data' / 'uploads').resolve()
+
+
+# ── E11 扩展 Pydantic Out 模型：在不改动 backend/schemas.py 的前提下向前端透出 started_at / finished_at / duration ──
+class BidTaskOut(_BaseBidTaskOut):
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    duration: Optional[dict[str, Optional[int]]] = None
+
+
+class BidTaskListOut(_BaseBidTaskListOut):
+    items: list[BidTaskOut]
+
+
+class BidTaskDetailOut(_BaseBidTaskDetailOut):
+    task: BidTaskOut
+
+
+def _parse_duration_json(raw_text: Optional[str]) -> Optional[dict[str, Optional[int]]]:
+    """解析数据库的 duration_json 字符串为字典；为空或非法 JSON 时返回 None。"""
+    if not raw_text:
+        return None
+    if isinstance(raw_text, dict):
+        return raw_text
+    try:
+        parsed = json.loads(raw_text)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
 
 
 def _save_validated_upload(upload: UploadFile, tenant_id: int, task_id: int, role_prefix: str) -> tuple[str, str]:
@@ -97,6 +125,9 @@ def _task_to_out(t: BidCheckTask) -> BidTaskOut:
         price_manual_json=t.price_manual_json,
         config_json=t.config_json,
         llm_usage_json=t.llm_usage_json,
+        started_at=t.started_at.isoformat() if getattr(t, 'started_at', None) else None,
+        finished_at=t.finished_at.isoformat() if getattr(t, 'finished_at', None) else None,
+        duration=_parse_duration_json(getattr(t, 'duration_json', None)),
         delivered_at=t.delivered_at.isoformat() if t.delivered_at else None,
         created_at=t.created_at.isoformat() if t.created_at else None,
         updated_at=t.updated_at.isoformat() if t.updated_at else None,
@@ -128,6 +159,7 @@ def _finding_to_out(f: BidFinding) -> BidFindingOut:
 
 
 def _get_tenant_task_or_404(db: Session, task_id: int, tenant_id: int) -> BidCheckTask:
+    ensure_bid_check_tasks_columns(db.get_bind())
     task = db.query(BidCheckTask).filter_by(id=task_id, tenant_id=tenant_id).first()
     if task is None:
         raise HTTPException(
@@ -149,6 +181,7 @@ def create_check_task(
     db: Session = Depends(get_db),
 ) -> BidTaskOut:
     """上传招投标双书并创建体检任务（默认 status='created'；传 auto_run=True 时自动启动流水线）。"""
+    ensure_bid_check_tasks_columns(db.get_bind())
     tenant_id = int(current_user.tenant_id)
     user_id = current_user.get('id')
     task_title = (title or '').strip() or Path(bid_file.filename or '封标防废标体检任务').stem
@@ -206,6 +239,7 @@ def list_check_tasks(
     db: Session = Depends(get_db),
 ) -> BidTaskListOut:
     """分页查询本租户下的任务列表。"""
+    ensure_bid_check_tasks_columns(db.get_bind())
     tenant_id = int(current_user.tenant_id)
     q = db.query(BidCheckTask).filter_by(tenant_id=tenant_id)
     if status:
@@ -287,6 +321,7 @@ def stream_check_progress(
     init_detail = task.stage_detail or ''
     init_stats = task.stats_json or {}
     init_err = task.error_msg or ''
+    init_started_at = task.started_at.isoformat() if getattr(task, 'started_at', None) else None
 
     # 连接池防耗尽（生产实锤：SSE 流存活整段任务期，yield 依赖的 db 会话要等响应结束才释放，
     # 每条 SSE 流白占 1 个池连接；3 条流水线 + 前端多页签并发即打满 QueuePool）。
@@ -321,6 +356,7 @@ def stream_check_progress(
                     'status': init_status,
                     'progress': init_progress,
                     'stage_detail': init_detail,
+                    'started_at': init_started_at,
                 },
                 ensure_ascii=False,
             )

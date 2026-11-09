@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""B1 / E4 · BidGuard-Agent 数据库 11 张核心 ORM 表定义（SQLAlchemy 2.0）。
+"""B1 / E4 / E11 · BidGuard-Agent 数据库 11 张核心 ORM 表定义（SQLAlchemy 2.0）。
 
-契约依据：INTERFACE.md §2（既有 9 表一字不动 + E4 新增 regulation_laws / regulation_articles 两表）。
+契约依据：INTERFACE.md §2（既有 9 表一字不动 + E4 新增 regulation_laws / regulation_articles 两表
++ E11 bid_check_tasks 新增 started_at / finished_at / duration_json 耗时可观测性三列）。
 双驱动兼容：PostgreSQL 16（生产主库）/ SQLite（开发与单测回退，开启 WAL 与 foreign_keys=ON）。
 """
 from __future__ import annotations
@@ -23,6 +24,8 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    inspect,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -105,6 +108,10 @@ class BidCheckTask(Base):
     price_manual_json = Column(JSON, nullable=True)
     config_json = Column(JSON, nullable=True, default=dict)
     llm_usage_json = Column(JSON, nullable=True, default=dict)
+    # E11 新增：任务启动时间、结束时间与分阶段耗时 JSON 文本（{"f1_ms","f2_ms","f3_ms","f4_ms","grading_ms","total_ms"}）
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    duration_json = Column(Text, nullable=True)
     delivered_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_utc_now)
     updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
@@ -320,6 +327,59 @@ class RegulationArticle(Base):
     law = relationship('RegulationLaw', back_populates='articles')
 
 
+# ── E11 老库平滑加列守卫（无 Alembic 环境下自动探测缺列并执行 ALTER TABLE）────
+_E11_TASK_NEW_COLS = (
+    ('started_at', 'TIMESTAMP', 'DATETIME'),
+    ('finished_at', 'TIMESTAMP', 'DATETIME'),
+    ('duration_json', 'TEXT', 'TEXT'),
+)
+
+
+def ensure_bid_check_tasks_columns(bind_or_conn: Any) -> list[str]:
+    """E11 §2.1：探测已有数据库的 bid_check_tasks 表，若缺少 started_at / finished_at / duration_json
+    则自动执行 ALTER TABLE ADD COLUMN 平滑补齐（兼容 PostgreSQL 与 SQLite，已有行默认 NULL）。
+    返回本次實際补齐的列名列表。
+    """
+    added: list[str] = []
+    if bind_or_conn is None:
+        return added
+    try:
+        insp = inspect(bind_or_conn)
+        if not insp.has_table('bid_check_tasks'):
+            return added
+        existing_cols = {c['name'] for c in insp.get_columns('bid_check_tasks')}
+        dialect_name = getattr(getattr(bind_or_conn, 'dialect', None), 'name', 'sqlite')
+
+        missing_specs = [
+            (col_name, pg_type if dialect_name == 'postgresql' else sqlite_type)
+            for col_name, pg_type, sqlite_type in _E11_TASK_NEW_COLS
+            if col_name not in existing_cols
+        ]
+        if not missing_specs:
+            return added
+
+        if hasattr(bind_or_conn, 'begin') and not hasattr(bind_or_conn, 'in_transaction'):
+            with bind_or_conn.begin() as conn:
+                for col_name, col_type in missing_specs:
+                    conn.execute(text(f"ALTER TABLE bid_check_tasks ADD COLUMN {col_name} {col_type}"))
+                    added.append(col_name)
+        else:
+            for col_name, col_type in missing_specs:
+                bind_or_conn.execute(text(f"ALTER TABLE bid_check_tasks ADD COLUMN {col_name} {col_type}"))
+                added.append(col_name)
+            if hasattr(bind_or_conn, 'commit') and getattr(bind_or_conn, 'in_transaction', lambda: False)():
+                bind_or_conn.commit()
+    except Exception:
+        pass
+    return added
+
+
+@event.listens_for(Base.metadata, 'after_create')
+def _auto_migrate_bid_check_tasks_after_create(target, connection, **kwargs):
+    """在 Base.metadata.create_all（含 init_db 启动时）完成后自动探测老库并补齐 E11 新列。"""
+    ensure_bid_check_tasks_columns(connection)
+
+
 def apply_sqlite_pragmas(engine: Any) -> None:
     """为 SQLite 引擎注册连接级 PRAGMA（开启 foreign_keys=ON 级联删除与 WAL 并发模式）。
     仅对 sqlite 方言生效；内存库 (:memory:) 开启 foreign_keys=ON。
@@ -333,6 +393,13 @@ def apply_sqlite_pragmas(engine: Any) -> None:
         cursor.execute('PRAGMA foreign_keys=ON')
         try:
             cursor.execute('PRAGMA journal_mode=WAL')
+            # E11：对已有本地 SQLite 老库连接时顺带探测表结构并平滑补齐耗时列
+            cursor.execute("PRAGMA table_info(bid_check_tasks)")
+            cols = {row[1] for row in cursor.fetchall()}
+            if cols:
+                for col_name, _pg_t, sq_t in _E11_TASK_NEW_COLS:
+                    if col_name not in cols:
+                        cursor.execute(f"ALTER TABLE bid_check_tasks ADD COLUMN {col_name} {sq_t}")
         except Exception:
             pass
         cursor.close()

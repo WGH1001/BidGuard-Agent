@@ -21,6 +21,21 @@ const emit = defineEmits<{
   (e: 'refresh'): void
 }>()
 
+interface TaskDurationRecord {
+  f1_ms?: number | null
+  f2_ms?: number | null
+  f3_ms?: number | null
+  f4_ms?: number | null
+  grading_ms?: number | null
+  total_ms?: number | null
+}
+
+type TaskWithDuration = BidTaskOut & {
+  started_at?: string | null
+  finished_at?: string | null
+  duration?: TaskDurationRecord | null
+}
+
 const dialogVisible = ref(false)
 const creating = ref(false)
 const tenderFile = ref<File | null>(null)
@@ -44,6 +59,47 @@ function statusMeta(st: string): { label: string; cls: string } {
     failed: { label: '执行失败', cls: 'error' },
   }
   return map[st] || { label: st, cls: 'info' }
+}
+
+/**
+ * E11 §2.4：格式化毫秒耗时为易读文本（<1s 显示 0.8s，1~60s 显示 12.3s，>=60s 显示 2分18秒）
+ */
+function formatDurationMs(ms?: number | null): string {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) {
+    return ''
+  }
+  if (ms < 1000) {
+    const sec = Math.max(0.1, Math.round(ms / 100) / 10)
+    return `${sec.toFixed(1)}s`
+  }
+  const totalSec = ms / 1000
+  if (totalSec < 60) {
+    return `${totalSec.toFixed(1)}s`
+  }
+  const mins = Math.floor(totalSec / 60)
+  const remSec = Math.round(totalSec % 60)
+  return remSec > 0 ? `${mins}分${remSec}秒` : `${mins}分`
+}
+
+/**
+ * 仅对终态任务（delivered / failed / need_manual）返回总耗时文案，运行中或未启动任务不显示
+ */
+function getTerminalDurationLabel(item: BidTaskOut): string {
+  if (!['delivered', 'failed', 'need_manual'].includes(item.status)) {
+    return ''
+  }
+  const ext = item as TaskWithDuration
+  const totalMs = ext.duration?.total_ms
+  if (typeof totalMs === 'number' && totalMs >= 0) {
+    return formatDurationMs(totalMs)
+  }
+  if (ext.started_at && ext.finished_at) {
+    const diff = new Date(ext.finished_at).getTime() - new Date(ext.started_at).getTime()
+    if (Number.isFinite(diff) && diff >= 0) {
+      return formatDurationMs(diff)
+    }
+  }
+  return ''
 }
 
 function openCreateModal(): void {
@@ -141,6 +197,13 @@ defineExpose({
         <div class="ri-row1">
           <span class="ri-id mono-num">#{{ item.id }}</span>
           <div class="ri-row1-right">
+            <span
+              v-if="getTerminalDurationLabel(item)"
+              class="ri-dur-pill mono-num"
+              title="本次体检任务总耗时"
+            >
+              ⏱ {{ getTerminalDurationLabel(item) }}
+            </span>
             <span class="sev-pill" :class="statusMeta(item.status).cls">
               {{ statusMeta(item.status).label }}
             </span>
@@ -345,6 +408,16 @@ defineExpose({
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.ri-dur-pill {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--txt-sec);
+  background: #f1f5f9;
+  border: 1px solid var(--border-line);
+  padding: 1px 6px;
+  border-radius: 4px;
 }
 
 .ri-del-btn {
