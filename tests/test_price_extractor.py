@@ -10,6 +10,7 @@
 6. run_price_check() 端到端串联 PriceSandbox 检出算术错误、跨表差额、大写错误与超限价。
 7. E7 开标一览表提取鲁棒性（三列同行限价在前/报价格在前、标签格含限价语境、双金额歧义护栏、开标一览表主源优先与自洽表交叉核验）。
 8. E8 多明细表小计聚合与分项汇总表权威源核验（单表全分项、多分表+小计聚合、多分表+小计+汇总表权威源、Σ小计与汇总表不一致报 warning 非 error、小计行混限价语境词排除、防双重计数）。
+9. E9 明细行收集完整性（子序号 1.1/2.1、多字符单位如人月/个月/式、纵向合并分类格下探取名、无单价列小计分表）与租赁时长/服务期限定价算术核验（元/年×3年、36个月折年、期限不可解析时 warning 跳过算术硬判）。
 """
 import os
 import sys
@@ -729,5 +730,145 @@ def test_e8_no_double_counting_when_summary_and_subtables_coexist():
         assert len(res['items']) == 2
         items_sum = sum(Decimal(it['total_price']) for it in res['items'])
         assert items_sum == Decimal('2040000.00')
+    finally:
+        p.unlink(missing_ok=True)
+
+
+# ── 10. E9 新增测试集：明细行收集完整性（子序号/多字量词/合并分类列）与租赁期限定价算术 ──
+
+def test_e9_sub_sequence_numbers_and_multichar_qty_units_collected_completely():
+    """E9 事故一：验证子序号（1.1/1.2/2.1）、多字符数量单位（12人月/36个月/1节点/1式）及纵向合并空分类名下探取名不漏行。"""
+    doc = Document()
+    doc.add_paragraph('一、开标一览表')
+    t_bid = doc.add_table(rows=2, cols=2)
+    t_bid.cell(0, 0).text = '项目名称'
+    t_bid.cell(0, 1).text = '徐州智慧园区综合信息化建设项目'
+    t_bid.cell(1, 0).text = '投标总报价（小写）'
+    t_bid.cell(1, 1).text = '3,200,000.00元'
+
+    # 构造含一级分类（vMerge 延续行留空）、二级子序号（1.1/1.2/2.1）与多字符单位（人月/个月/式/节点）的分表明细表
+    doc.add_paragraph('二、定制开发与驻场运维分项明细表')
+    t = doc.add_table(rows=6, cols=6)
+    headers = ['序号', '项目名称', '功能模块', '工作量', '单价（元）', '合价（元）']
+    for i, h in enumerate(headers):
+        t.cell(0, i).text = h
+
+    rows_data = [
+        ('1.1', '数据中台系统', '数据接入模块', '1式', '800,000.00', '800,000.00'),
+        ('1.2', '', '数据治理模块', '1节点', '1,200,000.00', '1,200,000.00'),
+        ('2.1', '驻场技术服务', '高级架构师驻场', '12人月', '50,000.00', '600,000.00'),
+        ('2.2', '', '安全运维服务', '12个月', '50,000.00', '600,000.00'),
+    ]
+    for r_i, vals in enumerate(rows_data, start=1):
+        for c_i, v in enumerate(vals):
+            t.cell(r_i, c_i).text = v
+    t.cell(5, 0).text = '小计'
+    t.cell(5, 1).text = '本表小计'
+    t.cell(5, 5).text = '3,200,000.00'
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['status'] == 'OK'
+        assert len(chk['items']) == 4
+        assert chk['table_total'] == '3200000.00'
+        assert chk['bid_total'] == '3200000.00'
+        assert chk['findings'] == []
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_e9_leasing_duration_pricing_year_and_month_conversion_zero_error():
+    """E9 事故二（连云港实锤）：单价 (元/年) + 租赁期限 (3年 / 36个月) + 数量×期限复合定价算术校验全通过。"""
+    doc = Document()
+    doc.add_paragraph('一、开标一览表')
+    t_bid = doc.add_table(rows=2, cols=2)
+    t_bid.cell(0, 0).text = '项目名称'
+    t_bid.cell(0, 1).text = '连云港政务云资源租赁采购项目'
+    t_bid.cell(1, 0).text = '投标总报价（小写）'
+    t_bid.cell(1, 1).text = '2,400,000.00元'
+
+    # 表 A：无独立数量列，含"租赁期限"列 + "单价 (元/年)"列（含 "3年" 与 "36个月" 折年）
+    doc.add_paragraph('二、云资源租赁报价明细表')
+    t1 = doc.add_table(rows=4, cols=5)
+    for i, h in enumerate(['序号', '租赁服务名称', '租赁期限', '单价 (元/年)', '合价 (元)']):
+        t1.cell(0, i).text = h
+    t1.cell(1, 0).text = '1'
+    t1.cell(1, 1).text = '云管理节点租赁'
+    t1.cell(1, 2).text = '3年'
+    t1.cell(1, 3).text = '320,000.00'
+    t1.cell(1, 4).text = '960,000.00'
+
+    t1.cell(2, 0).text = '2'
+    t1.cell(2, 1).text = '云安全防护服务租赁'
+    t1.cell(2, 2).text = '36个月'
+    t1.cell(2, 3).text = '160,000.00'
+    t1.cell(2, 4).text = '480,000.00'
+
+    t1.cell(3, 0).text = '小计'
+    t1.cell(3, 4).text = '1,440,000.00'
+
+    # 表 B：同时含"数量"列（2台）与"服务期"列（3年），有效数量 = 2 × 3 = 6
+    doc.add_paragraph('三、专线与主机租赁明细表')
+    t2 = doc.add_table(rows=3, cols=6)
+    for i, h in enumerate(['序号', '设备名称', '数量', '服务期', '单价 (元/年)', '合价 (元)']):
+        t2.cell(0, i).text = h
+    t2.cell(1, 0).text = '1'
+    t2.cell(1, 1).text = '高性能计算节点租赁'
+    t2.cell(1, 2).text = '2台'
+    t2.cell(1, 3).text = '3年'
+    t2.cell(1, 4).text = '160,000.00'
+    t2.cell(1, 5).text = '960,000.00'
+
+    t2.cell(2, 0).text = '小计'
+    t2.cell(2, 5).text = '960,000.00'
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['status'] == 'OK'
+        assert len(chk['items']) == 3
+        assert chk['items'][0]['qty'] == '3'
+        assert chk['items'][1]['qty'] == '3'
+        assert chk['items'][2]['qty'] == '6'
+        assert chk['table_total'] == '2400000.00'
+        assert chk['bid_total'] == '2400000.00'
+        assert chk['findings'] == []
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_e9_unparseable_duration_skips_arithmetic_with_warning_not_error():
+    """E9 事故二规则 3：期限定价行中期限无法解析（如 '-' 或空）时，跳过该行算术校验并产出 warning，严禁硬判 error。"""
+    doc = Document()
+    doc.add_paragraph('一、开标一览表')
+    t_bid = doc.add_table(rows=2, cols=2)
+    t_bid.cell(0, 0).text = '项目名称'
+    t_bid.cell(0, 1).text = '期限缺省测试项目'
+    t_bid.cell(1, 0).text = '投标总报价（小写）'
+    t_bid.cell(1, 1).text = '960,000.00元'
+
+    t = doc.add_table(rows=3, cols=5)
+    for i, h in enumerate(['序号', '租赁服务名称', '租赁期限', '单价 (元/年)', '合价 (元)']):
+        t.cell(0, i).text = h
+    t.cell(1, 0).text = '1'
+    t.cell(1, 1).text = '云灾备存储租赁'
+    t.cell(1, 2).text = '-'
+    t.cell(1, 3).text = '320,000.00'
+    t.cell(1, 4).text = '960,000.00'
+    t.cell(2, 0).text = '合计'
+    t.cell(2, 4).text = '960,000.00'
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['status'] == 'OK'
+        assert len(chk['items']) == 1
+        assert chk['table_total'] == '960000.00'
+        errors = [f for f in chk['findings'] if f['severity'] == 'error']
+        warnings = [f for f in chk['findings'] if f['severity'] == 'warning']
+        assert errors == []
+        assert len(warnings) == 1
+        assert warnings[0]['code'] == 'DURATION_UNPARSEABLE_SKIP'
     finally:
         p.unlink(missing_ok=True)
