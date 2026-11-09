@@ -137,6 +137,10 @@ def get_engine(database_url: Optional[str] = None, ensure_dir: bool = False):
             echo=False,
             pool_pre_ping=True,
             pool_recycle=3600,
+            # SSE 流 + 多任务并发流水线的实测教训（2026-11-09 全站 TimeoutError）：
+            # 默认 pool_size=5+overflow=10 会被并发的流水线工作线程与前端多页签 SSE 打满
+            pool_size=20,
+            max_overflow=20,
         )
 
     return create_engine(resolved_url, echo=False)

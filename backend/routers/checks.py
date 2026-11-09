@@ -287,6 +287,11 @@ def stream_check_progress(
     init_stats = task.stats_json or {}
     init_err = task.error_msg or ''
 
+    # 连接池防耗尽（生产实锤：SSE 流存活整段任务期，yield 依赖的 db 会话要等响应结束才释放，
+    # 每条 SSE 流白占 1 个池连接；3 条流水线 + 前端多页签并发即打满 QueuePool）。
+    # 生成器只用 broadcaster，不碰 db，这里读完初始态立即归还连接。
+    db.close()
+
     worker = get_worker()
 
     def _sse_gen():

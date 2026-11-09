@@ -12,6 +12,7 @@ const authStore = useAuthStore()
 const loading = ref(false)
 const tenderFile = ref<File | null>(null)
 const customTitle = ref('')
+const lastAutoTitle = ref('')
 const scanResult = ref<RadarScanOut | null>(null)
 
 interface CachedRadarPayload {
@@ -53,6 +54,7 @@ function handleAuthChanged(): void {
   scanResult.value = null
   tenderFile.value = null
   customTitle.value = ''
+  lastAutoTitle.value = ''
 }
 
 function onPickFile(ev: Event): void {
@@ -66,9 +68,13 @@ function onPickFile(ev: Event): void {
     return
   }
   tenderFile.value = f
-  if (!customTitle.value.trim()) {
-    customTitle.value = `${f.name.replace(/\.[^.]+$/, '')}-投前控标评估`
+  const autoTitle = `${f.name.replace(/\.[^.]+$/, '')}-投前控标评估`
+  // 标题为空或仍是上一个文件的自动标题（用户未手动定制）时，跟随新文件刷新，
+  // 否则连续扫描多份标书时右侧文本框永远显示第一次的标书名（生产实锤 2026-11-09）
+  if (!customTitle.value.trim() || customTitle.value === lastAutoTitle.value) {
+    customTitle.value = autoTitle
   }
+  lastAutoTitle.value = autoTitle
 }
 
 async function handleRunRadar(): Promise<void> {

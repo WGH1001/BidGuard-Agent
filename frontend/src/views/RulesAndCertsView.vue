@@ -1079,6 +1079,16 @@ onMounted(() => {
   font-size: 11.5px;
   color: var(--txt-sec);
   line-height: 1.55;
+  /* 长来源 URL 断行防溢出（生产实锤：gov.cn 长 URL 超出卡片边框不可读） */
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.lc-meta code {
+  font-size: 11px;
+  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 .law-articles-col {
