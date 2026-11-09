@@ -68,10 +68,18 @@ def create_app(
             get_worker(session_factory=db_mod.SessionLocal)
         yield
 
+    # ENABLE_API_DOCS：交互式 API 文档开关（沿用 Contract-Review-Agent T53 生产安全三件套惯例）。
+    # FastAPI 默认自动生成 /docs（Swagger UI）、/redoc 与 /openapi.json 全端点清单——开发调试利器，
+    # 但生产服务器上等于把全部接口公开发给任何人（侦察地图）。设为 0 时三处彻底关闭，业务接口不受影响。
+    _api_docs_enabled = os.environ.get('ENABLE_API_DOCS', '1').strip() not in ('0', 'false', 'False')
+
     app = FastAPI(
         title='BidGuard-Agent · 投标方标书防废标体检与偏离表生成系统',
         version='1.0.0',
         lifespan=lifespan,
+        docs_url='/docs' if _api_docs_enabled else None,
+        redoc_url='/redoc' if _api_docs_enabled else None,
+        openapi_url='/openapi.json' if _api_docs_enabled else None,
     )
 
     app.add_middleware(
