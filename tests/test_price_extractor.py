@@ -11,6 +11,7 @@
 7. E7 开标一览表提取鲁棒性（三列同行限价在前/报价格在前、标签格含限价语境、双金额歧义护栏、开标一览表主源优先与自洽表交叉核验）。
 8. E8 多明细表小计聚合与分项汇总表权威源核验（单表全分项、多分表+小计聚合、多分表+小计+汇总表权威源、Σ小计与汇总表不一致报 warning 非 error、小计行混限价语境词排除、防双重计数）。
 9. E9 明细行收集完整性（子序号 1.1/2.1、多字符单位如人月/个月/式、纵向合并分类格下探取名、无单价列小计分表）与租赁时长/服务期限定价算术核验（元/年×3年、36个月折年、期限不可解析时 warning 跳过算术硬判）。
+10. E13 双胞胎明细表去重（滁州物业实锤：两张明细表 8 行金额完全一致但名称略有详简差异 -> 去重保留 8 条并报 DUPLICATE_DETAIL_TABLE warning；差 1 条金额不触发去重仍报 TOTAL_MISMATCH；三表同现及列更全者优先保留）。
 """
 import os
 import sys
@@ -870,5 +871,190 @@ def test_e9_unparseable_duration_skips_arithmetic_with_warning_not_error():
         assert errors == []
         assert len(warnings) == 1
         assert warnings[0]['code'] == 'DURATION_UNPARSEABLE_SKIP'
+    finally:
+        p.unlink(missing_ok=True)
+
+
+# ── 11. E13 新增测试集：双胞胎明细表去重（滁州物业实锤）────────────────────
+
+_CHUZHOU_8_ITEMS_B = [
+    ('1', '7区县历史数据清洗迁移治理', '存量异构数据清洗与入库', '1项', '320,000.00', '320,000.00'),
+    ('2', '维修资金核心业务管理子系统', '业主开户与交存支取管理', '1套', '450,000.00', '450,000.00'),
+    ('3', '银企直联与资金监管结算接口', '多家商业银行专户直联', '1套', '280,000.00', '280,000.00'),
+    ('4', '电子票据与财政非税对接模块', '财政电子票据自动开具', '1项', '160,000.00', '160,000.00'),
+    ('5', '业主端移动表决与微信公众号', '线上实名认证与维修投票', '1套', '190,000.00', '190,000.00'),
+    ('6', 'GIS地理信息楼盘表可视化模块', '自然幢与户室空间挂接', '1套', '180,000.00', '180,000.00'),
+    ('7', '国产化信创环境适配与安全加固', '麒麟OS与达梦数据库适配', '1项', '140,000.00', '140,000.00'),
+    ('8', '驻场运维与操作培训服务', '免费维保期内驻场保障', '1年', '100,000.00', '100,000.00'),
+]
+
+_CHUZHOU_8_ITEMS_C = [
+    ('1', '全市7区县异构历史数据清洗迁移治理', '数据治理类', '1项', '320,000.00', '320,000.00'),
+    ('2', '市级物业专项维修资金核心业务管理子系统', '应用软件类', '1套', '450,000.00', '450,000.00'),
+    ('3', '商业银行专户银企直联与资金监管结算接口', '接口开发类', '1套', '280,000.00', '280,000.00'),
+    ('4', '财政电子票据与非税系统对接模块', '接口开发类', '1项', '160,000.00', '160,000.00'),
+    ('5', '业主端移动端投票表决与微信公众号服务', '移动应用类', '1套', '190,000.00', '190,000.00'),
+    ('6', 'GIS空间地理信息楼盘表可视化管理模块', '应用软件类', '1套', '180,000.00', '180,000.00'),
+    ('7', '国产化信创全栈适配改造与三级等保安全加固', '信创适配类', '1项', '140,000.00', '140,000.00'),
+    ('8', '本地化驻场运维保障与全区县巡回操作培训', '技术服务类', '1年', '100,000.00', '100,000.00'),
+]
+
+
+def _fill_six_col_detail_table(doc: Document, title: str, headers: list[str], rows_data: list[tuple], total_str: str):
+    doc.add_paragraph(title)
+    t = doc.add_table(rows=len(rows_data) + 2, cols=6)
+    for i, h in enumerate(headers):
+        t.cell(0, i).text = h
+    for r_i, vals in enumerate(rows_data, start=1):
+        for c_i, v in enumerate(vals):
+            t.cell(r_i, c_i).text = v
+    last_r = len(rows_data) + 1
+    t.cell(last_r, 0).text = '合计'
+    t.cell(last_r, 1).text = '报价合计'
+    t.cell(last_r, 5).text = total_str
+    return t
+
+
+def test_e13_twin_detail_tables_dedup_keeps_eight_items_and_warns():
+    """E13 验收标准 1：双胞胎明细表（表 B、表 C 列名与分项详简不同但 8 行金额完全一致）-> items 恰 8 条、零 error、报 DUPLICATE_DETAIL_TABLE。"""
+    doc = Document()
+    doc.add_paragraph('采购预算与最高投标限价：1,923,700.00元')
+    doc.add_paragraph('一、开标一览表')
+    t_bid = doc.add_table(rows=3, cols=2)
+    t_bid.cell(0, 0).text = '项目名称'
+    t_bid.cell(0, 1).text = '滁州市物业专项维修资金系统整合迁移项目'
+    t_bid.cell(1, 0).text = '投标总报价（小写）'
+    t_bid.cell(1, 1).text = '1,820,000.00元'
+    t_bid.cell(2, 0).text = '投标总报价（大写）'
+    t_bid.cell(2, 1).text = '人民币壹佰捌拾贰万元整'
+
+    _fill_six_col_detail_table(
+        doc,
+        '二、分项报价明细表（表B）',
+        ['序号', '分项名称', '服务内容', '数量', '单价(元)', '合价(元)'],
+        _CHUZHOU_8_ITEMS_B,
+        '1,820,000.00',
+    )
+    _fill_six_col_detail_table(
+        doc,
+        '三、投标报价明细清册（表C）',
+        ['分项序号', '分项工程名称', '服务类别/品牌规格', '数量及单位', '投标单价(元)', '投标合价(元)'],
+        _CHUZHOU_8_ITEMS_C,
+        '1,820,000.00',
+    )
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['status'] == 'OK'
+        assert len(chk['items']) == 8
+        assert chk['table_total'] == '1820000.00'
+        assert chk['bid_total'] == '1820000.00'
+        assert chk['price_cap'] == '1923700.00'
+
+        errors = [f for f in chk['findings'] if f['severity'] == 'error']
+        warnings = [f for f in chk['findings'] if f['severity'] == 'warning']
+        assert errors == []
+        assert any(f['code'] == 'DUPLICATE_DETAIL_TABLE' for f in warnings)
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_e13_non_identical_detail_tables_not_deduped_triggers_total_mismatch():
+    """E13 验收标准 2（反向用例）：两张明细表金额序列不完全一致（哪怕只差 1 条）-> 不触发去重，保持 TOTAL_MISMATCH 报错。"""
+    doc = Document()
+    doc.add_paragraph('一、开标一览表')
+    t_bid = doc.add_table(rows=2, cols=2)
+    t_bid.cell(0, 0).text = '项目名称'
+    t_bid.cell(0, 1).text = '非双胞胎错标测试项目'
+    t_bid.cell(1, 0).text = '投标总报价（小写）'
+    t_bid.cell(1, 1).text = '1,820,000.00元'
+
+    _fill_six_col_detail_table(
+        doc,
+        '二、分项报价明细表（表B）',
+        ['序号', '分项名称', '服务内容', '数量', '单价(元)', '合价(元)'],
+        _CHUZHOU_8_ITEMS_B,
+        '1,820,000.00',
+    )
+
+    # 表 C 第 8 项金额改为 110,000.00（与表 B 的 100,000.00 差 1 条）
+    modified_c = list(_CHUZHOU_8_ITEMS_C)
+    modified_c[-1] = ('8', '本地化驻场运维保障', '技术服务类', '1年', '110,000.00', '110,000.00')
+    _fill_six_col_detail_table(
+        doc,
+        '三、投标报价明细清册（表C）',
+        ['分项序号', '分项工程名称', '服务类别/品牌规格', '数量及单位', '投标单价(元)', '投标合价(元)'],
+        modified_c,
+        '1,820,000.00',
+    )
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert len(chk['items']) == 16
+        codes = {f['code'] for f in chk['findings']}
+        assert 'DUPLICATE_DETAIL_TABLE' not in codes
+        assert 'TOTAL_MISMATCH' in codes
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_e13_three_tables_coexist_and_column_completeness_priority():
+    """E13 验收标准 3：三表同现（表 A 汇总 + 表 B/C 双胞胎，且先出现的表 B 缺单价列、后出现的表 C 列更全）-> 优先保留列更全的表 C，items 8 条，table_total 正确。"""
+    doc = Document()
+    doc.add_paragraph('一、开标一览表')
+    t_bid = doc.add_table(rows=2, cols=2)
+    t_bid.cell(0, 0).text = '项目名称'
+    t_bid.cell(0, 1).text = '滁州物业三表同现测试'
+    t_bid.cell(1, 0).text = '投标总报价（小写）'
+    t_bid.cell(1, 1).text = '1,820,000.00元'
+
+    # 表 A：分项合价汇总（"分项合价(元)" + "占总报价比例"，无单价/数量列）
+    doc.add_paragraph('二、分项合价汇总表（表A）')
+    t_a = doc.add_table(rows=10, cols=4)
+    for i, h in enumerate(['序号', '分项名称', '分项合价(元)', '占总报价比例']):
+        t_a.cell(0, i).text = h
+    for r_i, row_b in enumerate(_CHUZHOU_8_ITEMS_B, start=1):
+        t_a.cell(r_i, 0).text = row_b[0]
+        t_a.cell(r_i, 1).text = row_b[1]
+        t_a.cell(r_i, 2).text = row_b[5]
+        t_a.cell(r_i, 3).text = '12.5%'
+    t_a.cell(9, 0).text = '合计'
+    t_a.cell(9, 1).text = '合计'
+    t_a.cell(9, 2).text = '1,820,000.00'
+    t_a.cell(9, 3).text = '100%'
+
+    # 表 B（先出现，但只有 序号 | 分项名称 | 数量 | 合价(元)，缺少单价列）
+    doc.add_paragraph('三、简化分项明细表（表B）')
+    t_b = doc.add_table(rows=9, cols=4)
+    for i, h in enumerate(['序号', '分项名称', '数量', '合价(元)']):
+        t_b.cell(0, i).text = h
+    for r_i, row_b in enumerate(_CHUZHOU_8_ITEMS_B, start=1):
+        t_b.cell(r_i, 0).text = row_b[0]
+        t_b.cell(r_i, 1).text = row_b[1]
+        t_b.cell(r_i, 2).text = row_b[3]
+        t_b.cell(r_i, 3).text = row_b[5]
+
+    # 表 C（后出现，含数量列与单价列，列更全）
+    _fill_six_col_detail_table(
+        doc,
+        '四、完整投标报价明细清册（表C）',
+        ['分项序号', '分项工程名称', '服务类别/品牌规格', '数量及单位', '投标单价(元)', '投标合价(元)'],
+        _CHUZHOU_8_ITEMS_C,
+        '1,820,000.00',
+    )
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['status'] == 'OK'
+        assert len(chk['items']) == 8
+        assert chk['table_total'] == '1820000.00'
+        # 验证优先保留了列更全的表 C（其首项名称为 '全市7区县异构历史数据清洗迁移治理'）
+        assert chk['items'][0]['name'] == '全市7区县异构历史数据清洗迁移治理'
+        errors = [f for f in chk['findings'] if f['severity'] == 'error']
+        assert errors == []
+        assert any(f['code'] == 'DUPLICATE_DETAIL_TABLE' for f in chk['findings'])
     finally:
         p.unlink(missing_ok=True)

@@ -39,6 +39,9 @@
 9. **E9 明细行收集完整性加固与租赁时长/服务期限定价算术适配**：
    - 放宽数量单元格多字符计量单位（如"人月/个月/节点/点位/式/系统"）、兼容双行合并表头、子序号（1.1/2.1）及纵向合并分类列下探取名，确保分表明细行零漏收；
    - 识别单价列头时间单位（元/年、元/月、元/天）与期限列（租赁期限/服务期/租期），按"有效数量 = 数量 × 期限换算系数"执行算术校验；期限无法解析时跳过该行算术校验并产出 warning（宁缺毋滥）。
+10. **E13 双胞胎明细表去重（滁州物业实锤）**：
+    - 对收集到的多张明细表按分项合价金额多重集（Decimal 精确比较，不依赖分项名称逐字一致）两两比对；
+    - 若两张（或多张）明细表的分项行数一致且分项合价金额多重集完全相等，判定为双胞胎副本表，优先保留列更全（含数量列与单价列）的一张（相同时保留先出现者），剔除副本表 items 并产出 DUPLICATE_DETAIL_TABLE (warning)。
 """
 import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -61,8 +64,6 @@ _CAP_HIGH_RE = re.compile(
 )
 _CAP_UNIT_HEADER_RE = re.compile(
     r'(?:最高(?:投标)?限价|招标控制价|预算金额|采购预算)\s*[（(]\s*(万元|元)\s*[)）]'
-    # E1 验收修正：(?<![包号]) 防跨行 filler 吃进"采购包1"式包号尾巴——
-    # 数字若紧跟"包/号"字（如"采购包1"的 1）则不是金额，正则回溯继续找真值
     r'[\s\S]{0,40}?(?<![包号])([0-9][0-9,]*(?:\.[0-9]+)?)',
     re.IGNORECASE
 )
@@ -73,7 +74,6 @@ _CAP_BUDGET_RE = re.compile(
     re.IGNORECASE
 )
 
-# E1 升级点 4b：支持跨换行（docx 表格展平后标签格与数值格以 \n 分隔）及中间夹带分包/标段编号的限价与预算匹配
 _CAP_HIGH_MULTILINE_RE = re.compile(
     r'(?:最高(?:投标)?限价|招标控制价|最高限额)'
     r'(?:[\s:：—\-]|人民币|小写|(?:采购)?包\s*\d+|分包\s*[0-9一二三四五六七八九十]+|标段\s*[0-9一二三四五六七八九十]+){0,30}?'
@@ -86,7 +86,6 @@ _CAP_BUDGET_MULTILINE_RE = re.compile(
     r'([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|万|元)',
     re.IGNORECASE
 )
-# 分包小节预算匹配（如 "分包1：采购预算 80万元" / "采购包1 预算金额：120万元"）
 _PACKAGE_BUDGET_RE = re.compile(
     r'(?:采购包|分包|标段)\s*([0-9一二三四五六七八九十]{1,3})'
     r'[^\n。；]{0,40}?'
@@ -96,13 +95,11 @@ _PACKAGE_BUDGET_RE = re.compile(
     re.IGNORECASE
 )
 
-# 人民币大写金额匹配（至少含两个大写数字词 + 元/圆/角/分）
 _UPPER_AMOUNT_RE = re.compile(
     r'((?:人民币)?[（(]?大写[）)]?[：:\s]*)?'
     r'([零壹贰叁肆伍陆柒捌玖拾佰仟万亿]{2,}(?:元|圆)(?:整|正|[零壹贰叁肆伍陆柒捌玖角分]+)?)'
 )
 
-# 开标一览表总价文本行匹配（要求明确冒号与货币单位，防止误匹配"投标报价×30分"等评分公式）
 _BID_TOTAL_LINE_RE = re.compile(
     r'(?:投标总报价|投标总价|报价总计|总报价|投标报价)'
     r'\s*(?:[（(][^）)\n]{0,16}[）)])?\s*[：:]\s*'
@@ -110,25 +107,23 @@ _BID_TOTAL_LINE_RE = re.compile(
     r'([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|元)'
 )
 
-# 自由文本中带单位金额全局扫描正则（供单格/同行多金额歧义检测）
 _MONEY_WITH_UNIT_SCAN_RE = re.compile(
     r'(?:[￥¥]\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|万|元)?)'
     r'|(?<![0-9.])([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|万|元)'
 )
 
-# 表头列角色关键词（E9 扩充：覆盖工作内容/功能模块/人数/工时/租赁期限/服务期/费用标准等合法政采表头）
 _COL_SEQ_EXACT_KEYS = frozenset({
     '序号', '编号', '行号', '包号', '项号', '子项号', '分项序号', '项目序号', '分项编号', '序号/编号', 'no', 'no.',
 })
 _COL_NAME_KEYS = (
-    '品目名称', '货物名称', '服务名称', '分项名称', '项目名称', '系统名称',
+    '品目名称', '货物名称', '服务名称', '分项名称', '分项工程名称', '项目名称', '系统名称',
     '模块名称', '平台名称', '子系统名称', '设备名称', '标的名称', '标的物',
     '租赁服务名称', '软件名称', '硬件名称', '产品名称', '功能模块', '配置名称',
     '工作内容', '建设内容', '服务内容', '采购内容', '具体内容', '细目名称',
     '岗位名称', '人员岗位', '名称', '品目', '内容', '分项', '子项', '事项', '科目', '项目',
 )
 _COL_QTY_KEYS = (
-    '数量', '采购数量', '投标数量', '计价数量', '工作量', '套数', '台数',
+    '数量', '采购数量', '投标数量', '计价数量', '数量及单位', '工作量', '套数', '台数',
     '人数', '投入人数', '人月数', '人月', '人天', '工时', '点位数', '路数', '项数',
 )
 _COL_DURATION_KEYS = (
@@ -145,10 +140,8 @@ _COL_TOTAL_PRICE_KEYS = (
     '小计', '总价', '金额', '费用', '报价',
 )
 
-# 单价列头中的时间计费单位识别（如 "单价(元/年)"、"单价（万元/月）"、"元/天"）
 _UNIT_HEADER_TIME_RE = re.compile(r'(?:万元|元)\s*[/／每]\s*(年|个?月|天|日)')
 
-# 期限单元格解析正则（支持 "3年"、"36个月"、"36月"、"1.5年"、"三年"、"二十四个月"、"180天"）
 _DURATION_CELL_RE = re.compile(
     r'^([0-9]+(?:\.[0-9]+)?|[一二三四五六七八九十百零两半]+)\s*(年|个?月|天|日)\s*[期]?$'
 )
@@ -162,15 +155,12 @@ _CN_SIMPLE_NUM_MAP = {
     '三十': Decimal('30'), '三十六': Decimal('36'), '四十八': Decimal('48'), '六十': Decimal('60'),
 }
 
-# 限价/预算表头或标签关键词（高优先级：最高限价/控制价；法定等同级：采购预算/预算金额）
 _CAP_LABEL_HIGH_KEYS = ('最高限价', '最高投标限价', '招标控制价', '控制价', '最高限额')
 _CAP_LABEL_BUDGET_KEYS = ('采购预算', '预算金额', '项目预算', '预算总价')
 _CAP_LABEL_ALL_KEYS = _CAP_LABEL_HIGH_KEYS + _CAP_LABEL_BUDGET_KEYS
 
-# 投标总价标签关键词
 _BID_TOTAL_LABEL_KEYS = ('投标总价', '投标总报价', '报价总计', '总报价', '投标报价')
 
-# 汇总行识别（区分小计行与合计/总计行）
 _SUMMARY_ROW_RE = re.compile(
     r'^\s*(?:合\s*计|总\s*计|报价合计|投标总价|投标总报价|总报价|分项合计|本表合计|汇总合计|小\s*计|本表小计|分项小计|总金额|大\s*写)',
     re.IGNORECASE
@@ -184,15 +174,12 @@ _GRAND_TOTAL_ROW_RE = re.compile(
     re.IGNORECASE
 )
 
-# 纯序号判定（E9 扩充：兼容 '1'、'1.1'、'2.1.3'、'（1）'、'一' 等层级子序号）
 _SEQ_ONLY_RE = re.compile(
     r'^\s*(?:[0-9]{1,3}(?:\.[0-9]{1,3})*|[一二三四五六七八九十]+|[（(][0-9一二三四五六七八九十]+[)）])\s*$'
 )
-# 说明性长句排除词（防把招标须知/评分说明当成报价数值）
 _INSTRUCTION_NOISE_KEYS = ('不得超过', '不得高于', '不高于', '不超过', '超过最高限价',
                            '无效标', '废标', '投标无效', '得分', '评标基准价',
                            '计算公式', '保留两位小数', '满分为', '扣完为止', '保证金')
-# E7 扩充：非投标报价的数字与大写上下文排除词（防把最高限价/预算/控制价/保证金的数字或大写误提为 bid_total / bid_total_upper）
 _NON_BID_UPPER_KEYS = (
     '最高限价', '最高投标限价', '采购预算', '预算金额', '项目预算', '预算总价', '最高预算',
     '招标控制价', '控制价', '拦标价', '最高限额', '保证金',
@@ -200,13 +187,11 @@ _NON_BID_UPPER_KEYS = (
     '无效标', '废标', '投标无效', '否决投标',
 )
 
-# 自洽表 / 商务应答表表头特征词（用于区分独立《开标一览表》与自洽核验表）
 _SELF_CHECK_HEADER_KEYS = (
     '招标文件要求', '招标要求', '承诺要点', '响应承诺', '投标响应',
     '响应情况', '偏离情况', '偏离说明', '核验内容', '自洽', '符合性',
 )
 
-# 空白格式表防线：表头词黑名单（在 docx 表格路径与 PDF 文本路径共同生效）
 _HEADER_NAME_BLACKLIST = frozenset({
     '金额（元）', '金额(元)', '单价（元）', '单价(元)', '总价（元）', '总价(元)',
     '合价（元）', '合价(元)', '小计（元）', '小计(元)',
@@ -276,9 +261,6 @@ def _parse_money_str(raw: str, default_wan: bool = False,
         return None
     if any(k in s for k in _INSTRUCTION_NOISE_KEYS):
         return None
-    # 限价语境排除不在纯解析层做（E7 验收修正）：_parse_money_str 是无语境语义的
-    # 纯值解析器，限价/预算上下文拒绝统一由调用点 _has_non_bid_context/
-    # _strip_non_bid_clauses/_is_tender_requirement_column_header 负责。
 
     is_wan = default_wan
     if '万元' in s or re.search(r'[0-9]\s*万(?![0-9])', s):
@@ -362,7 +344,6 @@ def _parse_qty_str(raw: str) -> Decimal | None:
     s = str(raw).strip().replace(',', '')
     if not s or s in _PLACEHOLDER_CELL_TOKENS or '…' in s or '...' in s:
         return None
-    # 排除带货币单位的金额串（防止把金额当成数量）
     if '万元' in s or '元' in s or '￥' in s or '¥' in s:
         return None
     m = re.match(
@@ -375,7 +356,6 @@ def _parse_qty_str(raw: str) -> Decimal | None:
             return d if d > 0 else None
         except InvalidOperation:
             return None
-    # 兼容中文数字数量/时长（如 "三年"、"一年"、"两年"）
     m_cn = re.match(r'^([一二三四五六七八九十两半]{1,3})\s*(?:年|个?月|项|套|台|批)?\s*$', s)
     if m_cn and m_cn.group(1) in _CN_SIMPLE_NUM_MAP:
         return _CN_SIMPLE_NUM_MAP[m_cn.group(1)]
@@ -389,9 +369,7 @@ def _parse_duration_factor(
     unit_val: Decimal | None = None,
     total_val: Decimal | None = None,
 ) -> Decimal | None:
-    """E9 事故二：解析租赁期限/服务期单元格（如 '3年', '36个月', '三年'）并结合单价时间单位（元/年、元/月、元/天）换算有效时长倍数。
-    若期限单元格为空或 '-' 等无法解析，返回 None（供上层触发 warning 并跳过算术硬判）。
-    """
+    """E9 事故二：解析租赁期限/服务期单元格（如 '3年', '36个月', '三年'）并结合单价时间单位换算有效时长倍数。"""
     if not raw_dur:
         return None
     s = str(raw_dur).strip().replace(',', '')
@@ -412,7 +390,6 @@ def _parse_duration_factor(
             return None
         norm_dur_unit = '月' if '月' in dur_unit else ('天' if dur_unit in ('天', '日') else '年')
 
-        # 按单价列头的时间单位（元/年 vs 元/月 vs 元/天）做跨单位换算
         if unit_time_unit == '年':
             if norm_dur_unit == '月':
                 return (dur_val / Decimal('12')).quantize(Decimal('0.0001'))
@@ -430,7 +407,6 @@ def _parse_duration_factor(
                 return dur_val * Decimal('30')
             return dur_val
 
-        # 若单价表头未标明 /年 或 /月，但期限写了 "36个月" 且按 3 年折算恰好使 单价×数量×3 == 合价，自适应换算为年
         if (
             norm_dur_unit == '月'
             and dur_val >= Decimal('12')
@@ -444,16 +420,11 @@ def _parse_duration_factor(
 
         return dur_val
 
-    # 若期限格仅填纯数字（如表头已写"租赁期限（年）"，格内填 "3"）
     return _parse_qty_str(s)
 
 
 def extract_price_cap(text: str) -> str | None:
-    """从招标/投标文件全文中提取最高限价或采购预算（统一折算为元）。
-
-    依据《政府采购法实施条例》第 33 条：未单独设定最高限价时，以采购预算作为法定上限。
-    优先级：最高限价 / 控制价（同行 -> 跨行） > 表头带单位限价/预算 > 采购预算 / 预算金额（同行 -> 跨行 -> 分包）。
-    """
+    """从招标/投标文件全文中提取最高限价或采购预算（统一折算为元）。"""
     if not text:
         return None
 
@@ -502,9 +473,7 @@ def extract_price_cap(text: str) -> str | None:
 
 
 def _detect_header_map(cells_text: list[str]) -> dict | None:
-    """判断一行是否为分项报价明细表头（含名称+总价+(单价或数量或租赁期限)），
-    若是则返回 {'name': idx, 'qty': idx, 'duration': idx, 'unit': idx, 'total': idx, 'is_wan': bool, 'unit_time_unit': str|None}。
-    """
+    """判断一行是否为分项报价明细表头（含名称+总价+(单价或数量或租赁期限)）。"""
     joined = ' '.join(cells_text)
     if any(k in joined for k in _SELF_CHECK_HEADER_KEYS):
         return None
@@ -521,7 +490,6 @@ def _detect_header_map(cells_text: list[str]) -> dict | None:
         if re.match(r'^(?:序号|编号|行号|包号|项号|子项号|分项序号|项目序号)[（(]?.*[)）]?$', c):
             continue
 
-        # 1. 单价列（含 "单价 (元/年)"、"费用标准" 等）
         if ('单价' in c or any(k in c for k in _COL_UNIT_PRICE_KEYS)) and 'unit' not in col_map:
             col_map['unit'] = idx
             m_tm = _UNIT_HEADER_TIME_RE.search(c)
@@ -530,17 +498,14 @@ def _detect_header_map(cells_text: list[str]) -> dict | None:
                 col_map['unit_time_unit'] = '月' if '月' in raw_tu else ('天' if raw_tu in ('天', '日') else '年')
             continue
 
-        # 2. 租赁期限 / 服务期列（优先于普通数量列识别，以便与数量列共存相乘）
         if any(k in c for k in _COL_DURATION_KEYS) and 'duration' not in col_map:
             col_map['duration'] = idx
             continue
 
-        # 3. 数量列
         if any(k in c for k in _COL_QTY_KEYS) and 'qty' not in col_map:
             col_map['qty'] = idx
             continue
 
-        # 4. 名称列优先判据：若表头以"名称/内容/模块/品目/子系统/事项/科目"结尾且不含"元/合价/总价/金额"，优先归入 name
         is_pure_name_hdr = (
             any(k in c for k in _COL_NAME_KEYS)
             and not any(pk in c for pk in ('合价', '总价', '金额', '小计', '合计', '元', '万元'))
@@ -549,15 +514,12 @@ def _detect_header_map(cells_text: list[str]) -> dict | None:
             col_map['name'] = idx
             continue
 
-        # 5. 合价 / 总价 / 金额列
         if any(k in c for k in _COL_TOTAL_PRICE_KEYS) and 'total' not in col_map:
-            # 排除横向《开标一览表》的"投标总价/投标总报价"列头
             if any(bk in c for bk in ('投标总价', '投标总报价', '总报价')):
                 continue
             col_map['total'] = idx
             continue
 
-        # 6. 名称列兜底
         if any(k in c for k in _COL_NAME_KEYS) and 'name' not in col_map:
             col_map['name'] = idx
 
@@ -572,9 +534,7 @@ def _detect_header_map(cells_text: list[str]) -> dict | None:
 
 
 def _detect_summary_table_header_map(cells_text: list[str]) -> dict | None:
-    """E8 §3.2：判断一行是否为《分项汇总表》表头（无单价/数量列，但含分项名称列 + 金额/合价列）。
-    排除含"招标文件要求/承诺要点/偏离"的自洽表及"投标总报价"开标一览表。
-    """
+    """E8 §3.2：判断一行是否为《分项汇总表》表头（无单价/数量列，但含分项名称列 + 金额/合价列）。"""
     cleaned_cells = [re.sub(r'\s+', '', raw) for raw in cells_text]
     joined = ' '.join(cleaned_cells)
     if any(k in joined for k in _SELF_CHECK_HEADER_KEYS):
@@ -628,7 +588,7 @@ def _try_parse_cap_cell_value(cell_txt: str, label_has_unit: bool, label_is_wan:
     return None
 
 
-# ── E7 / E8 / E9 限价语境剔除、多金额歧义护栏与表格分级辅助函数 ────────────
+# ── E7 / E8 / E9 / E13 限价语境剔除、多金额歧义护栏与表格分级辅助函数 ──────
 
 def _has_non_bid_context(text: str) -> bool:
     """判断文本片段是否含最高限价/预算/控制价/不得高于/保证金等非投标报价语境词。"""
@@ -650,7 +610,6 @@ def _strip_non_bid_clauses(cell_text: str) -> str:
         return '' if _has_non_bid_context(inner) else inner
 
     cleaned = re.sub(r'[（(][^）)]*[）)]', _clean_paren, raw)
-    # 千分位逗号保护：ASCII 逗号仅在其两侧不同时紧邻数字时才视为分句符
     clauses = re.split(r'[；;。\n，]+|(?<![0-9]),(?![0-9])', cleaned)
     kept = [c.strip() for c in clauses if c.strip() and not _has_non_bid_context(c)]
     return ' '.join(kept).strip()
@@ -843,7 +802,6 @@ def _resolve_row_item_name(
     if raw_name and not _SEQ_ONLY_RE.match(raw_name):
         return raw_name
 
-    # 向右/向左扫描同行其他非数值列（跳过序号格、纯数字格与金额/数量/单价/期限列）
     for c_idx, cell in enumerate(cells):
         if c_idx == name_i or c_idx in excluded_col_indices:
             continue
@@ -852,7 +810,6 @@ def _resolve_row_item_name(
             continue
         if _SUMMARY_ROW_RE.match(txt):
             continue
-        # 排除纯数字或纯金额格
         if re.match(r'^[￥¥]?\s*[0-9][0-9,]*(?:\.[0-9]+)?\s*(?:万元|万|元|%|\s)*$', txt):
             continue
         if _parse_qty_str(txt) is not None and len(txt) <= 5:
@@ -862,6 +819,82 @@ def _resolve_row_item_name(
     if last_valid_name:
         return f"{last_valid_name} ({raw_name})" if raw_name else last_valid_name
     return ''
+
+
+def _deduplicate_twin_detail_tables(
+    items: list[dict],
+    detail_table_records: list[dict],
+    warnings: list[dict],
+) -> None:
+    """E13 §2：双胞胎明细表去重（原地更新 items、detail_table_records 与 warnings）。
+
+    判定与保留规则：
+    1. 按来源表分组，对分项行数 >= 2 且分项合价金额多重集（tuple(sorted(item_vals))，Decimal 精确比较）
+       完全一致的多张明细表，判定为双胞胎副本表（不依赖分项名称逐字相等）；
+    2. 保留标准：优先保留列更全的一张（含数量列 has_qty_col + 含单价列 has_unit_col 得分更高者优先；
+       得分相同时保留文档中先出现者）；
+    3. 若被剔除的副本表带有小计/合计行而保留表未带，将小计/合计行转移至保留表；
+    4. 剔除副本表的全部 items，并在 warnings 中追加 code='DUPLICATE_DETAIL_TABLE' (severity='warning')。
+    """
+    if len(detail_table_records) < 2:
+        return
+
+    groups_by_multiset: dict[tuple[Decimal, ...], list[tuple[int, dict]]] = {}
+    for order_idx, rec in enumerate(detail_table_records):
+        vals = rec.get('item_vals') or []
+        if len(vals) < 2:
+            continue
+        key = tuple(sorted(vals))
+        groups_by_multiset.setdefault(key, []).append((order_idx, rec))
+
+    drop_item_obj_ids: set[int] = set()
+    drop_rec_ids: set[int] = set()
+
+    for key, grp in groups_by_multiset.items():
+        if len(grp) < 2:
+            continue
+
+        # 选出唯一保留表：优先列更全（has_qty_col + has_unit_col），相同时保留先出现者（-order_idx 最大）
+        def _completeness_score(entry: tuple[int, dict]) -> tuple[int, int]:
+            ord_i, r = entry
+            col_score = (1 if r.get('has_qty_col') else 0) + (1 if r.get('has_unit_col') else 0)
+            return col_score, -ord_i
+
+        winner_ord, winner_rec = max(grp, key=_completeness_score)
+        for ord_i, r in grp:
+            if r is winner_rec:
+                continue
+            drop_rec_ids.add(id(r))
+            for obj in (r.get('item_objs') or []):
+                drop_item_obj_ids.add(id(obj))
+            if not winner_rec.get('grand_totals') and r.get('grand_totals'):
+                winner_rec['grand_totals'] = list(r['grand_totals'])
+            if not winner_rec.get('subtotals') and r.get('subtotals'):
+                winner_rec['subtotals'] = list(r['subtotals'])
+
+        warnings.append({
+            'code': 'DUPLICATE_DETAIL_TABLE',
+            'severity': 'warning',
+            'message': (
+                f"检测到 {len(grp)} 张内容完全一致的报价明细表"
+                f"（共 {len(key)} 项分项，合计 {_fmt_yuan(sum(key, Decimal('0.00')))} 元），已去重保留 1 张"
+            ),
+        })
+
+    if not drop_rec_ids:
+        return
+
+    items[:] = [it for it in items if id(it) not in drop_item_obj_ids]
+    detail_table_records[:] = [r for r in detail_table_records if id(r) not in drop_rec_ids]
+
+    # 重新同步剩余各表的 item_indices（供后续 E9 §2.5 父子表防重安全消费）
+    idx_by_obj_id = {id(it): idx for idx, it in enumerate(items)}
+    for r in detail_table_records:
+        r['item_indices'] = [
+            idx_by_obj_id[id(obj)]
+            for obj in (r.get('item_objs') or [])
+            if id(obj) in idx_by_obj_id
+        ]
 
 
 def _extract_from_docx_tables(doc) -> dict:
@@ -961,7 +994,6 @@ def _extract_from_docx_tables(doc) -> dict:
         for r_i, row in enumerate(rows[:6]):
             row_texts = [c.text.strip() for c in row.cells]
             detected = _detect_header_map(row_texts)
-            # E9 兼容双行纵向合并表头（如第 0 行写"序号 | 名称 | 报价明细"，第 1 行写"（空） | （空） | 数量 | 单价 | 合价"）
             if not detected and r_i > 0:
                 merged_hdr_texts = list(row_texts)
                 for prev_r in range(r_i - 1, -1, -1):
@@ -997,6 +1029,7 @@ def _extract_from_docx_tables(doc) -> dict:
             tbl_item_count = 0
             tbl_item_vals: list[Decimal] = []
             tbl_item_indices: list[int] = []
+            tbl_item_objs: list[dict] = []
             tbl_subtotals: list[Decimal] = []
             tbl_grand_totals: list[Decimal] = []
             last_valid_name = ''
@@ -1006,7 +1039,6 @@ def _extract_from_docx_tables(doc) -> dict:
                 if max(name_i, total_i) >= len(cells):
                     continue
 
-                # 仅当名称格、单价格与合价格的底层 _tc 完全相同时才判为跨行重复虚拟行
                 unit_tc = cells[unit_i]._tc if (unit_i is not None and unit_i < len(cells)) else None
                 tc_tuple = (cells[name_i]._tc, unit_tc, cells[total_i]._tc)
                 if tc_tuple in seen_row_tcs:
@@ -1056,11 +1088,9 @@ def _extract_from_docx_tables(doc) -> dict:
                 if total_val is None and unit_val is None:
                     continue
 
-                # 解析基础数量（若无数量列则基础数量为 1；若有数量列但填了"项/套/批/-"且非期限定价，兜底为 1）
                 parsed_qty = _parse_qty_str(raw_qty_txt) if qty_i is not None else Decimal('1')
                 base_qty = parsed_qty if parsed_qty is not None else Decimal('1')
 
-                # E9 事故二：租赁时长 / 服务期限定价换算（有效数量 = 数量列值 × 期限数值）
                 skip_row_arithmetic = False
                 effective_qty: Decimal | None = parsed_qty if qty_i is not None else Decimal('1')
 
@@ -1079,7 +1109,6 @@ def _extract_from_docx_tables(doc) -> dict:
                         else:
                             effective_qty = dur_factor
                     else:
-                        # 期限解析不出（如 '-'、空）：跳过该行单价×数量算术校验并出 warning，严禁按数量=1硬判 error
                         skip_row_arithmetic = True
                         effective_qty = base_qty
                         warnings.append({
@@ -1091,7 +1120,6 @@ def _extract_from_docx_tables(doc) -> dict:
                             ),
                         })
                 elif effective_qty is None:
-                    # 普通非期限定价行若数量格填了纯文字（如"项"/"批"/"-"）但单价与合价齐全，兜底数量为 1
                     if total_val is not None and unit_val is not None and total_val == unit_val:
                         effective_qty = Decimal('1')
                     elif total_val is not None and unit_val is not None and unit_val > 0 and (total_val % unit_val == 0):
@@ -1099,7 +1127,6 @@ def _extract_from_docx_tables(doc) -> dict:
                     elif total_val is not None and unit_val is None:
                         effective_qty = Decimal('1')
 
-                # E9 事故一：若一揽子/定制行只填了合价未填单价，用合价回填单价（数量=1）确保该行进 items 不漏收
                 if total_val is not None and unit_val is None and effective_qty is not None and effective_qty > 0:
                     unit_val = (total_val / effective_qty).quantize(CENT, rounding=ROUND_HALF_UP)
 
@@ -1125,9 +1152,11 @@ def _extract_from_docx_tables(doc) -> dict:
                     items.append(item_dict)
                     tbl_item_vals.append(total_val)
                     tbl_item_indices.append(len(items) - 1)
+                    tbl_item_objs.append(item_dict)
                     tbl_item_count += 1
 
-            if tbl_subtotals or tbl_grand_totals:
+            # E13：凡收集到有效分项行或汇总行的明细表均记入 detail_table_records，确保无合计行的双胞胎副本表也能被去重
+            if tbl_item_count > 0 or tbl_subtotals or tbl_grand_totals:
                 detail_table_records.append({
                     'tbl_el': tbl_el,
                     'item_count': tbl_item_count,
@@ -1135,6 +1164,9 @@ def _extract_from_docx_tables(doc) -> dict:
                     'grand_totals': tbl_grand_totals,
                     'item_vals': tbl_item_vals,
                     'item_indices': tbl_item_indices,
+                    'item_objs': tbl_item_objs,
+                    'has_qty_col': (qty_i is not None) or (dur_i is not None),
+                    'has_unit_col': (unit_i is not None),
                 })
             continue
 
@@ -1206,20 +1238,31 @@ def _extract_from_docx_tables(doc) -> dict:
             if sub_row_entries and (sum_table_grand_totals or sum_table_subtotals):
                 processed_table_els.add(tbl_el)
                 has_price_table_skeleton = True
-                # 若该表仅有"小计"行而无"合计/总计"行，说明它是简化列（无单价/数量列）的分表明细表而非总汇总表！
                 if sum_table_subtotals and not sum_table_grand_totals:
+                    s_vals: list[Decimal] = []
+                    s_indices: list[int] = []
+                    s_objs: list[dict] = []
                     for nm, val in sub_row_entries:
-                        items.append({
+                        it_obj = {
                             'name': nm,
                             'qty': '1',
                             'unit_price': _fmt_yuan(val),
                             'total_price': _fmt_yuan(val),
-                        })
+                        }
+                        items.append(it_obj)
+                        s_vals.append(val)
+                        s_indices.append(len(items) - 1)
+                        s_objs.append(it_obj)
                     detail_table_records.append({
                         'tbl_el': tbl_el,
                         'item_count': len(sub_row_entries),
                         'subtotals': sum_table_subtotals,
                         'grand_totals': [],
+                        'item_vals': s_vals,
+                        'item_indices': s_indices,
+                        'item_objs': s_objs,
+                        'has_qty_col': False,
+                        'has_unit_col': False,
                     })
                 else:
                     summary_table_records.append({
@@ -1399,11 +1442,10 @@ def _extract_from_docx_tables(doc) -> dict:
                         if up_list[0] not in target_uppers:
                             target_uppers.append(up_list[0])
 
+    # ── 2.4 E13 新增：双胞胎明细表去重（滁州物业实锤：两张明细表分项金额序列/多重集完全一致）──
+    _deduplicate_twin_detail_tables(items, detail_table_records, warnings)
+
     # ── 2.5 E9 回归修复：父级汇总表与子分表同级双收防重（滁州实锤）──
-    # 放宽表头识别后，"分包汇总表"（其分项行=各分包合计，如 238k/84k/186k/60k）可能被当作普通
-    # 明细表收进 items；而其 4 张子分表各自的"小计"金额与父表分项行一一对应——两处都收即 items
-    # 累加翻倍。判定：某明细表的分项金额多重集 == 其余各表小计金额的多重集 → 该表是父级汇总，
-    # 从 items 移除其行、转登记为《分项汇总表》权威源（保留合计行做交叉核验），严防双重计数。
     for _pi, _rec in enumerate(list(detail_table_records)):
         _vals = sorted(_rec.get('item_vals') or [])
         if len(_vals) < 2:
@@ -1422,27 +1464,30 @@ def _extract_from_docx_tables(doc) -> dict:
             'total_val': _rec['grand_totals'][-1] if _rec['grand_totals'] else sum(_vals, Decimal('0.00')),
         })
         detail_table_records.remove(_rec)
-        break  # 保守处理：一次至多识别一张父级汇总
+        break
 
     # ── 3. E8 核心：计算明细表聚合总价 (detail_agg_total) 与《分项汇总表》权威总价 ──
+    records_with_totals = [
+        r for r in detail_table_records if r.get('grand_totals') or r.get('subtotals')
+    ]
     detail_agg_total: Decimal | None = None
-    if len(detail_table_records) == 1:
-        rec = detail_table_records[0]
+    if len(records_with_totals) == 1:
+        rec = records_with_totals[0]
         if rec['grand_totals']:
             detail_agg_total = rec['grand_totals'][-1]
         elif rec['subtotals']:
             detail_agg_total = rec['subtotals'][-1]
-    elif len(detail_table_records) >= 2:
+    elif len(records_with_totals) >= 2:
         full_grand_tables = [
-            r for r in detail_table_records
+            r for r in records_with_totals
             if r['grand_totals'] and r['item_count'] >= 2
         ]
         subtotal_only_tables = [
-            r for r in detail_table_records
+            r for r in records_with_totals
             if r['subtotals'] and not r['grand_totals']
         ]
         total_only_tables = [
-            r for r in detail_table_records
+            r for r in records_with_totals
             if r['grand_totals'] and r['item_count'] < 2
         ]
         if len(full_grand_tables) == 1 and not subtotal_only_tables:
@@ -1466,9 +1511,11 @@ def _extract_from_docx_tables(doc) -> dict:
                             f"已以各分表小计累加为准，请人工核对"
                         ),
                     })
-        elif len(full_grand_tables) == 1:
+        elif len(full_grand_tables) >= 1:
+            # 当存在 >=2 张含合计行且分项金额序列不一致的明细表（未通过双胞胎去重）时，
+            # 取首张表合计作为基准，交由下游 PriceSandbox 触发 TOTAL_MISMATCH 报错
             detail_agg_total = full_grand_tables[0]['grand_totals'][-1]
-        elif len(total_only_tables) == 1:
+        elif len(total_only_tables) >= 1:
             detail_agg_total = total_only_tables[0]['grand_totals'][-1]
 
     table_total: str | None = None
@@ -1700,7 +1747,6 @@ def extract_price_data(file_path: str | Path, tender_path: str | Path | None = N
         if tbl_res['table_total'] is not None:
             res['table_total'] = tbl_res['table_total']
 
-        # E7：若表格检出多金额歧义，强制置 bid_total=None，严禁被展平文本误回填
         if tbl_res.get('bid_total_ambiguous'):
             res['bid_total'] = None
             res['bid_total_upper'] = None
@@ -1744,7 +1790,6 @@ def run_price_check(bid_path: str | Path, tender_path: str | Path | None = None)
         extracted['findings'] = extractor_warnings
         return extracted
 
-    # E9 事故二：对标记了 skip_arithmetic=True（期限定价但期限无法解析）的行，豁免其单行 ITEM_ARITHMETIC 硬判
     skip_arith_names = {
         it.get('name') for it in (extracted.get('items') or []) if it.get('skip_arithmetic')
     }
@@ -1761,8 +1806,6 @@ def run_price_check(bid_path: str | Path, tender_path: str | Path | None = None)
             f for f in sb_findings
             if not (f.get('code') == 'ITEM_ARITHMETIC' and f.get('name') in skip_arith_names)
         ]
-    # E8 §3.2 & §5.2 ④：当存在《分项汇总表》且已针对"Σ分表小计 != 汇总表合计"产出 warning 级 finding 时，
-    # 抑制 PriceSandbox 因同一原因重复抛出的 TOTAL_MISMATCH error（但保留 BID_TOTAL_MISMATCH 等真错误）
     if extracted.get('has_subtotal_summary_mismatch'):
         sb_findings = [f for f in sb_findings if f.get('code') != 'TOTAL_MISMATCH']
     extracted['findings'] = extractor_warnings + sb_findings
