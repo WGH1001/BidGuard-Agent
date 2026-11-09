@@ -9,6 +9,7 @@
 5. 纯文本 / PDF 文本行报价提取与噪声过滤（不误抓评分公式或保证金大写）；
 6. run_price_check() 端到端串联 PriceSandbox 检出算术错误、跨表差额、大写错误与超限价。
 7. E7 开标一览表提取鲁棒性（三列同行限价在前/报价格在前、标签格含限价语境、双金额歧义护栏、开标一览表主源优先与自洽表交叉核验）。
+8. E8 多明细表小计聚合与分项汇总表权威源核验（单表全分项、多分表+小计聚合、多分表+小计+汇总表权威源、Σ小计与汇总表不一致报 warning 非 error、小计行混限价语境词排除、防双重计数）。
 """
 import os
 import sys
@@ -462,5 +463,271 @@ def test_e7_primary_bid_summary_table_wins_over_self_check_table():
         assert errors == []
         assert len(warnings) == 1
         assert warnings[0]['code'] == 'CROSS_TABLE_BID_WARNING'
+    finally:
+        p.unlink(missing_ok=True)
+
+
+# ── 9. E8 新增测试集：多明细表小计聚合、分项汇总表权威源与防双重计数 ──────────
+
+def _add_detail_subtable(doc: Document, title: str, rows_spec: list[tuple[str, str, str, str]], subtotal_str: str, summary_label: str = '小计'):
+    """辅助构造一张带小计/合计行的分表明细表。"""
+    doc.add_paragraph(title)
+    t = doc.add_table(rows=len(rows_spec) + 2, cols=5)
+    for idx, h in enumerate(['序号', '子系统/模块名称', '数量', '单价（元）', '合价（元）']):
+        t.cell(0, idx).text = h
+    for r_i, (nm, qty, up, tp) in enumerate(rows_spec, start=1):
+        t.cell(r_i, 0).text = str(r_i)
+        t.cell(r_i, 1).text = nm
+        t.cell(r_i, 2).text = qty
+        t.cell(r_i, 3).text = up
+        t.cell(r_i, 4).text = tp
+    last_r = len(rows_spec) + 1
+    t.cell(last_r, 0).text = summary_label
+    t.cell(last_r, 1).text = f"{summary_label}金额"
+    t.cell(last_r, 4).text = subtotal_str
+    return t
+
+
+def _add_summary_price_table(doc: Document, sub_rows: list[tuple[str, str]], grand_total_str: str):
+    """辅助构造一张无单价/数量列但含'分项名称+金额+合计行'的《分项汇总表》。"""
+    doc.add_paragraph('分项报价汇总表')
+    t = doc.add_table(rows=len(sub_rows) + 2, cols=4)
+    for idx, h in enumerate(['序号', '分项名称', '金额（元）', '备注']):
+        t.cell(0, idx).text = h
+    for r_i, (nm, amt) in enumerate(sub_rows, start=1):
+        t.cell(r_i, 0).text = str(r_i)
+        t.cell(r_i, 1).text = nm
+        t.cell(r_i, 2).text = amt
+        t.cell(r_i, 3).text = '含税'
+    last_r = len(sub_rows) + 1
+    t.cell(last_r, 0).text = '合计'
+    t.cell(last_r, 1).text = '总计金额'
+    t.cell(last_r, 2).text = grand_total_str
+    return t
+
+
+def test_e8_single_table_with_both_subtotal_and_grand_total_prefers_grand_total():
+    """E8 用例 ①：单表全分项（同表内既有阶段小计又有总合计）-> 合计优先，不得误伤。"""
+    doc = Document()
+    doc.add_paragraph('一、开标一览表')
+    t_bid = doc.add_table(rows=3, cols=2)
+    t_bid.cell(0, 0).text = '项目名称'
+    t_bid.cell(0, 1).text = '单表小计与合计并存测试项目'
+    t_bid.cell(1, 0).text = '投标总报价（小写）'
+    t_bid.cell(1, 1).text = '300,000.00元'
+    t_bid.cell(2, 0).text = '投标总报价（大写）'
+    t_bid.cell(2, 1).text = '人民币叁拾万元整'
+
+    t = doc.add_table(rows=5, cols=5)
+    for idx, h in enumerate(['序号', '品目名称', '数量', '单价（元）', '合价（元）']):
+        t.cell(0, idx).text = h
+    t.cell(1, 0).text = '1'
+    t.cell(1, 1).text = '软件分项A'
+    t.cell(1, 2).text = '1项'
+    t.cell(1, 3).text = '180,000.00'
+    t.cell(1, 4).text = '180,000.00'
+    t.cell(2, 0).text = '小计'
+    t.cell(2, 1).text = '一阶段小计'
+    t.cell(2, 4).text = '180,000.00'
+    t.cell(3, 0).text = '2'
+    t.cell(3, 1).text = '软件分项B'
+    t.cell(3, 2).text = '1项'
+    t.cell(3, 3).text = '120,000.00'
+    t.cell(3, 4).text = '120,000.00'
+    t.cell(4, 0).text = '合计'
+    t.cell(4, 1).text = '报价总计'
+    t.cell(4, 4).text = '300,000.00'
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['status'] == 'OK'
+        assert len(chk['items']) == 2
+        assert chk['table_total'] == '300000.00'
+        assert chk['bid_total'] == '300000.00'
+        assert chk['findings'] == []
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_e8_multiple_subtables_with_subtotals_no_summary_table_aggregates_sum():
+    """E8 用例 ②：多分表+小计、无汇总表（118万 + 86万 + 70.6万 + 24万 = 298.6万） -> table_total = Σ小计，0 error。"""
+    doc = Document()
+    doc.add_paragraph('一、开标一览表')
+    t_bid = doc.add_table(rows=3, cols=2)
+    t_bid.cell(0, 0).text = '项目名称'
+    t_bid.cell(0, 1).text = '某省生态环境智慧监管平台项目'
+    t_bid.cell(1, 0).text = '投标总报价（小写）'
+    t_bid.cell(1, 1).text = '2,986,000.00元'
+    t_bid.cell(2, 0).text = '投标总报价（大写）'
+    t_bid.cell(2, 1).text = '人民币贰佰玖拾捌万陆仟元整'
+
+    _add_detail_subtable(doc, '明细表A', [('子系统A1', '1套', '680,000.00', '680,000.00'), ('子系统A2', '1套', '500,000.00', '500,000.00')], '1,180,000.00')
+    _add_detail_subtable(doc, '明细表B', [('子系统B1', '2套', '430,000.00', '860,000.00')], '860,000.00')
+    _add_detail_subtable(doc, '明细表C', [('模块C1', '1项', '706,000.00', '706,000.00')], '706,000.00')
+    _add_detail_subtable(doc, '明细表D', [('运维项D1', '1年', '240,000.00', '240,000.00')], '240,000.00')
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['status'] == 'OK'
+        assert len(chk['items']) == 5
+        assert chk['table_total'] == '2986000.00'
+        assert chk['bid_total'] == '2986000.00'
+        assert chk['findings'] == []
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_e8_multiple_subtables_plus_summary_table_uses_summary_as_authority():
+    """E8 用例 ③：多分表+小计+汇总表（实锤原貌：汇总表五大分项 + 4张分表明细表 + 开标一览表） -> 取汇总表合计为权威源，0 error。"""
+    doc = Document()
+    doc.add_paragraph('一、开标一览表')
+    t_bid = doc.add_table(rows=3, cols=2)
+    t_bid.cell(0, 0).text = '项目名称'
+    t_bid.cell(0, 1).text = '固废管理信息系统升级改造项目'
+    t_bid.cell(1, 0).text = '投标总报价（小写）'
+    t_bid.cell(1, 1).text = '2,986,000.00元'
+    t_bid.cell(2, 0).text = '投标总报价（大写）'
+    t_bid.cell(2, 1).text = '人民币贰佰玖拾捌万陆仟元整'
+
+    # 汇总表（五大分项金额 + 合计 2,986,000.00，其中分项3+分项4之和 = 明细表C 706,000.00）
+    _add_summary_price_table(
+        doc,
+        [
+            ('平台一建设费', '1,180,000.00'),
+            ('平台二建设费', '860,000.00'),
+            ('平台三模块一', '406,000.00'),
+            ('平台三模块二', '300,000.00'),
+            ('安全测评与运维服务', '240,000.00'),
+        ],
+        '2,986,000.00',
+    )
+
+    _add_detail_subtable(doc, '明细表A', [('子系统A1', '1套', '1,180,000.00', '1,180,000.00')], '1,180,000.00')
+    _add_detail_subtable(doc, '明细表B', [('子系统B1', '1套', '860,000.00', '860,000.00')], '860,000.00')
+    _add_detail_subtable(doc, '明细表C', [('模块C1', '1项', '406,000.00', '406,000.00'), ('模块C2', '1项', '300,000.00', '300,000.00')], '706,000.00')
+    _add_detail_subtable(doc, '明细表D', [('服务D1', '1项', '240,000.00', '240,000.00')], '240,000.00')
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['status'] == 'OK'
+        assert chk['table_total'] == '2986000.00'
+        assert chk['bid_total'] == '2986000.00'
+        assert len(chk['items']) == 5
+        assert chk['findings'] == []
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_e8_subtotal_sum_mismatch_with_summary_table_emits_warning_not_error():
+    """E8 用例 ④：Σ小计与汇总表合计不一致 -> 取汇总表合计为 table_total，且产出 warning 级 finding（非 error）。"""
+    doc = Document()
+    doc.add_paragraph('一、开标一览表')
+    t_bid = doc.add_table(rows=3, cols=2)
+    t_bid.cell(0, 0).text = '项目名称'
+    t_bid.cell(0, 1).text = '汇总表与分表小计差异测试项目'
+    t_bid.cell(1, 0).text = '投标总报价（小写）'
+    t_bid.cell(1, 1).text = '2,986,000.00元'
+    t_bid.cell(2, 0).text = '投标总报价（大写）'
+    t_bid.cell(2, 1).text = '人民币贰佰玖拾捌万陆仟元整'
+
+    _add_summary_price_table(
+        doc,
+        [
+            ('平台一建设费', '1,180,000.00'),
+            ('平台二建设费', '860,000.00'),
+            ('平台三建设费', '706,000.00'),
+            ('运维服务费', '240,000.00'),
+        ],
+        '2,986,000.00',
+    )
+
+    # 仅附前 3 张分表明细（Σ小计 = 2,746,000.00 != 汇总表合计 2,986,000.00）
+    _add_detail_subtable(doc, '明细表A', [('子系统A1', '1套', '1,180,000.00', '1,180,000.00')], '1,180,000.00')
+    _add_detail_subtable(doc, '明细表B', [('子系统B1', '1套', '860,000.00', '860,000.00')], '860,000.00')
+    _add_detail_subtable(doc, '明细表C', [('模块C1', '1项', '706,000.00', '706,000.00')], '706,000.00')
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p)
+        assert chk['status'] == 'OK'
+        assert chk['table_total'] == '2986000.00'
+        assert chk['bid_total'] == '2986000.00'
+        errors = [f for f in chk['findings'] if f['severity'] == 'error']
+        warnings = [f for f in chk['findings'] if f['severity'] == 'warning']
+        assert errors == []
+        assert len(warnings) == 1
+        assert warnings[0]['code'] == 'SUBTOTAL_SUMMARY_MISMATCH'
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_e8_subtotal_row_with_cap_context_words_not_misread():
+    """E8 用例 ⑤：小计行混入限价语境词（继承 E7 排除，既不把限价当小计，也不误判为 bid_total）。"""
+    # 招标文件（总限价 250 万；分项小计行的括号限价注记是分项级限额，不应被当作总限价）
+    tender_doc = Document()
+    tender_doc.add_paragraph('投标人须知：本项目最高投标限价为 2,500,000.00 元。')
+    tender_p = _save_temp_docx(tender_doc)
+
+    doc = Document()
+    doc.add_paragraph('一、开标一览表')
+    t_bid = doc.add_table(rows=2, cols=2)
+    t_bid.cell(0, 0).text = '项目名称'
+    t_bid.cell(0, 1).text = '分包限价备注测试'
+    t_bid.cell(1, 0).text = '投标总报价（小写）'
+    t_bid.cell(1, 1).text = '2,040,000.00元'
+
+    # 明细表A：小计行在合价格附带括号限价说明 "1,180,000.00（本分项不得高于最高限价1,300,000.00元）"
+    _add_detail_subtable(
+        doc,
+        '明细表A',
+        [('子系统A1', '1套', '1,180,000.00', '1,180,000.00')],
+        '1,180,000.00（不得高于最高限价1,300,000.00元）',
+        summary_label='投标总报价小计',
+    )
+    _add_detail_subtable(
+        doc,
+        '明细表B',
+        [('子系统B1', '1套', '860,000.00', '860,000.00')],
+        '860,000.00（不得超过最高限价900,000.00元）',
+        summary_label='小计',
+    )
+
+    p = _save_temp_docx(doc)
+    try:
+        chk = run_price_check(p, tender_path=tender_p)
+        assert chk['status'] == 'OK'
+        assert chk['table_total'] == '2040000.00'
+        assert chk['bid_total'] == '2040000.00'
+        assert chk['findings'] == []
+    finally:
+        p.unlink(missing_ok=True)
+        tender_p.unlink(missing_ok=True)
+
+
+def test_e8_no_double_counting_when_summary_and_subtables_coexist():
+    """E8 用例 ⑥：防双重计数——汇总表与分表明细表并存（无论汇总表在前或在后），table_total 与 items 均只计一次。"""
+    doc = Document()
+    _add_detail_subtable(doc, '明细表A', [('子系统A1', '1套', '1,180,000.00', '1,180,000.00')], '1,180,000.00')
+    _add_detail_subtable(doc, '明细表B', [('子系统B1', '1套', '860,000.00', '860,000.00')], '860,000.00')
+    # 汇总表放在各分表明细表之后
+    _add_summary_price_table(
+        doc,
+        [('平台一', '1,180,000.00'), ('平台二', '860,000.00')],
+        '2,040,000.00',
+    )
+
+    p = _save_temp_docx(doc)
+    try:
+        res = extract_price_data(p)
+        assert res['status'] == 'OK'
+        # 严禁把汇总表的 204 万与分表小计的 204 万翻倍累加成 408 万
+        assert res['table_total'] == '2040000.00'
+        # 汇总表的行（无单价/数量）严禁混入 items 明细列表
+        assert len(res['items']) == 2
+        items_sum = sum(Decimal(it['total_price']) for it in res['items'])
+        assert items_sum == Decimal('2040000.00')
     finally:
         p.unlink(missing_ok=True)
