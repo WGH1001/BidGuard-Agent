@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""E2 · 三级自适应混合检索器（BM25 + 45组招投标同义词扩展 + SHA256向量缓存 + Rerank 精排）。
+"""E2 / E12 · 三级自适应混合检索器（BM25 + 45组招投标同义词扩展 + SHA256向量缓存 + Rerank 精排）。
 
-设计目标（对应 E2 任务卡 §2.2）：
+设计目标（对应 E2 任务卡 §2.2 与 E12 交叉复查加固）：
 1. 严格门控（Gate Filter）：
    - 仅当 F4 初筛（条款号/标题/高 2-gram 重合度）未命中产生"疑似漏应答候选"或 F7 自然语言提问时才调用本模块；
    - 规范标书 85%+ 条款在 F4 初筛 0ms 直通，绝不触发混合检索。
 2. 三级自适应检索链：
    - Level 1（0-Token 离线极速层，<3ms）：纯 Python Okapi BM25 + 45 组招投标领域同义词双向扩展；
    - Level 2（有 API Key 且启用向量时自动激活）：基于文件/文本 SHA256 缓存（data/cache/{hash}.emb.npy）的
-     Embedding 余弦粗筛 Top-15 + 交叉精排 Top-3；
+     Embedding 余弦粗筛 Top-15 + 交叉精排 Top-3（含行数与向量维度双重校验，维度变更自动作废重算）；
    - Level 3（无 Key / 离线单测 / 网关异常兜底）：自动停留在 Level 1，保证离线环境 100% 零报错、毫秒级返回。
 3. 零新增 pip 依赖：BM25 纯标准库实现；向量运算与缓存复用已安装的 numpy 与 openai。
 """
@@ -307,9 +307,9 @@ def _try_level2_embedding_rerank(
 
         if cache_file.is_file():
             try:
-                loaded = np.load(str(cache_file))
-                if loaded.shape[0] == len(chunks):
-                    doc_vecs = loaded
+                loaded = np.load(str(cache_file), allow_pickle=False)
+                if isinstance(loaded, np.ndarray) and loaded.ndim == 2 and loaded.shape[0] == len(chunks):
+                    doc_vecs = loaded.astype(np.float32, copy=False)
             except Exception:
                 doc_vecs = None
 
@@ -317,6 +317,8 @@ def _try_level2_embedding_rerank(
             texts_to_embed = [c['text'] for c in chunks]
             raw_vecs = embed_fn(texts_to_embed)
             doc_vecs = np.asarray(raw_vecs, dtype=np.float32)
+            if doc_vecs.ndim != 2 or doc_vecs.shape[0] != len(chunks):
+                return None
             try:
                 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
                 np.save(str(cache_file), doc_vecs)
@@ -324,7 +326,25 @@ def _try_level2_embedding_rerank(
                 pass
 
         q_vec_raw = embed_fn([query])
+        if not q_vec_raw:
+            return None
         q_vec = np.asarray(q_vec_raw[0], dtype=np.float32)
+        if q_vec.ndim != 1 or q_vec.shape[0] == 0:
+            return None
+
+        # E12 交叉复查修复（检查点 4）：若切换了不同维度的向量模型导致旧缓存列维度 shape[1]
+        # 与当前 q_vec 维度不符，立即作废旧缓存并重新计算 doc_vecs 覆盖写盘
+        if doc_vecs.shape[1] != q_vec.shape[0]:
+            texts_to_embed = [c['text'] for c in chunks]
+            raw_vecs = embed_fn(texts_to_embed)
+            doc_vecs = np.asarray(raw_vecs, dtype=np.float32)
+            if doc_vecs.ndim != 2 or doc_vecs.shape != (len(chunks), q_vec.shape[0]):
+                return None
+            try:
+                _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                np.save(str(cache_file), doc_vecs)
+            except Exception:
+                pass
 
         doc_norms = np.linalg.norm(doc_vecs, axis=1) + 1e-8
         q_norm = float(np.linalg.norm(q_vec)) + 1e-8

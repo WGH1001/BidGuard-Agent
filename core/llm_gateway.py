@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""T5 / T60 模型网关 [Gemini-Flash] —— 业务代码与模型/部署形态之间的唯一隔断层
+"""T5 / T60 / E12 模型网关 [Gemini-Flash] —— 业务代码与模型/部署形态之间的唯一隔断层
 
 实现规格（签名不得修改）：
     get_llm_client(env=None) -> LLMClient
-    build_client_from_user_config(base_url, api_key, model_flash, model_flagship=None, supports_reasoning_effort=False) -> LLMClient
+    build_client_from_user_config(base_url, api_key, model_flash, model_flagship=None, supports_reasoning_effort=False, model_embedding=None) -> LLMClient
     LLMClient.chat(messages, model_tier='flagship', max_tokens=None) -> LLMResponse
     LLMClient.chat_stream(messages, model_tier='flagship', max_tokens=None) -> Iterator[dict]
+    LLMClient.embed(texts) -> list[list[float]]
     LLMClient.total_usage() -> dict   # 累计用量
 """
 import os
@@ -49,7 +50,7 @@ def build_client_from_user_config(
     supports_reasoning_effort: bool = False,
     model_embedding: Optional[str] = None,
 ) -> 'LLMClient':
-    """T60 根据用户级自定义配置构造 LLMClient 实例（不改既有 get_llm_client 签名）。
+    """T60 / E12 根据用户级自定义配置构造 LLMClient 实例（不改既有 get_llm_client 签名）。
 
     Args:
         base_url: OpenAI 兼容接口地址（如 https://api.deepseek.com/v1）。
@@ -280,7 +281,6 @@ class LLMClient:
         temperature = 0.2
 
         if not self.use_openai:
-            # 降级：若无 OpenAI SDK，退回同步请求后包装为单次 delta + final
             sync_resp = self.chat(messages, model_tier=model_tier, max_tokens=resolved_max_tokens)
             if sync_resp.content:
                 yield {'type': 'delta', 'text': sync_resp.content}
@@ -396,6 +396,7 @@ class LLMClient:
                 f"{self.base_url}/embeddings",
                 headers=headers,
                 json={"model": model_name, "input": texts_list},
+                timeout=15,
             )
             resp.raise_for_status()
             data = resp.json()
