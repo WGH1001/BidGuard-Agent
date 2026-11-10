@@ -24,6 +24,10 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DEBUG=${DEBUG:-1}
+      - ENABLE_API_DOCS=${ENABLE_API_DOCS:-0}
+      - BIDGUARD_FORCE_ZERO_TOKEN=${BIDGUARD_FORCE_ZERO_TOKEN:-}
+      - BIDGUARD_F4_CONCURRENCY=${BIDGUARD_F4_CONCURRENCY:-4}
       - SEED_DEMO_DATA=${SEED_DEMO_DATA:-1}
       - SHOW_DEMO_LOGIN=${SHOW_DEMO_LOGIN:-1}
       - TZ=${TZ:-Asia/Shanghai}
@@ -31,6 +35,7 @@ services:
       - app-data:/app/data
       - app-output:/app/output
       - ./config:/app/config:ro
+      - ./data/corpus/regulations:/app/data/corpus/regulations:ro
     depends_on:
       postgres:
         condition: service_healthy

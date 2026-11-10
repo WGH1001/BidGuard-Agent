@@ -1,6 +1,6 @@
 # E19 · UX 体验修复与 F4 并发提速卡（六子项 · 强制分 3 个 commit）
 
-> 状态：待派发（建议 Gemini，Antigravity 留作交付后交叉复查）｜ 立卡：2026-11-10 ｜ 基线：commit a99b500
+> 状态：已完成 · 全量验收通过（Gemini 实现 + Antigravity 交叉复查补修）｜ 立卡：2026-11-10 ｜ 完成：2026-11-10 ｜ 交付 Commit：`85f0ddd` / `f64b3b6` / `b8f3403`（验收线 **160 项全绿** + `vue-tsc` 零错误）
 > 来源：用户实测反馈六个问题（F1 时间错 8 小时/白屏/F2-F4 慢/切页面虚假报错/上传体验/F7 布局与思考深度）；Antigravity 全链路排查 + 双方两轮架构把关
 > 拆卡纪律：六个子项在 CheckDetailView.vue 上有文件交集，两张卡并行必冲突——合并单卡、强制 3 个 commit（每 commit 独立可回退）；F7 布局改造（左侧抽屉折叠等）不进本卡（待办池）
 
@@ -53,3 +53,16 @@
 - F4 阶段 A 严禁进线程池（hybrid 缓存 np.load/np.save 无文件锁，并发即损坏）；输出顺序必须与串行版一致；
 - SSE 帧协议后端零改动；F7 布局改造（左侧抽屉折叠等）不在本卡范围严禁顺手做；
 - 文件白名单：frontend/src/views/ExtractView.vue、QaChatView.vue、CheckDetailView.vue、frontend/src/components/CheckTaskList.vue、SseProgress.vue、frontend/src/api/index.ts、frontend/src/api/types.ts（补 QaAskRequest.reasoning_effort 与 SSEProgressFrame.started_at 等字段）、backend/routers/qa.py、backend/schemas.py（**仅** QaAskRequest 补 reasoning_effort 字段，L255，严禁动其他模型）、core/response_checker.py、core/bid_react_agent.py、可新增测试文件；严禁动 core/llm_gateway.py（网关层零改动）、core/parser.py、core/hybrid_retriever.py。
+
+## 5. 验收与交叉复查记录（2026-11-10）
+
+- **分步提交**：严格按 3 个独立 commit 落盘入库：`85f0ddd`（Commit 1 前端 UX）、`f64b3b6`（Commit 2 SSE 状态对齐）、`b8f3403`（Commit 3 F4 双阶段并发 + F7 透传 + 单测）；
+- **Antigravity 交叉复查与实测补修（5 项实锤）**：
+  1. `CheckTaskList.vue` 删除错位残留的旧版 `getTerminalDurationLabel` JSDoc 注释（避免误挂 `nowTick` 上方）；
+  2. `core/response_checker.py` 删除粘贴替换时遗留的 69 行旧版函数尾部死代码（原 L1272-1340）；
+  3. `CheckDetailView.vue` `<SseProgress>` 标签补齐遗漏的 `@progress="handleSseProgress"` 绑定，使实时进度与 `started_at` 正确回流；
+  4. `SseProgress.vue` `startBackgroundPolling` 回调加 `targetTaskId` 与 `bgPolling` 守卫，防切换任务时飞行中的旧请求回写污染；统一 `backend/routers/qa.py` / `schemas.py` / 测试文件 CRLF→LF；
+  5. `tests/test_e19_ux_and_concurrency.py` 用独立章节分隔 3 条 `★` 要求（修复 `extract_marked_clauses` 把紧邻三行合并为 1 条导致单线程假覆盖的问题），并按 `【招标要求核心句】` 精确分派 Mock，新增 `len(thread_ids) >= 2` 实并发线程数断言；
+- **全量实测回执**：
+  - `pytest tests/ -q`：**160 passed, 1 warning (231.13s)**（157 基线 + 3 E19 新增）；
+  - 无管道 `vue-tsc --noEmit`：**TSC_EXIT=0**；`npm --prefix frontend run build`：**BUILD_EXIT=0**（1727 modules, 8.46s）。

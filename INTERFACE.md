@@ -79,6 +79,8 @@ run_response_check(tender_path: str | Path, bid_path: str | Path,
 #        'self_contradictions': [...], # 投标书内部矛盾
 #        'alignment_summary': {'total_requirements','aligned_hits','hit_rate',...}}
 # requirements 传 None 时内部自动跑 build_review_checklist（重复解析，后端应复用 F1 结果传入）
+# E19 起：阶段 A 严格单线程按序定位与写入向量缓存；阶段 B 仅 client.chat 进线程池并发
+# （线程数由环境变量 BIDGUARD_F4_CONCURRENCY 控制，默认 4，设 1 回退纯串行），单条异常降级为 error_fallback。
 ```
 
 `star_results` 与传入的 `requirements`（剔除 usage_note/table_marker 后）**严格同序**——
@@ -102,8 +104,8 @@ export_deviation_table(tender_path: str | Path, bid_path: str | Path,
 ```python
 # core/rigging_radar.py
 scan_rigging_radar(tender_path: str | Path, client=None) -> dict[str, Any]
-# 返回：{'suspicious_params': [{'quote','offset','exclusive_type','confidence',
-#          'reason','quote_verified','llm_status'}, ...],
+# 返回：{'suspicious_params': [{'quote','offset','page','footer_page','is_docx_page',
+#          'exclusive_type','confidence','reason','quote_verified','llm_status'}, ...],
 #        'conclusion': {'recommendation': '值得投'|'谨慎投'|'疑似控标高', 'summary'},
 #        'llm_status': 'done'|'skipped'}
 ```
@@ -113,12 +115,15 @@ scan_rigging_radar(tender_path: str | Path, client=None) -> dict[str, Any]
 ```python
 # core/bid_react_agent.py
 ask_bid_expert(tender_path: str | Path, bid_path: str | Path, question: str,
-               client=None, max_rounds: int = 6) -> dict[str, Any]
+               client=None, max_rounds: int = 6,
+               reasoning_effort: Optional[str] = None) -> dict[str, Any]
 # 返回：{'mode': 'react'|'keyword_fallback', 'question', 'answer',
-#        'quotes': [{'source','quote','offset','page','quote_verified'}, ...],
+#        'quotes': [{'source','quote','offset','page','footer_page','is_docx_page','quote_verified'}, ...],
 #        'steps': [...], 'rounds_used': int, 'terminated_by_max_rounds': bool}
-# page：仅 PDF 有真实页码，docx 恒为 None，前端必须处理 null 展示
+# E18 起：quotes/检索工具通过统一双轨页码上下文适配 PDF 与 docx；无法计算页码时诚实为 None 并展示字符偏移
+# E19 起：reasoning_effort 支持 'low' | 'medium' | 'high'（非法值自动忽略走默认）
 # 已挂载 6 工具：search_tender / search_bid / locate_chapter / recalc_price / check_cert_expiry / cite_regulation
+# search_tender(..., page_spans: list[...] | dict | None = None) / search_bid(...) 兼容旧版 list 与 E18 双轨 ctx dict
 ```
 
 ### 1.8 批注回写与解析底座
@@ -128,6 +133,8 @@ ask_bid_expert(tender_path: str | Path, bid_path: str | Path, question: str,
 parse_document(file_path: str) -> ParsedDoc          # .text / .source_type / .pages
 build_pdf_page_spans(file_path: str | Path | None) -> list[tuple[int, int, int]]
 offset_to_page(offset: int | None, page_spans: list[tuple[int, int, int]]) -> int | None
+build_docx_page_spans(file_path: str | Path | None) -> list[tuple[int, int, int, int | None]]
+offset_to_docx_page(offset: int | None, spans: list[tuple[int, int, int, int | None]]) -> dict | None
 
 # core/redline.py —— 原位标红批注（交付中心 ZIP 用）
 inject_word_comments(src_docx_path: str, findings: list,
@@ -143,7 +150,8 @@ inject_pdf_highlights(src_pdf_path: str, findings: list,
 get_llm_client(env: Optional[str] = None) -> LLMClient      # 读 config/models.yaml
 build_client_from_user_config(base_url: str, api_key: str, model_flash: str,
                               model_flagship: Optional[str] = None,
-                              supports_reasoning_effort: bool = False) -> LLMClient
+                              supports_reasoning_effort: bool = False,
+                              model_embedding: Optional[str] = None) -> LLMClient
 ```
 
 ### 1.10 E4 招投标法规库与法条三态真伪核验（RulesAndCertsView / `/api/regulations`）
@@ -173,7 +181,7 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 |---|------|------|----------------------|
 | 1 | `tenants` | 多租户投标部门 | `name`（唯一）、`is_active` |
 | 2 | `users` | 用户与角色鉴权 | `tenant_id` FK、`username`（**全局唯一** unique=True）、`password_hash`(bcrypt)、`display_name`、`role`(admin/member)、`is_active`、`last_login_at` |
-| 3 | `bid_check_tasks` | 体检/控标任务主表 | `tenant_id`、`user_id`、`task_type`(pre_check/radar)、`title`、`status`、`progress`、`stage_detail`、`tender_filename`、`bid_filename`、`tender_path`、`bid_path`、`error_msg`、`stats_json`、`price_manual_json`、`config_json`、`llm_usage_json`、`delivered_at` |
+| 3 | `bid_check_tasks` | 体检/控标任务主表 | `tenant_id`、`user_id`、`task_type`(pre_check/radar)、`title`、`status`、`progress`、`stage_detail`、`tender_filename`、`bid_filename`、`tender_path`、`bid_path`、`error_msg`、`stats_json`、`price_manual_json`、`config_json`、`llm_usage_json`、`started_at`、`finished_at`、`duration_json`、`delivered_at` |
 | 4 | `bid_findings` | 检出风险明细 | `task_id` FK(级联删除)、`source_module`、`code`、`severity`、`category`、`clause_no`、`quote`、`bid_quote`、`quote_offset`、`quote_verified`、`page`、`message`、`suggestion`、`consequence`、`detail_json`、`feedback`、`feedback_note` |
 | 5 | `bid_rule_configs` | 核查参数与自定义红线 | `tenant_id`、`name`、`price_cap`(Numeric 14,2)、`open_date`(Date)、`buyer_name`、`required_social_months_json`、`custom_redlines_json`、`is_default` |
 | 6 | `company_certificates` | 企业证照效期台账 | `tenant_id`、`cert_name`、`cert_no`、`valid_until`(Date)、`warn_days`(默认 30)、`remark` |
@@ -201,3 +209,8 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 | 2026-11-05 | B1 验收修正：① users.username 落实全局唯一 ② create_token payload 仅留 sub/tenant_id/role/exp；保留 bid_quote 列与 BidFinding 只读属性 | 架构侧 |
 | 2026-11-06 | E4 法规库与法条核验卡：① §1.10 新增 `core/regulation_library.py` 与 `core/regulation_crawler.py` 契约签名，F7 新增第 6 工具 `cite_regulation` ② §2 新增第 10、11 表 `regulation_laws` 与 `regulation_articles` ③ 挂载 `/api/regulations` 路由组 | 实现侧 |
 | 2026-11-09 | E10 前端功能走查与并发稳定性卡：① `/api/radar` 补齐 `GET /api/radar`（历史列表）、`GET /api/radar/{task_id}`（回放 `RadarScanOut`）、`DELETE /api/radar/{task_id}` ② `DELETE /api/checks/{task_id}` 补齐运行中任务 `409 TASK_RUNNING` 拒删守卫与上传文件/导出产物级联清理 ③ `/api/regulations` 新增 `DELETE /api/regulations/laws/{law_id}`（`require_admin` 级联清理条文） ④ `/api/dashboard` 将 F1 提取条款数纳入 `defense_matrix` 统计 | 实现侧 |
+| 2026-11-09 | E12 L2 混合检索激活：`build_client_from_user_config` 增加 `model_embedding: Optional[str] = None`、`LLMClient.embed()` 接入 L2 重排 | 架构侧 + 复查 |
+| 2026-11-10 | E11 五阶段耗时统计卡：`bid_check_tasks` 新增 `started_at`/`finished_at`/`duration_json` 三列及方言感知平滑迁移 `ensure_bid_check_tasks_columns`；SSE progress 帧透传 `started_at` | 实现侧 + 验收 |
+| 2026-11-10 | E15/E18 双轨页码大一统：`core/parser.py` `build_docx_page_spans`/`offset_to_docx_page` 联动统一页码上下文覆盖 F1/F2/F3/F4/F5/F6/F7；`search_tender`/`search_bid` 第 4 形参兼容 `list \| dict`；开标日期缺省自动正则回填 | 实现侧 + 验收 |
+| 2026-11-10 | E16 交付中心升级：`/api/reports` 新增 `GET /api/reports/{task_id}/signoff`（终核签字单下载）与 `POST /api/reports/batch-zip`（多任务内容自选批量打包） | 实现侧 + 验收 |
+| 2026-11-10 | E19 UX 体验修复与 F4 并发提速：`core/response_checker.py` 升级两阶段并发（受 `BIDGUARD_F4_CONCURRENCY` 环境变量控制，默认 4）；`ask_bid_expert` 与 `QaAskRequest`（`POST /api/qa/sessions/{id}/ask`）新增可选参数 `reasoning_effort`（`'low'\|'medium'\|'high'`） | 实现侧 + 交叉复查 |

@@ -54,23 +54,23 @@ BidGuard-Agent/
 ├── core/                                # 19 个模块（F1~F7 + 混合检索 + 法规库，逐项状态见 §3）
 ├── backend/                             # main + models(11表) + schemas + 11 组路由
 ├── frontend/                            # Vue3 + TS：12 个视图全部落地
-├── tests/                               # 18 个测试文件 115 项全绿
+├── tests/                               # 24 个测试文件（test_*.py）160 项全绿
 ├── scripts/                             # build_f1_baseline.py / eval_f1_llm.py
 ├── data/
 │   ├── corpus/m0_samples/               # 11 份语料 + baseline / ground_truth / llm_eval 三本账（§4）
 │   ├── corpus/regulations/              # E4：4 部法律 JSON 种子 + originals/ 原文（含 87 号令扫描 PDF）
 │   └── rules/law_source/                # 4 部法规官方文本
 ├── deploy/nginx/nginx.conf              # 静态直发 + /api/ 反代 SSE 防缓冲三件套
-└── docs/                                # DEPLOY.md / cards/（任务卡归档 B1~E6）/ 待立卡-E1E2升级点定案.md
+└── docs/                                # DEPLOY.md / cards/（任务卡归档 B1~E19，共 26 份）/ 待立卡-E1E2升级点定案.md
 ```
 
 ---
 
-## 2. 当前基线（截至 2026-11-09）
+## 2. 当前基线（截至 2026-11-10）
 
-- **开发阶段**：3 周排期全部完成 + 十一轮增强升级（E1~E10、E12/E13）交付。系统已具备交付条件，处于语料扩充与仿真验证阶段（仿真标书 **11/11 验收通过**，语料库齐套收官）
-- **Git 最新 Commit**：`fca119d`（本地 main；远端同步状态以 `git log origin/main..HEAD` 实数为准）
-- **测试基线**：**157 项 pytest 全绿（零回归）**——第一验收线已从 60 项演进至 157 项
+- **开发阶段**：3 周排期全部完成 + 十九轮增强升级（E1~E19）全量交付，仿真标书 **11/11 验收收官**，前后端体验与 F4 并发提速闭环完成
+- **Git 最新功能 Commit**：`b8f3403`（E19 Commit 3；远端同步状态以 `git log origin/main..HEAD` 实数为准）
+- **测试基线**：**160 项 pytest 全绿（零回归）** + `vue-tsc --noEmit` 零错误 —— 第一验收线已从 60 项演进至 160 项
 - **模型网关基线**：`config/models.yaml` 默认 `default_env: demo`（智谱 `glm-5.3-flash` 直连，`reasoning_effort: low`，`embedding: embedding-3` 已激活 L2 混合检索）；预留 `prod` 内网私有网关（`http://10.0.2.81:3000/v1`，无向量模型自动无感降级 Level 1）
 - **运行环境**：本机开发用项目自带 `.venv`（依赖已全量钉死）；生产走 Docker 四容器（`docker compose up -d --build`，层缓存全热时秒级）
 - **快速验收命令**：
@@ -90,19 +90,19 @@ BidGuard-Agent/
 | 2 | `core/parser.py` | 文档解析 | Word/PDF/TXT 解析、vMerge 去重、RapidOCR 离线缓存；E5 新增 `build_pdf_page_spans/offset_to_page`；E6 新增 `build_docx_page_spans/offset_to_docx_page`（双轨页码：印刷页 > 物理页估算 > 字符偏移诚实回退）。**E6 验收时偏移权威源已从 lxml 重建改为 python-docx 部件序列（7/7 真语料零漂移）** | 已验收（11 份真语料解析零虚增） |
 | 3 | `core/splitter.py` | 条款切分 | 条款编号与段落切分，保留精确 `start/end` 偏移 | 已验收 |
 | 4 | `core/quote_verifier.py` | 溯源锁账 | `normalize_zh` 中文归一 + `verify_quote` 连续原文子串核验 | 已验收（F1/F4 防幻觉守门员） |
-| 5 | `core/llm_gateway.py` | 模型网关 | OpenAI 兼容多环境调用、重试与 Token/成本累计 | 已验收（F1 实测 178 次调用 0.231 元） |
-| 6 | `core/tender_extractor.py` | **F1 确定性层** | ★/▲ 分型合并、无标记模式 A/B、资格/符合/评标章定位、表格型评分细则解析（0 Token） | **已验收**（11 份语料逐字符守恒） |
+| 5 | `core/llm_gateway.py` | 模型网关 | OpenAI 兼容多环境调用、线程安全用量累加（`self._lock`）、`embed()` 向量接入、原生 `reasoning_effort` 透传与拒参自动重试 | 已验收（E12 激活 `embed()`；F1 实测 178 次调用 0.231 元） |
+| 6 | `core/tender_extractor.py` | **F1 确定性层** | ★/▲ 分型合并、无标记模式 A/B、资格/符合/评标章定位、表格型评分细则解析（0 Token）；E18 接入统一双轨页码上下文 | **已验收**（11 份语料逐字符守恒，docx 页码全非空） |
 | 7 | `core/tender_llm.py` | **F1 LLM 层** | 候选段扩窗吸附、逐段结构化、强制溯源、段落型评分细则抽取 | **已验收**（召回率/溯源率 100%） |
 | 8 | `core/price_sandbox.py` | **F2 算术沙盒** | 0 Token 报价核验（全程 Decimal 禁 float）、大写转换、限价比较 | **已验收**（差 1 分钱必报警） |
-| 9 | `core/price_extractor.py` | **F2-2 提取层** | 报价表结构提取、vMerge 去重、万元折算、NEED_MANUAL 降级 | **已验收**（price_cap 命中 9/11） |
-| 10 | `core/qualification_scanner.py` | **F3 证照串名** | 证照效期、社保月份区间、跨项目串名、占位符扫描（0 Token） | **已验收**（E3R 修复社保月份正则） |
-| 11 | `core/bid_aligner.py` | 对齐底座 | 双书条款级四阶段 + Stage 3.5 跨块回收对齐、五类要素异动探针 | 已验收（0 Token 底座） |
-| 12 | `core/response_checker.py` | **F4 双书勾稽** | ★/▲ 逐条响应核验 + 大模型判定 + 自洽扫描；E6 接入 docx 双轨页码；E5 起 F4 类名按实际符号动态出 ★/▲/★或▲ | **已验收** |
+| 9 | `core/price_extractor.py` | **F2-2 提取层** | 报价表提取、vMerge 去重、万元折算、NEED_MANUAL 降级；E7~E9/E13/E14 迭代覆盖同行多金额护栏、多明细表聚合、元/年×期限、双胞胎去重、汇总行后缀识别与明细豁免 | **已验收**（`price_cap` 命中 **11/11**；芜湖无为 0 error） |
+| 10 | `core/qualification_scanner.py` | **F3 证照串名** | 证照效期、社保月份区间、跨项目串名、占位符扫描（0 Token） | **已验收**（E3R 修复社保月份正则；E15 补双轨页码与开标日自动提取） |
+| 11 | `core/bid_aligner.py` | 对齐底座 | 双书条款级四阶段 + Stage 3.5 跨块回收对齐、五类要素异动探针 | 已验收（0 Token 底座；E10 防呆优化提速 50×） |
+| 12 | `core/response_checker.py` | **F4 双书勾稽** | ★/▲ 逐条响应核验 + 大模型判定 + 自洽扫描；E6 接入 docx 双轨页码；E5 类名符号动态化；E19 升级“阶段 A 按序预定位 + 阶段 B 仅 `client.chat` 并发”双阶段引擎 | **已验收**（E19 `BIDGUARD_F4_CONCURRENCY` 默认 4，与串行逐字节一致） |
 | 13 | `core/deviation_exporter.py` | **F5 偏离表** | 《技术与商务偏离表.docx》一键生成；E6 位置列升级为"第X页(印刷页Y·估算)"带 @charN 诚实回退 | **已验收** |
-| 14 | `core/rigging_radar.py` | **F6 控标雷达** | 排他性/倾向性控标参数识别（确定性正则 + 大模型④，标注"疑似"） | **已验收**（E3R 修复 import 指向） |
-| 15 | `core/bid_react_agent.py` | **F7 专家追问** | 多轮 ReAct 追问；E4 起挂载第 6 工具 `cite_regulation`（引用法规原文佐证，同号多命中按 keyword 排序） | **已验收** |
+| 14 | `core/rigging_radar.py` | **F6 控标雷达** | 排他性/倾向性控标参数识别（确定性正则 + 大模型④，标注"疑似"）；E18 接入统一双轨页码 | **已验收**（E3R 修复 import；E18 打通 docx 页码） |
+| 15 | `core/bid_react_agent.py` | **F7 专家追问** | 多轮 ReAct 追问；E4 挂载 `cite_regulation` 第 6 工具；E18 兼容双轨页码与 `list \| dict` 传参；E19 支持三挡 `reasoning_effort`（low/medium/high）透传 | **已验收** |
 | 16 | `core/redline.py` | 批注回写 | Word OOXML 批注气泡 + PDF 坐标高亮；**E5 升级**：五级降级定位链（L3 标点归一/L4 逐字符 bbox 归一/L5 置信护栏≥60%且≥8字）、总览页（A4 插入 PDF 首部，全部发现编号 N01.. + LINK_GOTO 点击跳转） | **已验收**（E5 卡，111→115 项含 6 新测试） |
-| 17 | `core/hybrid_retriever.py` | **E2 混合检索** | BM25 三级门控（词面精确/同义词扩展 45 组/语义兜底）+ MISSING_EVIDENCE 探针 | **已验收**（E2 卡） |
+| 17 | `core/hybrid_retriever.py` | **E2 混合检索** | BM25 三级门控（词面精确/同义词扩展 45 组/语义兜底）+ MISSING_EVIDENCE 探针；E12 正式激活 L2 向量嵌入重排（带 `.emb.npy` 维度校验失效重算） | **已验收**（E2 + E12 卡） |
 | 18 | `core/regulation_library.py` | **E4 法规库** | 8 部法律条文库：三态核验（exact_match/fuzzy_hint/unverifiable，**LLM 对真伪零裁决权**）、中文/阿拉伯条号归一、张冠李戴降级 fuzzy_hint、四格式导入（json/txt/docx/pdf，content_hash 幂等） | **已验收**（E4 卡，含 crawl 集成测试外网隔离） |
 | 19 | `core/regulation_crawler.py` | **E4 法规爬取** | 静态 HTML 适配器，运行时读 `config/regulation_sources.yaml`（8 个官方 URL）；占位源诚实报"源未配置"；超时重试一次转 manual_required；SHA256 条文指纹发现官网修订 | **已验收** |
 
@@ -141,10 +141,9 @@ BidGuard-Agent/
 2. ~~F2-2 剩余 2 份语料的 `price_cap` 特殊措辞适配~~ **已解决（E7 顺带修复）**：E7 调用点分层改造后 `price_cap` 命中提升为 **11/11**（江苏科技 390,000 与江苏固废 3,700,000 均正确命中，已对照独立来源核实）。
 3. **两处语法不可分的人工改判保护**：芜湖 `▲中共无`、南京病理 `★（二）商务要求`——提取器保守不硬判，靠 ground_truth 人工锁死（M0 人工终审红线）。
 4. **E4 法规 crawl 实弹验证未跑**：8 个官方 URL 已配置但尚未真实爬取（重点看反法 2019→2025 diff）；用户手工验证 URL 可达性亦未完成。
-5. **仿真投标语料制作中**：Antigravity 打样滁州标书首轮验收未过（F2 三 error/12 处 XXX 占位符/▲ 覆盖 16/26/字数 1.03 倍），4 条返工指令已下发（用户拍板严格仿真：8.5万~13万字）；过验后滚动其余 10 份。滁州返工稿已过验收（121,126 字=2.23 倍，F2/F3 双零告警，▲26 处闭环）；江苏一件事 v1 字数/F3/★▲ 过、F2 两条 error（自洽表限价与总报价同行误判，已发排版返工指令）。
-6. **E7 已验收入库**（`891b3ab`，121 项测试全绿）：F2 开标一览表提取鲁棒性——限价语境逐格剔除、同行多金额歧义护栏（None+warning 绝不错误断言）、开标一览表主源优先；试金石实弹：限价/报价同行合法排版下 bid_total 提取正确、0 error（系统适配合法标书形态，不让用户改排版）。**price_cap 基线 9/11→11/11**。另：已交付两份仿真标书表格已批量修复为窗口自适应（96 张），后续生成已加"建表即自适应"硬规范。
-7. **E8 已验收入库**（`d56a9af`，127 项测试全绿）：F2 多明细表小计聚合——《分项汇总表》权威源、Σ各分表小计、防双重计数（processed_table_els）。验收修两处：千分位逗号被 `_strip_non_bid_clauses` 切碎致金额坍缩；整表纵向合并的汇总表合计行被当分表累加致 table_total 翻倍。试金石：无锡梁溪/新吴多分表排版首次零 error。
-8. **E9 候选（未立卡）**：徐州仿真标书 items 收集缺 3.2M（40 条 vs 明细 58 行，明细表行收集完整性），与 E8 近亲但独立——待连云港（62▲）等剩余语料暴露更多样本后一并立卡。仿真语料台账见 `data/corpus/sim_bids/_README.md`（7/11 已验收）。
+5. **~~仿真投标语料制作中~~ 已收官（11/11 全验收放行）**：见 `data/corpus/sim_bids/_README.md`——含连云港（62▲/56.8万字）、滁州物业（E13 修复后放行）、芜湖无为（E14 修复后 0 error/0 warning 收官）在内的 11 份仿真投标书全部验收通过，全套语料零返工。
+6. **F7 问答工作台布局增强（待办池，未立卡）**：`QaChatView.vue` 左侧会话列表折叠抽屉、历史搜索与重命名（E19 为防止单卡摊薄而刻意拆出）。
+7. **F2-2 / F2 阶段七/八已交付**：E7（`891b3ab`）、E8（`d56a9af`）、E9（`2137047`）、E13（`38bb1d1`）、E14（`e8d1465`）均已验收入库，11 份仿真语料相关算术盲区已清零。
 
 ---
 
@@ -170,17 +169,18 @@ BidGuard-Agent/
 | E12 | L2 混合检索激活（LLMClient.embed() + models.embedding 配置 + 降级守卫）+ Gemini 交叉复查加固（缓存维度失配作废重算/requests timeout） | `f2e1952`→`fca119d` | 146 项 |
 | E13 | F2 双胞胎明细表去重（金额多重集主键 + DUPLICATE_DETAIL_TABLE 提示 + 非双胞胎兜底） | `38bb1d1` | 146 项 |
 | E11 | 体检任务五阶段耗时统计（started_at/finished_at/duration_json + 老库平滑加列 + 前端最慢阶段高亮） | `b62887a` | 149 项 |
-| E14 | F2 汇总行后缀识别 + 前后缀明细算术豁免护栏 + 页/条/卷量词扩充（Gemini 首版→Antigravity 返工一次过） | `38bb1d1`后续 | 151 项 |
+| E14 | F2 汇总行后缀识别 + 前后缀明细算术豁免护栏 + 页/条/卷量词扩充（Gemini 首版→Antigravity 返工一次过） | `e8d1465` | 151 项 |
 | E15 | F3/自定义红线双轨页码 + F2 三级防重名锚定页码 + 开标日期自动回填（消 2026-11-05 硬编码） | `f1c77ec` | 155 项 |
-| E16 | 交付中心四大件独立下载 + signoff 端点 + 批量打包内容自选 | `bdb36f7` | 155 项 |
-| E18 | F1/F6/F7 三处 PDF 硬编码统一接入双轨页码上下文（docx 页码从恒 None 到全非空，F7 形参 list\|dict 兼容） | `git log` | 157 项 |
+| E16 | 交付中心四大件独立下载 + signoff 端点 + 批量打包内容自选（含 TS 强类型修复 `e08c42b`） | `bdb36f7`→`e08c42b` | 155 项 |
+| E18 | F1/F6/F7 三处 PDF 硬编码统一接入双轨页码上下文（docx 页码从恒 None 到全非空，F7 形参 list\|dict 兼容） | `87bde93` | 157 项 |
+| E19 | 六子项合并单卡三 Commit：F1 本地时区/多文件拖拽/局部 loading/超时放宽 + 在途秒表（UTC 补 `Z`）+ F7 三挡推理深度 + SSE 断线轮询对齐 + F4 两阶段并发提速（默认 4 路） | `85f0ddd` / `f64b3b6` / `b8f3403` | 160 项 + `vue-tsc` |
 | chore | requirements 全量钉死（`59e6b64`）、基础镜像 digest 钉死、弹窗会话记忆 | `90a1947` | — |
 
 ---
 
 ## 7. 协作纪律与工程红线（完整版见 `AGENTS.md`）
 
-1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线 **157 项**。
+1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线 **160 项**。
 2. **凡能算的绝不进大模型（0 Token 优先）**；金额全程 `Decimal` 禁 `float`（ROUND_HALF_UP 量化 0.01）。
 3. **LLM 只吃局部窗口 + 强制 `quote_verifier` 溯源**；严禁整本标书直塞。
 4. **宁缺毋滥显式降级**：无法对齐必返回 NEED_MANUAL；找不到位置绝不乱锚（E5 五级定位链 + 置信护栏）；页码诚实回退字符偏移并标"不一定准确"。
@@ -200,8 +200,8 @@ BidGuard-Agent/
 | `AGENTS.md` | 工程红线、协作纪律、冷启动口令 | 新铁律沉淀时立即更新 |
 | `INTERFACE.md` | core↔backend 契约锁死 | 涉签名改动时同步 |
 | `FRONTEND.md` | 前端架构说明 | 前端结构变化时同步 |
-| `docs/DEPLOY.md` | 四容器部署手册 | 部署变化时同步 |
-| `docs/cards/` | 任务卡归档（B1~E6） | 每立卡/收卡时归档 |
+| `docs/DEPLOY.md` | 本机直跑 + Linux Docker/离线/裸机部署手册 | 部署变化时同步 |
+| `docs/cards/` | 任务卡归档（B1~E19） | 每立卡/收卡时归档 |
 | `.workbuddy/memory/`（不入库） | 架构侧 AI 工作日志 | 每日实质工作后追加 |
 
 **冷启动口令**（新会话开场）：「先读取 AGENTS.md 和 HANDOVER.md，然后读 docs/cards/ 里最新一张卡，汇报理解后等我派活。」
@@ -210,7 +210,7 @@ BidGuard-Agent/
 
 ## 9. 本文档信息来源
 
-1. `docs/cards/` B1~E6 全部任务卡与验收记录；`派发归档/` E1~E6 派发包全文
-2. Git 提交链（`git log --oneline`，基线 `f07ea82`）；115 项 pytest 实测回执
-3. `data/corpus/m0_samples/` 三本账 + `语料清单.md`；`data/corpus/regulations/` 法规种子
+1. `docs/cards/` B1~E19 全部任务卡与验收记录；`派发归档/` 各阶段派发包全文
+2. Git 提交链（`git log --oneline`，功能代码至 E19 `b8f3403`）；160 项 pytest + `vue-tsc` 实测回执
+3. `data/corpus/m0_samples/` 三本账 + `语料清单.md`、`data/corpus/sim_bids/_README.md`；`data/corpus/regulations/` 法规种子
 4. `E:\agent\Contract-Review-Agent\HANDOVER_V2.md`（文档骨架参照）
