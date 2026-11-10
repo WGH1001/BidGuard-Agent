@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
-"""B2 / E3R / E5 / E11 · 进程内线程池任务执行器 + SSE 进度广播总线 + 三级 LLM 客户端降级解析器 + 分阶段耗时统计。
+"""B2 / E3R / E5 / E11 / E15 · 进程内线程池任务执行器 + SSE 进度广播总线 + 三级 LLM 客户端降级解析器 + 分阶段耗时统计 + 发现页码定位与开标日期自动回填。
 
-严格遵循 INTERFACE.md §1、§3.3、E3R 实锤 B、E5 措辞动态化与 E11 耗时可观测性：
+严格遵循 INTERFACE.md §1、§3.3、E3R 实锤 B、E5 措辞动态化、E11 耗时可观测性与 E15 页码/开标日期增强：
 1. 状态机五态推进：created -> extracting -> checking -> grading -> delivered（异常转 failed）；
 2. SSE 三种标准事件：event: progress / event: done / event: error；
 3. E3R 实锤 B 修复：同一任务再次触发 run 时，submit_check_task 立即调用 broadcaster.clear(task_id)
    清除上一轮残留的 done/error 终态帧，并将数据库 status 同步重置为 'extracting'、progress=0；
-4. 溯源章铁律：F2 算术与 F3 效期/串名计算类发现 quote_verified=False（不盖原文溯源章）；
+4. 溯源章铁律：F2 算术与 F3 效期/串名计算类发现默认 quote_verified=False（仅当 F2 锚点精确命中原文子串时置 True）；
 5. E5 措辞动态化：F4 发现的 category 与 suggestion 按条款符号（★ / ▲ / ★或▲）动态生成；
 6. E11 耗时可观测性：记录 started_at / finished_at（UTC）与 duration_json（f1_ms/f2_ms/f3_ms/f4_ms/grading_ms/total_ms），
-   重跑时自动清空旧耗时，异常失败路径亦保留已完成阶段耗时以便定位卡死点。
+   重跑时自动清空旧耗时，异常失败路径亦保留已完成阶段耗时以便定位卡死点；
+7. E15 页码定位与开标日期回填：复用 response_checker 统一双轨页码上下文为 F2/F3/自定义红线赋 page，
+   F2 采用"名称+金额同现 -> 报价章节 ±3000 字窗口 -> 诚实回退 None"三级防重名锚定链；开标日期未填时从招标书 0-Token 正则提取回填。
 """
 from __future__ import annotations
 
@@ -19,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import threading
 import time
 from typing import Any, Optional
@@ -38,9 +41,27 @@ from core.llm_gateway import build_client_from_user_config, get_llm_client
 from core.parser import parse_document
 from core.price_extractor import run_price_check
 from core.qualification_scanner import scan_qualifications
-from core.response_checker import run_response_check
+from core.response_checker import (
+    _build_unified_page_context,
+    _resolve_unified_page,
+    run_response_check,
+)
 from core.tender_extractor import build_review_checklist
 from core.tender_llm import extract_tender_with_llm
+
+DEFAULT_FALLBACK_OPEN_DATE = '2026-11-05'
+
+# E15 §2.2：招标文件开标/递交截止日期 0-Token 确定性提取正则（容忍数字与年月日间夹杂空白字符）
+_OPEN_DATE_EXTRACT_RE = re.compile(
+    r'(?:开\s*标\s*时\s*间|开\s*标\s*日\s*期|提交投标文件截止时间|递交投标文件截止时间|投标截止时间|投标文件递交截止时间|响应文件提交截止时间|响应文件开启时间)'
+    r'[^\d\n]{0,28}?'
+    r'(20[2-3]\s*\d)\s*[年\-/.]\s*([01]?\s*\d)\s*[月\-/.]\s*([0-3]?\s*\d)\s*日?'
+)
+
+# E15 §2.3：报价相关章节锚点词（用于定位投标书中的报价表区域中心偏移）
+_PRICE_SECTION_HEADING_RE = re.compile(
+    r'(?:开\s*标\s*一\s*览\s*表|报\s*价\s*一\s*览\s*表|分\s*项\s*报\s*价\s*表|分\s*项\s*报\s*价\s*明\s*细|投\s*标\s*报\s*价\s*明\s*细|报\s*价\s*汇\s*总\s*表)'
+)
 
 
 def _utc_now() -> datetime:
@@ -55,6 +76,176 @@ def resolve_project_path(rel_or_abs: Optional[str | Path]) -> Path:
     if p.is_absolute():
         return p
     return (PROJECT_ROOT / p).resolve()
+
+
+def extract_open_date_from_tender_text(text: str) -> Optional[str]:
+    """E15 §2.2：从招标文件全文中提取开标日期或投标截止日期（返回 YYYY-MM-DD，未识别返回 None）。"""
+    if not text:
+        return None
+    for m in _OPEN_DATE_EXTRACT_RE.finditer(text):
+        y_str = re.sub(r'\s+', '', m.group(1))
+        m_str = re.sub(r'\s+', '', m.group(2))
+        d_str = re.sub(r'\s+', '', m.group(3))
+        try:
+            year = int(y_str)
+            month = int(m_str)
+            day = int(d_str)
+            dt = datetime(year, month, day)
+            return dt.strftime('%Y-%m-%d')
+        except ValueError:
+            continue
+    return None
+
+
+def _format_amount_variants(amt_str: Optional[str]) -> list[str]:
+    """生成金额字符串的无逗号与千分位逗号两种字面量变体（如 '84500.00' 与 '84,500.00'、'84500'）。"""
+    if not amt_str:
+        return []
+    raw = str(amt_str).strip()
+    if not raw:
+        return []
+    variants: list[str] = []
+    clean = raw.replace(',', '')
+    try:
+        from decimal import Decimal
+        d = Decimal(clean)
+        q2 = f"{d:,.2f}"
+        q2_plain = f"{d:.2f}"
+        for cand in (raw, q2, q2_plain, str(d.normalize())):
+            if cand and cand not in variants:
+                variants.append(cand)
+    except Exception:
+        variants.append(raw)
+    return variants
+
+
+def _find_price_section_centers(bid_text: str, f2_res: dict[str, Any]) -> list[int]:
+    """E15 §2.3b：收集投标书中报价区域（开标一览表/分项报价表/已提取分项特征串）的中心偏移列表。"""
+    centers: list[int] = []
+    if not bid_text:
+        return centers
+
+    explicit_off = f2_res.get('price_section_offset')
+    if isinstance(explicit_off, int) and 0 <= explicit_off < len(bid_text):
+        centers.append(explicit_off)
+
+    for m in _PRICE_SECTION_HEADING_RE.finditer(bid_text):
+        centers.append(m.start())
+
+    # 利用已提取的其他分项"名称+金额"共现位置作为报价表区域锚点
+    for it in (f2_res.get('items') or [])[:10]:
+        nm = str(it.get('name') or '').strip()
+        if not nm:
+            continue
+        for amt_v in _format_amount_variants(it.get('total_price')) + _format_amount_variants(it.get('unit_price')):
+            for m_nm in re.finditer(re.escape(nm), bid_text):
+                pos = m_nm.start()
+                win_hi = min(len(bid_text), pos + len(nm) + 120)
+                if amt_v in bid_text[pos:win_hi]:
+                    centers.append(pos)
+                    break
+    return centers
+
+
+def locate_f2_finding_in_bid_text(
+    f2_item: dict[str, Any],
+    f2_res: dict[str, Any],
+    bid_text: str,
+) -> tuple[Optional[str], Optional[int]]:
+    """E15 §2.3：对 F2 finding 执行防前文重名污染的三级降级锚定链，返回 (quote, quote_offset)。
+
+    降级匹配链：
+    a. 首选：分项名称 + 该行金额字面量在同行/邻近窗口（120字符内）共现，精确锁死报价表行；
+    b. 次选：在报价相关章节区域（以开标一览表/分项报价表 offset 为中心 ±3000 字符窗口）内搜分项名称或 anchor_text；
+    c. 末选：若为表级/全局金额发现（如 TOTAL_MISMATCH / AMBIGUOUS_BID_TOTAL），在报价区域或全文搜金额特征串；
+       仍搜不到（如被合并单元格拆散）则诚实返回 (None, None)，严禁硬造或错锚到前文技术章节。
+    """
+    if not bid_text:
+        return None, None
+
+    item_name = str(f2_item.get('name') or f2_item.get('anchor_name') or '').strip()
+    anchor_text = str(f2_item.get('anchor_text') or '').strip()
+
+    # 收集该 finding 关联的金额候选串
+    amt_candidates: list[str] = []
+    for k in ('actual', 'expected', 'bid_total', 'table_total', 'unit_price', 'total_price'):
+        val = f2_item.get(k)
+        if val is not None:
+            for v in _format_amount_variants(str(val)):
+                if v not in amt_candidates:
+                    amt_candidates.append(v)
+
+    if item_name:
+        for it in f2_res.get('items') or []:
+            if str(it.get('name') or '').strip() == item_name:
+                for k in ('raw_unit_text', 'raw_total_text', 'unit_price', 'total_price'):
+                    for v in _format_amount_variants(it.get(k)):
+                        if v not in amt_candidates:
+                            amt_candidates.append(v)
+
+    # ── 级别 a（首选）：分项名称 + 金额字面量同现（防前文技术方案重名污染）──
+    if item_name and amt_candidates:
+        for amt_s in amt_candidates:
+            direct_pair = f"{item_name} {amt_s}"
+            idx_pair = bid_text.find(direct_pair)
+            if idx_pair >= 0:
+                return direct_pair, idx_pair
+
+        for m_nm in re.finditer(re.escape(item_name), bid_text):
+            pos = m_nm.start()
+            win_hi = min(len(bid_text), pos + len(item_name) + 120)
+            window_slice = bid_text[pos:win_hi]
+            for amt_s in amt_candidates:
+                if amt_s and amt_s in window_slice:
+                    amt_end = window_slice.find(amt_s) + len(amt_s)
+                    matched_quote = window_slice[:amt_end].strip()
+                    if matched_quote and matched_quote in bid_text:
+                        return matched_quote, pos
+                    return item_name, pos
+
+    # ── 级别 b（次选）：在报价相关章节区域（中心 ±3000 字符窗口）内搜分项名称或 anchor_text ──
+    centers = _find_price_section_centers(bid_text, f2_res)
+    search_targets = [t for t in (anchor_text, item_name) if t]
+    if centers and search_targets:
+        for target in search_targets:
+            if target not in bid_text:
+                continue
+            for c_off in centers:
+                w_lo = max(0, c_off - 3000)
+                w_hi = min(len(bid_text), c_off + 3000)
+                sub_pos = bid_text.find(target, w_lo, w_hi)
+                if sub_pos >= 0:
+                    return target, sub_pos
+
+    # ── 级别 c（表级/歧义金额锚点或诚实回退）：对无分项名称的表级发现搜 anchor_text ──
+    if not item_name and anchor_text and anchor_text in bid_text:
+        if centers:
+            for c_off in centers:
+                w_lo = max(0, c_off - 3000)
+                w_hi = min(len(bid_text), c_off + 3000)
+                sub_pos = bid_text.find(anchor_text, w_lo, w_hi)
+                if sub_pos >= 0:
+                    return anchor_text, sub_pos
+        pos_global = bid_text.find(anchor_text)
+        if pos_global >= 0:
+            return anchor_text, pos_global
+
+    return None, None
+
+
+def _enrich_detail_with_page_meta(
+    detail_dict: Optional[dict[str, Any]],
+    phys_page: Optional[int],
+    footer_page: Optional[int],
+    is_docx_page: bool,
+) -> dict[str, Any]:
+    """将统一页码上下文解析出的双轨页码元数据写入 detail_json（与 F4 RiskCard 渲染协议完全对齐）。"""
+    out = dict(detail_dict or {})
+    if phys_page is not None:
+        out['bid_page'] = phys_page
+        out['bid_footer_page'] = footer_page
+        out['bid_page_is_docx'] = is_docx_page
+    return out
 
 
 def resolve_f4_category_and_suggestion(f4_item: dict[str, Any]) -> tuple[str, str]:
@@ -303,10 +494,14 @@ class BidTaskWorker:
                 .filter_by(tenant_id=task.tenant_id, is_default=True)
                 .first()
             )
-            open_date_str = str(
+            user_or_rule_open_date = str(
                 cfg_snap.get('open_date')
-                or (rule_cfg.open_date.isoformat() if (rule_cfg and rule_cfg.open_date) else '2026-11-05')
-            )
+                or (rule_cfg.open_date.isoformat() if (rule_cfg and rule_cfg.open_date) else '')
+                or ''
+            ).strip()
+            open_date_str = user_or_rule_open_date or DEFAULT_FALLBACK_OPEN_DATE
+            open_date_fallback_used = False
+
             social_months = list(
                 cfg_snap.get('required_social_months')
                 or (rule_cfg.required_social_months_json if rule_cfg else None)
@@ -324,7 +519,7 @@ class BidTaskWorker:
                 or []
             )
 
-            # ── 阶段 1：extracting（F1 招标红线与 ★/▲ 条款提取）──
+            # ── 阶段 1：extracting（F1 招标红线与 ★/▲ 条款提取 + E15 开标日期自动识别回填）──
             self._emit_stage(session, task, 'extracting', 20, 'F1 正在提取招标文件废标红线与 ★/▲ 实质性条款')
             t_f1 = time.perf_counter()
             if client is not None:
@@ -339,6 +534,28 @@ class BidTaskWorker:
             marked_clauses = list(f1_res.get('marked_clauses') or [])
             invalid_bid_clauses = list(f1_res.get('invalid_bid_clauses') or [])
             f1_requirements = marked_clauses + invalid_bid_clauses
+
+            # E15 §2.2：若用户与规则均未指定 open_date，从招标书解析文本自动提取开标日期（用户手填永远优先）
+            if not user_or_rule_open_date:
+                tender_parsed = parse_document(str(tender_abs))
+                detected_open_date = extract_open_date_from_tender_text(tender_parsed.text)
+                if detected_open_date:
+                    open_date_str = detected_open_date
+                    cfg_snap['open_date'] = detected_open_date
+                    task.config_json = dict(cfg_snap)
+                    task.updated_at = _utc_now()
+                    session.commit()
+                    self._emit_stage(
+                        session,
+                        task,
+                        'extracting',
+                        35,
+                        f"已自动识别开标日期：{detected_open_date}",
+                    )
+                else:
+                    open_date_str = DEFAULT_FALLBACK_OPEN_DATE
+                    open_date_fallback_used = True
+
             duration_record['f1_ms'] = max(0, int(round((time.perf_counter() - t_f1) * 1000)))
 
             # ── 阶段 2：checking（F2 报价沙盒 + F3 证照/串名 + F4 双书逐条响应核验）──
@@ -350,13 +567,27 @@ class BidTaskWorker:
 
             t_f3 = time.perf_counter()
             bid_parsed = parse_document(str(bid_abs))
-            f3_findings = scan_qualifications(
-                text=bid_parsed.text,
-                open_date=open_date_str,
-                required_social_months=social_months,
-                forbidden_names=forbidden_names,
-                target_buyer=buyer_name,
+            # E15 §2.1：一次性构建投标书统一双轨页码上下文（直接复用 response_checker 单一事实源，自动适配 pdf/docx）
+            bid_page_ctx = _build_unified_page_context(bid_abs)
+
+            f3_findings = list(
+                scan_qualifications(
+                    text=bid_parsed.text,
+                    open_date=open_date_str,
+                    required_social_months=social_months,
+                    forbidden_names=forbidden_names,
+                    target_buyer=buyer_name,
+                )
+                or []
             )
+            if open_date_fallback_used:
+                f3_findings.append({
+                    'code': 'OPEN_DATE_FALLBACK',
+                    'severity': 'warning',
+                    'quote': '',
+                    'offset': None,
+                    'message': f"未识别到开标日期，效期核验基于默认日期 {open_date_str}，请人工核对",
+                })
             duration_record['f3_ms'] = max(0, int(round((time.perf_counter() - t_f3) * 1000)))
 
             t_f4 = time.perf_counter()
@@ -375,8 +606,11 @@ class BidTaskWorker:
             session.query(BidFinding).filter_by(task_id=task.id).delete()
             new_findings: list[BidFinding] = []
 
-            # (a) F2 报价算术发现
+            # (a) F2 报价算术发现（E15 §2.3：执行三级防前文重名锚定链，命中则写入 quote / quote_offset / page）
             for f2_item in f2_res.get('findings') or []:
+                f2_quote, f2_offset = locate_f2_finding_in_bid_text(f2_item, f2_res, bid_parsed.text)
+                f2_phys_page, f2_footer_page, f2_is_docx = _resolve_unified_page(f2_offset, bid_page_ctx)
+                f2_detail = _enrich_detail_with_page_meta(f2_item, f2_phys_page, f2_footer_page, f2_is_docx)
                 new_findings.append(
                     BidFinding(
                         task_id=task.id,
@@ -385,17 +619,22 @@ class BidTaskWorker:
                         severity=str(f2_item.get('severity') or 'error'),
                         category='报价算术核验',
                         clause_no='开标一览表/分项报价表',
-                        quote=None,
-                        quote_verified=False,
+                        quote=f2_quote,
+                        quote_offset=f2_offset,
+                        quote_verified=bool(f2_quote is not None),
+                        page=f2_phys_page,
                         message=str(f2_item.get('message') or '报价算术不一致'),
                         suggestion='请核对分项单价×数量、合计及大小写金额使之完全一致',
-                        consequence='veto',
-                        detail_json=f2_item,
+                        consequence='veto' if f2_item.get('severity', 'error') == 'error' else 'deduction',
+                        detail_json=f2_detail,
                     )
                 )
 
-            # (b) F3 证照效期与串名穿帮发现
-            for f3_item in f3_findings or []:
+            # (b) F3 证照效期与串名穿帮发现（E15 §2.1：复用统一页码上下文写入 page 与双轨页码详情）
+            for f3_item in f3_findings:
+                f3_offset = f3_item.get('offset')
+                f3_phys_page, f3_footer_page, f3_is_docx = _resolve_unified_page(f3_offset, bid_page_ctx)
+                f3_detail = _enrich_detail_with_page_meta(f3_item, f3_phys_page, f3_footer_page, f3_is_docx)
                 new_findings.append(
                     BidFinding(
                         task_id=task.id,
@@ -405,12 +644,13 @@ class BidTaskWorker:
                         category='证照效期与串名扫描',
                         clause_no='资格证明文件',
                         quote=str(f3_item.get('quote') or ''),
-                        quote_offset=f3_item.get('offset'),
+                        quote_offset=f3_offset,
                         quote_verified=False,
+                        page=f3_phys_page,
                         message=str(f3_item.get('message') or ''),
                         suggestion='请替换有效期内证照或清理外部项目单位名称',
                         consequence='veto' if f3_item.get('severity') == 'error' else 'deduction',
-                        detail_json=f3_item,
+                        detail_json=f3_detail,
                     )
                 )
 
@@ -439,13 +679,20 @@ class BidTaskWorker:
                     )
                 )
 
-            # (d) 部门自定义关键词红线扫描
+            # (d) 部门自定义关键词红线扫描（E15 §2.4：顺手补齐 page 字段）
             for cr in custom_redlines:
                 kw = str((cr.get('keyword') if isinstance(cr, dict) else '') or '').strip()
                 if kw and kw in bid_parsed.text:
                     pos = bid_parsed.text.find(kw)
                     lo = max(0, pos - 25)
                     hi = min(len(bid_parsed.text), pos + len(kw) + 25)
+                    cr_phys_page, cr_footer_page, cr_is_docx = _resolve_unified_page(pos, bid_page_ctx)
+                    cr_detail = _enrich_detail_with_page_meta(
+                        cr if isinstance(cr, dict) else {},
+                        cr_phys_page,
+                        cr_footer_page,
+                        cr_is_docx,
+                    )
                     new_findings.append(
                         BidFinding(
                             task_id=task.id,
@@ -457,10 +704,11 @@ class BidTaskWorker:
                             quote=bid_parsed.text[lo:hi],
                             quote_offset=pos,
                             quote_verified=False,
+                            page=cr_phys_page,
                             message=f"命中部门自定义禁用红线词：「{kw}」",
                             suggestion=f"请排查并清理标书中出现的禁用词「{kw}」",
                             consequence=str(cr.get('consequence') or 'veto'),
-                            detail_json=cr,
+                            detail_json=cr_detail,
                         )
                     )
 

@@ -167,6 +167,11 @@ def _resolve_unified_page(offset: Optional[int], ctx: dict[str, Any]) -> tuple[O
     return None, None, False
 
 
+# E15 §2.1：提升为公共名称供 backend/worker.py 统一调用（单一事实源，零分支重复）
+build_unified_page_context = _build_unified_page_context
+resolve_unified_page = _resolve_unified_page
+
+
 def _cn_to_int(s: str) -> Optional[int]:
     """将中文数字或阿拉伯数字字符串转为整数。"""
     s = (s or '').strip()

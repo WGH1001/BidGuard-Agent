@@ -378,7 +378,7 @@ def _parse_cap_money_str(raw: str, default_wan: bool = False,
 
 
 def _parse_qty_str(raw: str) -> Decimal | None:
-    """E9/E14 扩充：解析数量单元格（兼容 '2', '2台', '1项', '3.5套', '12人月', '36个月', '1节点', '1式', '300000页', '300000条', '100卷' 等多字符量词写法）。"""
+    """E9/E14 扩充：解析数量单元格（兼容 '2', '2台', '1项', '3.5套', '12人月', '36个月', '1节点', '1式', '300000页', '300000条', '100卷', '2期' 等多字符量词写法）。"""
     if not raw:
         return None
     s = str(raw).strip().replace(',', '')
@@ -388,7 +388,7 @@ def _parse_qty_str(raw: str) -> Decimal | None:
     if '万元' in s or '元' in s or '￥' in s or '¥' in s:
         return None
     m = re.match(
-        r'^([0-9]+(?:\.[0-9]+)?)\s*(?:[项套台个批年人月次份座宗件点路端式天日周季米公顷亩部辆台套页条卷张册盒袋箱千克瓶/·\-]{1,6}|[a-zA-Z]{1,6})?\s*$',
+        r'^([0-9]+(?:\.[0-9]+)?)\s*(?:[项套台个批年人月次份座宗件点路端式天日周季米公顷亩部辆台套页条卷张册盒袋箱千克瓶期/·\-]{1,6}|[a-zA-Z]{1,6})?\s*$',
         s,
     )
     if m:
@@ -1942,12 +1942,61 @@ def extract_price_data(file_path: str | Path, tender_path: str | Path | None = N
     return res
 
 
+def _attach_f2_anchor_texts(extracted: dict) -> None:
+    """E15 §2.3：为 F2 findings 补充 anchor_text 与 anchor_name 字段（不改动任何既有算术/汇总判定语义）。
+
+    规则：
+    - 单行发现（ITEM_ARITHMETIC / DURATION_UNPARSEABLE_SKIP）：优先锚定该行分项名称（anchor_name 与 anchor_text）；
+    - 表级发现（TOTAL_MISMATCH / BID_TOTAL_MISMATCH / CAP_EXCEEDED / UPPER_MISMATCH）：
+      优先锚定 bid_total_upper / bid_total / table_total 对应原文；
+    - 歧义与跨表发现（AMBIGUOUS_BID_TOTAL / CROSS_TABLE_BID_WARNING / SUBTOTAL_SUMMARY_MISMATCH）：
+      从 message 中提取首次出现的金额数值串或标签作为 anchor_text；无稳定锚文本则诚实缺省。
+    """
+    items_by_name = {
+        str(it.get('name') or '').strip(): it
+        for it in (extracted.get('items') or [])
+        if it.get('name')
+    }
+    for f in extracted.get('findings') or []:
+        if f.get('anchor_text'):
+            continue
+        code = str(f.get('code') or '')
+        nm = str(f.get('name') or '').strip()
+        if not nm and code == 'DURATION_UNPARSEABLE_SKIP':
+            m_nm = re.search(r'分项「([^」]+)」', str(f.get('message') or ''))
+            if m_nm:
+                nm = m_nm.group(1).strip()
+
+        if nm:
+            f['anchor_name'] = nm
+            it_obj = items_by_name.get(nm)
+            if it_obj and it_obj.get('unit_price'):
+                f['anchor_text'] = nm
+                f['unit_price'] = it_obj.get('unit_price')
+                f['total_price'] = it_obj.get('total_price')
+            else:
+                f['anchor_text'] = nm
+            continue
+
+        if code == 'UPPER_MISMATCH' and extracted.get('bid_total_upper'):
+            f['anchor_text'] = str(extracted['bid_total_upper'])
+        elif code in ('BID_TOTAL_MISMATCH', 'CAP_EXCEEDED') and extracted.get('bid_total'):
+            f['anchor_text'] = str(extracted['bid_total'])
+        elif code == 'TOTAL_MISMATCH' and extracted.get('table_total'):
+            f['anchor_text'] = str(extracted['table_total'])
+        elif code in ('AMBIGUOUS_BID_TOTAL', 'CROSS_TABLE_BID_WARNING', 'SUBTOTAL_SUMMARY_MISMATCH'):
+            m_amt = re.search(r'([0-9]+(?:\.[0-9]{2}))\s*元', str(f.get('message') or ''))
+            if m_amt:
+                f['anchor_text'] = m_amt.group(1)
+
+
 def run_price_check(bid_path: str | Path, tender_path: str | Path | None = None) -> dict:
     """端到端辅助入口：提取报价结构 -> 若 status=='OK' 则送入 PriceSandbox 核验，并合并提取层 warning。"""
     extracted = extract_price_data(bid_path, tender_path=tender_path)
     extractor_warnings = list(extracted.get('warnings') or [])
     if extracted['status'] != 'OK':
         extracted['findings'] = extractor_warnings
+        _attach_f2_anchor_texts(extracted)
         return extracted
 
     # E9 事故二：对标记了 skip_arithmetic=True（期限定价但期限无法解析）的行，豁免其单行 ITEM_ARITHMETIC 硬判
@@ -1972,6 +2021,7 @@ def run_price_check(bid_path: str | Path, tender_path: str | Path | None = None)
     if extracted.get('has_subtotal_summary_mismatch'):
         sb_findings = [f for f in sb_findings if f.get('code') != 'TOTAL_MISMATCH']
     extracted['findings'] = extractor_warnings + sb_findings
+    _attach_f2_anchor_texts(extracted)
     return extracted
 
 

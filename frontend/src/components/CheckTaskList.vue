@@ -43,7 +43,7 @@ const bidFile = ref<File | null>(null)
 
 const form = reactive({
   title: '',
-  openDate: '2026-11-05',
+  openDate: '',
   buyerName: '',
   autoRun: true,
 })
@@ -106,7 +106,7 @@ function openCreateModal(): void {
   tenderFile.value = null
   bidFile.value = null
   form.title = ''
-  form.openDate = '2026-11-05'
+  form.openDate = ''
   form.buyerName = ''
   form.autoRun = true
   dialogVisible.value = true
@@ -307,8 +307,8 @@ defineExpose({
           </el-form-item>
 
           <div class="two-cols">
-            <el-form-item label="计划开标日期（用于 F3 证照有效期核验）">
-              <el-input v-model.trim="form.openDate" placeholder="YYYY-MM-DD，如 2026-11-05" />
+            <el-form-item label="计划开标日期（用于 F3 证照有效期核验，留空则体检时自动从招标书识别）">
+              <el-input v-model.trim="form.openDate" placeholder="留空自动识别，或填 YYYY-MM-DD" />
             </el-form-item>
 
             <el-form-item label="采购人/招标单位全称（防串名自伤）">
@@ -318,7 +318,7 @@ defineExpose({
 
           <el-form-item>
             <el-checkbox v-model="form.autoRun">
-              上传完成后立即启动 F1~F4 防废标核验流水线并连接 SSE 实时进度
+              上传完成后立即启动 F1~F4 防废标核验流水线并连接 SSE 实时进度（不勾选则仅创建任务，稍后可手动启动）
             </el-checkbox>
           </el-form-item>
         </el-form>
