@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""B2 · 第 9 组路由：/api/reports（交付中心单任务打包 ZIP：标红原件 + 偏离表 + 终核签字单；以及管理员审计日志查询）。
+"""B2 / E16 · 第 9 组路由：/api/reports（交付中心单任务打包 ZIP、终核签字单独立下载、多任务内容自选批量打包 ZIP；以及管理员审计日志查询）。
 
 严格遵循铁律 6（redline 回写适配）：
 - BidFinding.severity 的 error/warning/info 必须先映射为 redline 识别的 high/medium/low；
@@ -9,15 +9,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import io
 from pathlib import Path
+import re
 from typing import Optional
 import zipfile
 
 from docx import Document
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.auth import AuthUser, get_current_user, record_audit, require_admin
@@ -34,6 +36,10 @@ router = APIRouter(prefix='/api/reports', tags=['reports'])
 _REDLINE_DIR = (PROJECT_ROOT / 'output' / 'redline').resolve()
 _DEVIATION_DIR = (PROJECT_ROOT / 'output' / 'deviation').resolve()
 _DELIVER_DIR = (PROJECT_ROOT / 'output' / 'deliver').resolve()
+_DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+
+_VALID_INCLUDE_KEYS = frozenset({'original', 'redline', 'deviation', 'signoff'})
+_DEFAULT_SINGLE_ZIP_INCLUDE = frozenset({'redline', 'deviation', 'signoff'})
 
 _SEVERITY_TO_REDLINE = {
     'error': 'high',
@@ -43,6 +49,29 @@ _SEVERITY_TO_REDLINE = {
     'medium': 'medium',
     'low': 'low',
 }
+
+
+class BatchDeliverZipRequest(BaseModel):
+    """E16 §2.1：批量打包请求体。"""
+    task_ids: list[int] = Field(..., min_length=1)
+    include: list[str] = Field(
+        default_factory=lambda: ['original', 'redline', 'deviation', 'signoff']
+    )
+
+
+class BatchFailedItemOut(BaseModel):
+    """E16 §2.1：批量打包中被跳过的任务及原因。"""
+    task_id: int
+    reason: str
+
+
+class BatchDeliverZipOut(BaseModel):
+    """E16 §2.1：批量打包响应体（含下载 URL、成功任务列表与诚实降级 failed 列表）。"""
+    download_url: str
+    zip_path: str
+    output_filename: str
+    succeeded_task_ids: list[int]
+    failed: list[BatchFailedItemOut]
 
 
 @dataclass
@@ -112,6 +141,141 @@ def _build_signoff_sheet_bytes(task: BidCheckTask, findings: list[BidFinding]) -
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
+
+
+def _sanitize_folder_title(title: Optional[str]) -> str:
+    """清理任务标题中的非法路徑字符，供批量大包内子目录 {task_id}_{任务标题}/ 命名。"""
+    cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]+', '_', (title or '').strip())
+    return cleaned[:80] or '防废标体检任务'
+
+
+def _build_task_deliver_zip(
+    task_id: int,
+    include: set[str],
+    db: Optional[Session] = None,
+    tenant_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+) -> Path:
+    """E16 §2.1：按指定 include 集合（{'original','redline','deviation','signoff'}）构建单任务交付包 ZIP 并返回其 Path。"""
+    own_session = False
+    if db is None:
+        from backend.database import SessionLocal
+        db = SessionLocal()
+        own_session = True
+
+    try:
+        q = db.query(BidCheckTask).filter_by(id=int(task_id))
+        if tenant_id is not None:
+            q = q.filter_by(tenant_id=int(tenant_id))
+        task = q.first()
+        if task is None:
+            raise FileNotFoundError(f"任务 #{task_id} 不存在或无权访问")
+
+        tender_abs = resolve_project_path(task.tender_path)
+        bid_abs = resolve_project_path(task.bid_path)
+        if not bid_abs.is_file() or ('deviation' in include and not tender_abs.is_file()):
+            raise FileNotFoundError(f"任务 #{task_id} 招投标源文件缺失")
+        if not tender_abs.is_file():
+            raise FileNotFoundError(f"任务 #{task_id} 招标源文件缺失")
+
+        findings = db.query(BidFinding).filter_by(task_id=task.id).order_by(BidFinding.id.asc()).all()
+        adapted = _adapt_findings_for_redline(findings)
+
+        _REDLINE_DIR.mkdir(parents=True, exist_ok=True)
+        _DEVIATION_DIR.mkdir(parents=True, exist_ok=True)
+        _DELIVER_DIR.mkdir(parents=True, exist_ok=True)
+
+        bid_ext = bid_abs.suffix.lower() or '.docx'
+        entries: list[tuple[str, bytes]] = []
+
+        # 0. 投标书原件（original）
+        if 'original' in include:
+            entries.append((f"0_投标书原件{bid_ext}", bid_abs.read_bytes()))
+
+        # 1. 原位标红批注件（redline）
+        if 'redline' in include:
+            redline_path = (_REDLINE_DIR / f"{task.id}_标红原件{bid_ext}").resolve()
+            if bid_ext == '.docx':
+                redline_bytes = inject_word_comments(
+                    str(bid_abs), adapted, out_docx_path=str(redline_path), author='BidGuard防废标体检员'
+                )
+            elif bid_ext == '.pdf':
+                redline_bytes = inject_pdf_highlights(
+                    str(bid_abs), adapted, out_pdf_path=str(redline_path), author='BidGuard防废标体检员'
+                )
+            else:
+                redline_bytes = bid_abs.read_bytes()
+            entries.append((f"1_投标书原位标红批注件{bid_ext}", redline_bytes))
+
+        # 2. 技术与商务偏离表.docx（deviation）
+        if 'deviation' in include:
+            dev_path = (_DEVIATION_DIR / f"{task.id}_偏离表.docx").resolve()
+            if not dev_path.is_file():
+                checklist = build_review_checklist(str(tender_abs))
+                reqs = list(checklist.get('marked_clauses') or []) + list(checklist.get('invalid_bid_clauses') or [])
+                client, _ = resolve_effective_llm_client(db, user_id if user_id is not None else task.user_id)
+                export_deviation_table(tender_abs, bid_abs, dev_path, requirements=reqs, client=client)
+            entries.append(("2_技术与商务偏离表.docx", dev_path.read_bytes()))
+
+        # 3. 人工终核签字确认单.docx（signoff）
+        if 'signoff' in include:
+            signoff_bytes = _build_signoff_sheet_bytes(task, findings)
+            entries.append(("3_封标前人工终核签字确认单.docx", signoff_bytes))
+
+        zip_path = (_DELIVER_DIR / f"{task.id}_交付包.zip").resolve()
+        with zipfile.ZipFile(str(zip_path), mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+            for arc_name, raw_bytes in entries:
+                zf.writestr(arc_name, raw_bytes)
+        return zip_path
+    finally:
+        if own_session:
+            db.close()
+
+
+@router.get('/{task_id}/signoff')
+def download_signoff_docx(
+    task_id: int,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """E16 §2.1：独立生成并下载《3_封标前人工终核签字确认单.docx》（与 ZIP 内命名一致；任务或源文件缺失返回 404）。"""
+    tenant_id = int(current_user.tenant_id)
+    task = db.query(BidCheckTask).filter_by(id=task_id, tenant_id=tenant_id).first()
+    if task is None:
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'TASK_NOT_FOUND', 'message': '任务不存在或无权访问'},
+        )
+
+    tender_abs = resolve_project_path(task.tender_path)
+    bid_abs = resolve_project_path(task.bid_path)
+    if not tender_abs.is_file() or not bid_abs.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'SOURCE_FILES_MISSING', 'message': '任务的招投标源文件不存在，无法生成终核签字单'},
+        )
+
+    findings = db.query(BidFinding).filter_by(task_id=task.id).order_by(BidFinding.id.asc()).all()
+    signoff_bytes = _build_signoff_sheet_bytes(task, findings)
+
+    _DELIVER_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = (_DELIVER_DIR / f"{task.id}_3_封标前人工终核签字确认单.docx").resolve()
+    out_path.write_bytes(signoff_bytes)
+
+    record_audit(
+        db,
+        action='export_signoff_docx',
+        tenant_id=tenant_id,
+        user_id=current_user.get('id'),
+        target=f"task:{task.id}",
+        detail_json={'filename': '3_封标前人工终核签字确认单.docx'},
+    )
+
+    return FileResponse(
+        str(out_path),
+        media_type=_DOCX_MIME,
+        filename='3_封标前人工终核签字确认单.docx',
+    )
 
 
 @router.get('/{task_id}/redline')
@@ -184,45 +348,13 @@ def export_task_deliver_zip(
             detail={'code': 'SOURCE_FILES_MISSING', 'message': '招投标源文件缺失，无法生成交付包'},
         )
 
-    findings = db.query(BidFinding).filter_by(task_id=task.id).order_by(BidFinding.id.asc()).all()
-    adapted = _adapt_findings_for_redline(findings)
-
-    _REDLINE_DIR.mkdir(parents=True, exist_ok=True)
-    _DEVIATION_DIR.mkdir(parents=True, exist_ok=True)
-    _DELIVER_DIR.mkdir(parents=True, exist_ok=True)
-
-    # 1. 原位标红原件
-    bid_ext = bid_abs.suffix.lower()
-    redline_path = (_REDLINE_DIR / f"{task.id}_标红原件{bid_ext}").resolve()
-    if bid_ext == '.docx':
-        redline_bytes = inject_word_comments(
-            str(bid_abs), adapted, out_docx_path=str(redline_path), author='BidGuard防废标体检员'
-        )
-    elif bid_ext == '.pdf':
-        redline_bytes = inject_pdf_highlights(
-            str(bid_abs), adapted, out_pdf_path=str(redline_path), author='BidGuard防废标体检员'
-        )
-    else:
-        redline_bytes = bid_abs.read_bytes()
-
-    # 2. 技术与商务偏离表.docx
-    dev_path = (_DEVIATION_DIR / f"{task.id}_偏离表.docx").resolve()
-    if not dev_path.is_file():
-        checklist = build_review_checklist(str(tender_abs))
-        reqs = list(checklist.get('marked_clauses') or []) + list(checklist.get('invalid_bid_clauses') or [])
-        client, _ = resolve_effective_llm_client(db, current_user.get('id'))
-        export_deviation_table(tender_abs, bid_abs, dev_path, requirements=reqs, client=client)
-    dev_bytes = dev_path.read_bytes()
-
-    # 3. 人工终核签字确认单.docx
-    signoff_bytes = _build_signoff_sheet_bytes(task, findings)
-
-    # 4. 打包写入 output/deliver/{task_id}_交付包.zip
-    zip_path = (_DELIVER_DIR / f"{task.id}_交付包.zip").resolve()
-    with zipfile.ZipFile(str(zip_path), mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(f"1_投标书原位标红批注件{bid_ext}", redline_bytes)
-        zf.writestr("2_技术与商务偏离表.docx", dev_bytes)
-        zf.writestr("3_封标前人工终核签字确认单.docx", signoff_bytes)
+    zip_path = _build_task_deliver_zip(
+        task_id=task.id,
+        include=set(_DEFAULT_SINGLE_ZIP_INCLUDE),
+        db=db,
+        tenant_id=tenant_id,
+        user_id=current_user.get('id'),
+    )
 
     record_audit(
         db,
@@ -237,6 +369,109 @@ def export_task_deliver_zip(
         io.BytesIO(zip_path.read_bytes()),
         media_type='application/zip',
         headers={'Content-Disposition': f'attachment; filename="deliver_task_{task.id}.zip"'},
+    )
+
+
+@router.post('/batch-zip', response_model=BatchDeliverZipOut)
+def export_batch_deliver_zip(
+    body: BatchDeliverZipRequest,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> BatchDeliverZipOut:
+    """E16 §2.1：多任务批量打包与内容自选接口（落盘 output/deliver/batch_{utc_ts}_交付包.zip，诚实列出 failed 清单）。"""
+    tenant_id = int(current_user.tenant_id)
+    include_set = {str(k).strip().lower() for k in (body.include or [])} & _VALID_INCLUDE_KEYS
+    if not include_set:
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'INVALID_INCLUDE_OPTIONS', 'message': '请至少勾选一项要打包的交付物内容'},
+        )
+
+    _DELIVER_DIR.mkdir(parents=True, exist_ok=True)
+    utc_ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')
+    batch_filename = f"batch_{utc_ts}_交付包.zip"
+    batch_zip_path = (_DELIVER_DIR / batch_filename).resolve()
+
+    succeeded_ids: list[int] = []
+    failed_items: list[BatchFailedItemOut] = []
+    sub_zips_to_pack: list[tuple[BidCheckTask, Path]] = []
+
+    seen_ids: set[int] = set()
+    for raw_tid in body.task_ids:
+        tid = int(raw_tid)
+        if tid in seen_ids:
+            continue
+        seen_ids.add(tid)
+
+        task = db.query(BidCheckTask).filter_by(id=tid, tenant_id=tenant_id).first()
+        if task is None:
+            failed_items.append(BatchFailedItemOut(task_id=tid, reason='任务不存在或无权访问'))
+            continue
+
+        if task.status in ('created', 'extracting', 'checking', 'grading'):
+            failed_items.append(
+                BatchFailedItemOut(task_id=tid, reason=f"任务尚未完成核验（当前状态：{task.status}）")
+            )
+            continue
+
+        tender_abs = resolve_project_path(task.tender_path)
+        bid_abs = resolve_project_path(task.bid_path)
+        if not tender_abs.is_file() or not bid_abs.is_file():
+            failed_items.append(BatchFailedItemOut(task_id=tid, reason='招投标源文件缺失'))
+            continue
+
+        try:
+            sub_zip = _build_task_deliver_zip(
+                task_id=task.id,
+                include=include_set,
+                db=db,
+                tenant_id=tenant_id,
+                user_id=current_user.get('id'),
+            )
+            sub_zips_to_pack.append((task, sub_zip))
+            succeeded_ids.append(task.id)
+        except Exception as exc:
+            failed_items.append(BatchFailedItemOut(task_id=tid, reason=f"打包异常：{exc}"))
+
+    if not succeeded_ids:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                'code': 'BATCH_ALL_FAILED',
+                'message': '所选任务均无法生成交付包',
+                'failed': [f.model_dump() for f in failed_items],
+            },
+        )
+
+    with zipfile.ZipFile(str(batch_zip_path), mode='w', compression=zipfile.ZIP_DEFLATED) as master_zf:
+        for task, sub_zip_path in sub_zips_to_pack:
+            folder_prefix = f"{task.id}_{_sanitize_folder_title(task.title)}"
+            with zipfile.ZipFile(str(sub_zip_path), mode='r') as sub_zf:
+                for info in sub_zf.infolist():
+                    master_zf.writestr(f"{folder_prefix}/{info.filename}", sub_zf.read(info.filename))
+
+    rel_zip = batch_zip_path.relative_to(PROJECT_ROOT.resolve()).as_posix()
+    record_audit(
+        db,
+        action='export_batch_zip',
+        tenant_id=tenant_id,
+        user_id=current_user.get('id'),
+        target=f"batch:{','.join(map(str, succeeded_ids))}",
+        detail_json={
+            'task_ids': body.task_ids,
+            'succeeded_task_ids': succeeded_ids,
+            'failed': [f.model_dump() for f in failed_items],
+            'include': sorted(include_set),
+            'zip': batch_filename,
+        },
+    )
+
+    return BatchDeliverZipOut(
+        download_url=f"/api/files/{rel_zip}",
+        zip_path=rel_zip,
+        output_filename=batch_filename,
+        succeeded_task_ids=succeeded_ids,
+        failed=failed_items,
     )
 
 

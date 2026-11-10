@@ -476,6 +476,25 @@ export interface AuditLogListOut {
   total: number
   items: AuditLogItemOut[]
 }
+export type DeliverIncludeKey = 'original' | 'redline' | 'deviation' | 'signoff'
+
+export interface BatchDeliverZipRequest {
+  task_ids: number[]
+  include: DeliverIncludeKey[]
+}
+
+export interface BatchDeliverFailedItem {
+  task_id: number
+  reason: string
+}
+
+export interface BatchDeliverZipOut {
+  download_url: string
+  zip_path: string
+  output_filename: string
+  succeeded_task_ids: number[]
+  failed: BatchDeliverFailedItem[]
+}
 
 // ── 10. 个人模型配置 (/api/model-config) ─────────────────────────────────
 export interface ModelConfigUpsertRequest {
