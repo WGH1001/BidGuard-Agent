@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { SSEProgressFrame } from '@/api/types'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
@@ -105,6 +106,42 @@ const totalDurationLabel = computed<string>(() => {
   if (!t?.duration) return '—'
   return formatDurationMs(t.duration.total_ms)
 })
+
+const nowTick = ref<number>(Date.now())
+let detailTickTimer: ReturnType<typeof setInterval> | null = null
+
+const isRunningTask = computed<boolean>(() => {
+  const st = currentTask.value?.status
+  return Boolean(st && ['extracting', 'checking', 'grading'].includes(st))
+})
+
+const runningElapsedLabel = computed<string>(() => {
+  const t = currentTaskExt.value
+  if (!t || !isRunningTask.value) return ''
+  const rawIso = t.started_at || t.updated_at || t.created_at
+  if (!rawIso) return '00:00'
+  const normalized = rawIso.endsWith('Z') || rawIso.includes('+') ? rawIso : `${rawIso}Z`
+  const startMs = new Date(normalized).getTime()
+  if (!Number.isFinite(startMs)) return '00:00'
+  const totalSec = Math.max(0, Math.floor((nowTick.value - startMs) / 1000))
+  const mins = String(Math.floor(totalSec / 60)).padStart(2, '0')
+  const secs = String(totalSec % 60).padStart(2, '0')
+  return `${mins}:${secs}`
+})
+
+function handleSseProgress(frame: SSEProgressFrame): void {
+  if (!currentTask.value || currentTask.value.id !== frame.task_id) return
+  currentTask.value.status = frame.status
+  if (typeof frame.progress === 'number') {
+    currentTask.value.progress = frame.progress
+  }
+  if (frame.stage_detail) {
+    currentTask.value.stage_detail = frame.stage_detail
+  }
+  if (frame.started_at && currentTaskExt.value) {
+    currentTaskExt.value.started_at = frame.started_at
+  }
+}
 
 const stageDurationItems = computed<StageDurationItem[]>(() => {
   const dur = currentTaskExt.value?.duration
@@ -300,8 +337,27 @@ async function handleDeleteTask(task: BidTaskOut): Promise<void> {
 }
 
 onMounted(() => {
+  detailTickTimer = setInterval(() => {
+    nowTick.value = Date.now()
+  }, 1000)
   void loadTaskList(true)
 })
+
+onActivated(() => {
+  if (currentTask.value) {
+    void selectTask(currentTask.value)
+  } else {
+    void loadTaskList(true)
+  }
+})
+
+onBeforeUnmount(() => {
+  if (detailTickTimer) {
+    clearInterval(detailTickTimer)
+    detailTickTimer = null
+  }
+})
+
 </script>
 
 <template>
@@ -348,7 +404,13 @@ onMounted(() => {
                 报价表待人工回填
               </span>
               <span
-                v-if="isTerminalTaskWithDuration"
+                v-if="isRunningTask"
+                class="sev-pill warning mono-num"
+              >
+                ⏱ 已耗时 {{ runningElapsedLabel }}
+              </span>
+              <span
+                v-else-if="isTerminalTaskWithDuration"
                 class="sev-pill info mono-num"
               >
                 总耗时：{{ totalDurationLabel }}
@@ -428,6 +490,7 @@ onMounted(() => {
           :progress="currentTask.progress"
           :stage-detail="currentTask.stage_detail"
           :error-msg="currentTask.error_msg"
+          @progress="handleSseProgress"
           @done="handleSseDone"
           @error="handleSseError"
         />

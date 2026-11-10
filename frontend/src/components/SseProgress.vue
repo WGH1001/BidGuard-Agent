@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { checksApi } from '@/api'
 import { subscribeCheckStream } from '@/api/sse'
 import type { BidTaskStats, SSEProgressFrame } from '@/api/types'
 
@@ -35,6 +36,7 @@ const PIPELINE_STAGES: PipelineStageNode[] = [
 ]
 
 const streaming = ref(false)
+const bgPolling = ref(false)
 const streamExhaustedForTask = ref<number | null>(null)
 const localStatus = ref<string>(props.status)
 const localProgress = ref<number>(props.progress || 0)
@@ -42,6 +44,15 @@ const localDetail = ref<string>(props.stageDetail || '')
 const localError = ref<string>(props.errorMsg || '')
 
 let stopStreamFn: (() => void) | null = null
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+function stopBgPolling(): void {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+  bgPolling.value = false
+}
 
 function closeActiveStream(): void {
   if (stopStreamFn) {
@@ -49,6 +60,48 @@ function closeActiveStream(): void {
     stopStreamFn = null
   }
   streaming.value = false
+  stopBgPolling()
+}
+
+/**
+ * E19 §2 Commit2.1：当 SSE 连接层因切页/网络波动中断时，不标 failed，启动 3s 温和轮询直到后端终态落地
+ */
+function startBackgroundPolling(targetTaskId: number): void {
+  stopBgPolling()
+  bgPolling.value = true
+  pollTimer = setInterval(async () => {
+    try {
+      const detail = await checksApi.detail(targetTaskId)
+      if (!bgPolling.value || props.taskId !== targetTaskId) return
+      const t = detail.task
+      localStatus.value = t.status
+      localProgress.value = t.progress || 0
+      if (t.stage_detail) {
+        localDetail.value = t.stage_detail
+      }
+      emit('progress', {
+        task_id: t.id,
+        status: t.status,
+        progress: t.progress,
+        stage_detail: t.stage_detail || undefined,
+        started_at: (t as { started_at?: string | null }).started_at ?? null,
+      })
+
+      if (t.status === 'delivered' || t.status === 'need_manual') {
+        stopBgPolling()
+        streamExhaustedForTask.value = null
+        localProgress.value = 100
+        emit('done', t.stats_json || undefined)
+      } else if (t.status === 'failed') {
+        stopBgPolling()
+        streamExhaustedForTask.value = targetTaskId
+        localError.value = t.error_msg || '核验流水线异常中断'
+        emit('error', localError.value)
+      }
+    } catch {
+      // 网络瞬断继续静默等待下一轮轮询
+    }
+  }, 3000)
 }
 
 function getStageState(node: PipelineStageNode, index: number): 'done' | 'active' | 'failed' | 'wait' {
@@ -97,6 +150,7 @@ function startStream(resetZero = true): void {
     },
     onDone(frame) {
       streaming.value = false
+      stopBgPolling()
       streamExhaustedForTask.value = null
       localStatus.value = 'delivered'
       localProgress.value = 100
@@ -105,14 +159,18 @@ function startStream(resetZero = true): void {
     },
     onError(errOrFrame) {
       streaming.value = false
-      streamExhaustedForTask.value = props.taskId
-      localStatus.value = 'failed'
-      const msg =
-        errOrFrame instanceof Error
-          ? errOrFrame.message
-          : errOrFrame.error_msg || '核验流水线异常中断'
-      localError.value = msg
-      emit('error', msg)
+      // E19 关键修复：区分后端业务帧 status==='failed' 与连接层 Error 中断
+      if (!(errOrFrame instanceof Error) && errOrFrame && errOrFrame.status === 'failed') {
+        stopBgPolling()
+        streamExhaustedForTask.value = props.taskId
+        localStatus.value = 'failed'
+        const msg = errOrFrame.error_msg || '核验流水线异常中断'
+        localError.value = msg
+        emit('error', msg)
+      } else {
+        // 连接层中断（如切换路由/连接超时）：绝不置 localStatus='failed'，转入后台轮询跟踪模式
+        startBackgroundPolling(props.taskId)
+      }
     },
   })
 }
@@ -126,7 +184,7 @@ watch(
       closeActiveStream()
       streamExhaustedForTask.value = null
     }
-    if (!streaming.value) {
+    if (!streaming.value && !bgPolling.value) {
       localStatus.value = String(newSt || 'created')
       localProgress.value = Number(newProg || 0)
       localDetail.value = String(newDet || '')
@@ -136,6 +194,7 @@ watch(
     if (
       localStatus.value in { extracting: 1, checking: 1, grading: 1 } &&
       !streaming.value &&
+      !bgPolling.value &&
       streamExhaustedForTask.value !== Number(newId)
     ) {
       startStream(false)
@@ -161,7 +220,7 @@ defineExpose({
         <span
           class="pulse-indicator"
           :class="{
-            running: streaming,
+            running: streaming || bgPolling,
             done: isDelivered,
             err: isFailed,
           }"
@@ -175,6 +234,9 @@ defineExpose({
           </template>
           <template v-else>
             {{ localDetail || '等待启动封标前防废标核验流水线' }}
+            <span v-if="bgPolling" class="bg-poll-note">
+              （连接已切换到后台跟踪模式，任务仍在后台运行）
+            </span>
           </template>
         </span>
       </div>
@@ -233,6 +295,12 @@ defineExpose({
   font-size: 13px;
   font-weight: 700;
   color: var(--txt-strong);
+}
+
+.bg-poll-note {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--brand);
 }
 
 .pulse-indicator {
