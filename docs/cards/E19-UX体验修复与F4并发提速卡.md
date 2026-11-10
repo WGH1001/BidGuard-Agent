@@ -1,6 +1,6 @@
 # E19 · UX 体验修复与 F4 并发提速卡（六子项 · 强制分 3 个 commit）
 
-> 状态：已完成 · 全量验收通过（Gemini 实现 + Antigravity 交叉复查补修）｜ 立卡：2026-11-10 ｜ 完成：2026-11-10 ｜ 交付 Commit：`85f0ddd` / `f64b3b6` / `b8f3403`（验收线 **160 项全绿** + `vue-tsc` 零错误）
+> 状态：已完成 · 全量验收通过（Gemini 实现 + Antigravity 交叉复查补修）｜ 立卡：2026-11-10 ｜ 完成：2026-11-10 ｜ 交付 Commit：`85f0ddd` / `f64b3b6` / `b8f3403`（含后续 `worker` 降级暴露补强，验收线 **161 项全绿** + `vue-tsc` 零错误）
 > 来源：用户实测反馈六个问题（F1 时间错 8 小时/白屏/F2-F4 慢/切页面虚假报错/上传体验/F7 布局与思考深度）；Antigravity 全链路排查 + 双方两轮架构把关
 > 拆卡纪律：六个子项在 CheckDetailView.vue 上有文件交集，两张卡并行必冲突——合并单卡、强制 3 个 commit（每 commit 独立可回退）；F7 布局改造（左侧抽屉折叠等）不进本卡（待办池）
 
@@ -63,6 +63,7 @@
   3. `CheckDetailView.vue` `<SseProgress>` 标签补齐遗漏的 `@progress="handleSseProgress"` 绑定，使实时进度与 `started_at` 正确回流；
   4. `SseProgress.vue` `startBackgroundPolling` 回调加 `targetTaskId` 与 `bgPolling` 守卫，防切换任务时飞行中的旧请求回写污染；统一 `backend/routers/qa.py` / `schemas.py` / 测试文件 CRLF→LF；
   5. `tests/test_e19_ux_and_concurrency.py` 用独立章节分隔 3 条 `★` 要求（修复 `extract_marked_clauses` 把紧邻三行合并为 1 条导致单线程假覆盖的问题），并按 `【招标要求核心句】` 精确分派 Mock，新增 `len(thread_ids) >= 2` 实并发线程数断言；
+  6. 后续补强（用户确认采纳取舍 ①）：`backend/worker.py` 新增消费 `f4_res['star_results']` 中 `llm_status == 'error_fallback'` 条目，生成 `severity='info'`、`code='LLM_FALLBACK'` 提示级 `BidFinding` 落库暴露给前端“提示”页签人工复核，不虚增红线/扣分计数；新增端到端单测 `test_e19_worker_exposes_llm_fallback_as_info_finding`；
 - **全量实测回执**：
-  - `pytest tests/ -q`：**160 passed, 1 warning (231.13s)**（157 基线 + 3 E19 新增）；
+  - `pytest tests/ -q`：**161 passed, 1 warning (232.94s)**（157 基线 + 4 E19 新增）；
   - 无管道 `vue-tsc --noEmit`：**TSC_EXIT=0**；`npm --prefix frontend run build`：**BUILD_EXIT=0**（1727 modules, 8.46s）。

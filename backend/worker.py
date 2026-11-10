@@ -679,6 +679,42 @@ class BidTaskWorker:
                     )
                 )
 
+            # (c2) 将 F4 阶段 B 单条大模型异常降级项（llm_status='error_fallback'）暴露为提示级 finding 供人工复核
+            for star_item in f4_res.get('star_results') or []:
+                if star_item.get('llm_status') != 'error_fallback':
+                    continue
+                fb_category, _ = resolve_f4_category_and_suggestion(star_item)
+                new_findings.append(
+                    BidFinding(
+                        task_id=task.id,
+                        source_module='F4',
+                        code='LLM_FALLBACK',
+                        severity='info',
+                        category=f"{fb_category}（大模型降级）",
+                        clause_no=str(star_item.get('clause_no') or star_item.get('mark') or ''),
+                        quote=str(star_item.get('tender_quote') or ''),
+                        bid_quote=str(star_item.get('bid_quote_raw') or star_item.get('bid_quote') or ''),
+                        quote_offset=(
+                            star_item.get('bid_start')
+                            if star_item.get('bid_start') is not None
+                            else star_item.get('tender_start')
+                        ),
+                        quote_verified=bool(star_item.get('quote_verified', False)),
+                        page=(
+                            star_item.get('bid_page')
+                            if star_item.get('bid_page') is not None
+                            else star_item.get('tender_page')
+                        ),
+                        message=(
+                            f"该条款大模型语义复核超时或异常降级（{star_item.get('reason') or 'error_fallback'}），"
+                            f"已保留原文定位窗口，请人工终核响应是否充分"
+                        ),
+                        suggestion='请人工对照招标文件要求与我方投标书响应原文，确认该实质性条款是否完整响应',
+                        consequence='none',
+                        detail_json=star_item,
+                    )
+                )
+
             # (d) 部门自定义关键词红线扫描（E15 §2.4：顺手补齐 page 字段）
             for cr in custom_redlines:
                 kw = str((cr.get('keyword') if isinstance(cr, dict) else '') or '').strip()

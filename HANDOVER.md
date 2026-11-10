@@ -54,7 +54,7 @@ BidGuard-Agent/
 ├── core/                                # 19 个模块（F1~F7 + 混合检索 + 法规库，逐项状态见 §3）
 ├── backend/                             # main + models(11表) + schemas + 11 组路由
 ├── frontend/                            # Vue3 + TS：12 个视图全部落地
-├── tests/                               # 24 个测试文件（test_*.py）160 项全绿
+├── tests/                               # 24 个测试文件（test_*.py）161 项全绿
 ├── scripts/                             # build_f1_baseline.py / eval_f1_llm.py
 ├── data/
 │   ├── corpus/m0_samples/               # 11 份语料 + baseline / ground_truth / llm_eval 三本账（§4）
@@ -69,8 +69,8 @@ BidGuard-Agent/
 ## 2. 当前基线（截至 2026-11-10）
 
 - **开发阶段**：3 周排期全部完成 + 十九轮增强升级（E1~E19）全量交付，仿真标书 **11/11 验收收官**，前后端体验与 F4 并发提速闭环完成
-- **Git 最新功能 Commit**：`b8f3403`（E19 Commit 3；远端同步状态以 `git log origin/main..HEAD` 实数为准）
-- **测试基线**：**160 项 pytest 全绿（零回归）** + `vue-tsc --noEmit` 零错误 —— 第一验收线已从 60 项演进至 160 项
+- **Git 最新功能 Commit**：`b8f3403`（含后续 F4 降级暴露补强；远端同步状态以 `git log origin/main..HEAD` 实数为准）
+- **测试基线**：**161 项 pytest 全绿（零回归）** + `vue-tsc --noEmit` 零错误 —— 第一验收线已从 60 项演进至 161 项
 - **模型网关基线**：`config/models.yaml` 默认 `default_env: demo`（智谱 `glm-5.3-flash` 直连，`reasoning_effort: low`，`embedding: embedding-3` 已激活 L2 混合检索）；预留 `prod` 内网私有网关（`http://10.0.2.81:3000/v1`，无向量模型自动无感降级 Level 1）
 - **运行环境**：本机开发用项目自带 `.venv`（依赖已全量钉死）；生产走 Docker 四容器（`docker compose up -d --build`，层缓存全热时秒级）
 - **快速验收命令**：
@@ -173,14 +173,14 @@ BidGuard-Agent/
 | E15 | F3/自定义红线双轨页码 + F2 三级防重名锚定页码 + 开标日期自动回填（消 2026-11-05 硬编码） | `f1c77ec` | 155 项 |
 | E16 | 交付中心四大件独立下载 + signoff 端点 + 批量打包内容自选（含 TS 强类型修复 `e08c42b`） | `bdb36f7`→`e08c42b` | 155 项 |
 | E18 | F1/F6/F7 三处 PDF 硬编码统一接入双轨页码上下文（docx 页码从恒 None 到全非空，F7 形参 list\|dict 兼容） | `87bde93` | 157 项 |
-| E19 | 六子项合并单卡三 Commit：F1 本地时区/多文件拖拽/局部 loading/超时放宽 + 在途秒表（UTC 补 `Z`）+ F7 三挡推理深度 + SSE 断线轮询对齐 + F4 两阶段并发提速（默认 4 路） | `85f0ddd` / `f64b3b6` / `b8f3403` | 160 项 + `vue-tsc` |
+| E19 | 六子项合并单卡三 Commit：F1 本地时区/多文件拖拽/局部 loading/超时放宽 + 在途秒表（UTC 补 `Z`）+ F7 三挡推理深度 + SSE 断线轮询对齐 + F4 两阶段并发提速（默认 4 路；含 `worker` 对单条 `error_fallback` 暴露 `LLM_FALLBACK` 提示级发现） | `85f0ddd` / `f64b3b6` / `b8f3403` 后续 | 161 项 + `vue-tsc` |
 | chore | requirements 全量钉死（`59e6b64`）、基础镜像 digest 钉死、弹窗会话记忆 | `90a1947` | — |
 
 ---
 
 ## 7. 协作纪律与工程红线（完整版见 `AGENTS.md`）
 
-1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线 **160 项**。
+1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线 **161 项**。
 2. **凡能算的绝不进大模型（0 Token 优先）**；金额全程 `Decimal` 禁 `float`（ROUND_HALF_UP 量化 0.01）。
 3. **LLM 只吃局部窗口 + 强制 `quote_verifier` 溯源**；严禁整本标书直塞。
 4. **宁缺毋滥显式降级**：无法对齐必返回 NEED_MANUAL；找不到位置绝不乱锚（E5 五级定位链 + 置信护栏）；页码诚实回退字符偏移并标"不一定准确"。
@@ -211,6 +211,6 @@ BidGuard-Agent/
 ## 9. 本文档信息来源
 
 1. `docs/cards/` B1~E19 全部任务卡与验收记录；`派发归档/` 各阶段派发包全文
-2. Git 提交链（`git log --oneline`，功能代码至 E19 `b8f3403`）；160 项 pytest + `vue-tsc` 实测回执
+2. Git 提交链（`git log --oneline`，功能代码至 E19）；161 项 pytest + `vue-tsc` 实测回执
 3. `data/corpus/m0_samples/` 三本账 + `语料清单.md`、`data/corpus/sim_bids/_README.md`；`data/corpus/regulations/` 法规种子
 4. `E:\agent\Contract-Review-Agent\HANDOVER_V2.md`（文档骨架参照）

@@ -239,3 +239,79 @@ def test_e19_qa_router_ignores_invalid_reasoning_effort(tmp_path, monkeypatch):
             )
             assert r_ask.status_code == 200
             assert '质保期' in r_ask.json()['answer']
+
+
+def test_e19_worker_exposes_llm_fallback_as_info_finding(tmp_path, monkeypatch):
+    """验证 F4 单条大模型调用异常降级项（llm_status='error_fallback'）通过 worker 落库为 info 提示级发现。"""
+    import backend.worker as worker_mod
+
+    monkeypatch.setenv('BIDGUARD_FORCE_ZERO_TOKEN', '1')
+    db_file = tmp_path / 'test_e19_fallback.db'
+    app = create_app(database_url=f"sqlite:///{db_file.as_posix()}", auto_init_db=True)
+
+    doc = Document()
+    doc.add_paragraph('★1. 免费质保期不少于36个月。')
+    buf = io.BytesIO()
+    doc.save(buf)
+    docx_bytes = buf.getvalue()
+
+    def _fake_run_response_check(**kwargs):
+        return {
+            'findings': [],
+            'star_results': [
+                {
+                    'status': 'RESPONSE_OK',
+                    'req_index': 1,
+                    'mark': '★',
+                    'clause_no': '★1',
+                    'tender_quote': '★1. 免费质保期不少于36个月。',
+                    'bid_quote': '★1. 免费质保期不少于36个月。',
+                    'bid_quote_raw': '★1. 免费质保期不少于36个月。',
+                    'quote_verified': True,
+                    'tender_start': 0,
+                    'tender_end': 18,
+                    'tender_page': 1,
+                    'bid_start': 0,
+                    'bid_end': 18,
+                    'bid_page': 1,
+                    'reason': '模型单条调用降级（TimeoutError）',
+                    'llm_status': 'error_fallback',
+                }
+            ],
+            'self_contradictions': [],
+            'alignment_summary': {'total_requirements': 1, 'aligned_hits': 1, 'hit_rate': 1.0},
+        }
+
+    monkeypatch.setattr(worker_mod, 'run_response_check', _fake_run_response_check)
+    worker_mod._global_worker = None
+
+    with TestClient(app) as tc:
+        r_login = tc.post('/api/auth/login', json={'username': 'admin', 'password': 'BidGuard2026!'})
+        hdrs = {'Authorization': f"Bearer {r_login.json()['token']}"}
+
+        r_task = tc.post(
+            '/api/checks',
+            headers=hdrs,
+            files={
+                'tender_file': ('t_fb.docx', docx_bytes, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+                'bid_file': ('b_fb.docx', docx_bytes, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+            },
+            data={'title': 'LLM降级暴露单测', 'auto_run': 'false'},
+        )
+        tid = r_task.json()['id']
+
+        r_run = tc.post(f"/api/checks/{tid}/run?sync=true", headers=hdrs)
+        assert r_run.status_code == 200
+        assert r_run.json()['status'] == 'delivered'
+
+        r_detail = tc.get(f"/api/checks/{tid}", headers=hdrs)
+        assert r_detail.status_code == 200
+        findings = r_detail.json()['findings']
+        fb_items = [f for f in findings if f['code'] == 'LLM_FALLBACK']
+        assert len(fb_items) == 1
+        assert fb_items[0]['severity'] == 'info'
+        assert fb_items[0]['consequence'] == 'none'
+        assert fb_items[0]['source_module'] == 'F4'
+        assert fb_items[0]['page'] == 1
+        assert 'TimeoutError' in fb_items[0]['message']
+    worker_mod._global_worker = None
