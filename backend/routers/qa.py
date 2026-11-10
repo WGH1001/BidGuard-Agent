@@ -169,6 +169,8 @@ def ask_in_session(
         )
 
     client, _ = resolve_effective_llm_client(db, current_user.get('id'))
+    raw_effort = (body.reasoning_effort or '').strip().lower()
+    valid_effort = raw_effort if raw_effort in ('low', 'medium', 'high') else None
     try:
         res = ask_bid_expert(
             tender_path=tender_abs,
@@ -176,6 +178,7 @@ def ask_in_session(
             question=body.question.strip(),
             client=client,
             max_rounds=body.max_rounds,
+            reasoning_effort=valid_effort,
         )
     except Exception:
         res = ask_bid_expert(
@@ -184,6 +187,7 @@ def ask_in_session(
             question=body.question.strip(),
             client=None,
             max_rounds=body.max_rounds,
+            reasoning_effort=valid_effort,
         )
 
     quotes_out = [

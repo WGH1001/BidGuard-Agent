@@ -353,6 +353,7 @@ def ask_bid_expert(
     question: str,
     client=None,
     max_rounds: int = 6,
+    reasoning_effort: Optional[str] = None,
 ) -> dict[str, Any]:
     """F7 标书专家 ReAct 追问主入口（公共签名保持一字不变）。"""
     tender_doc = parse_document(str(tender_path))
@@ -416,9 +417,20 @@ def ask_bid_expert(
     steps: list[dict[str, Any]] = []
     collected_tool_quotes: list[dict[str, Any]] = []
 
+    norm_effort = (
+        str(reasoning_effort).strip().lower()
+        if str(reasoning_effort or '').strip().lower() in ('low', 'medium', 'high')
+        else None
+    )
     limit = max(1, int(max_rounds))
     for r_idx in range(1, limit + 1):
-        resp = client.chat(messages, model_tier='flash')
+        if norm_effort is not None:
+            try:
+                resp = client.chat(messages, model_tier='flash', reasoning_effort=norm_effort)
+            except TypeError:
+                resp = client.chat(messages, model_tier='flash')
+        else:
+            resp = client.chat(messages, model_tier='flash')
         raw_content = getattr(resp, 'content', '') or ''
         parsed = _parse_llm_json(raw_content)
 

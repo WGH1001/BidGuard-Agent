@@ -255,6 +255,7 @@ class QaSessionCreateRequest(BaseModel):
 class QaAskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     max_rounds: int = Field(default=6, ge=1, le=6)
+    reasoning_effort: Optional[str] = None
 
 
 class QaQuoteOut(BaseModel):

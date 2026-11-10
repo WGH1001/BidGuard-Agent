@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
+import os
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Optional
@@ -695,6 +697,244 @@ def _filter_valid_requirements(raw_reqs: list[dict]) -> list[dict]:
     return valid
 
 
+def _evaluate_single_llm_req(
+    task_ctx: dict[str, Any],
+    tender_text: str,
+    bid_text: str,
+    bid_ctx: dict[str, Any],
+    client: Any,
+) -> tuple[int, dict[str, Any], Optional[dict[str, Any]]]:
+    """E19 §2 Commit3.1（阶段 B 工作函数）：仅在线程池中调用 client.chat() 并组装单条结果。
+    单条异常自动捕获并降级为 RESPONSE_OK（llm_status='error_fallback'），绝不中断整批任务。
+    """
+    idx = int(task_ctx['idx'])
+    req = task_ctx['req']
+    expanded_req_text = task_ctx['expanded_req_text']
+    r_start = task_ctx['r_start']
+    r_end = task_ctx['r_end']
+    tender_window = task_ctx['tender_window']
+    loc = task_ctx['loc']
+    t_page = task_ctx['t_page']
+    t_footer = task_ctx['t_footer']
+    t_is_docx = task_ctx['t_is_docx']
+    b_page = task_ctx['b_page']
+    b_footer = task_ctx['b_footer']
+    b_is_docx = task_ctx['b_is_docx']
+    raw_req_quote = task_ctx['raw_req_quote']
+    bid_window = task_ctx['bid_window']
+    default_bid_quote = task_ctx['default_bid_quote']
+
+    prompt = _RESPONSE_CHECK_PROMPT.format(
+        tender_window=tender_window,
+        req_text=expanded_req_text,
+        bid_window=bid_window,
+    )
+    try:
+        resp = client.chat([{'role': 'user', 'content': prompt}], model_tier='flash')
+        parsed = _parse_llm_json(getattr(resp, 'content', '') or '')
+    except Exception as exc:
+        # 单条 LLM 异常优雅降级，不炸整批
+        ev_warn_fb = _check_missing_evidence(
+            req_text=expanded_req_text,
+            bid_quote=default_bid_quote,
+            bid_window=bid_window,
+            bid_text=bid_text,
+        )
+        display_fb_quote = (
+            f"{default_bid_quote}{_EVIDENCE_WARNING_NOTE}"
+            if (ev_warn_fb and default_bid_quote)
+            else default_bid_quote
+        )
+        rec_fb = {
+            'status': 'RESPONSE_OK',
+            'req_index': idx,
+            'mark': req.get('mark', ''),
+            'clause_no': req.get('clause_no', ''),
+            'tender_quote': raw_req_quote,
+            'bid_quote': display_fb_quote,
+            'bid_quote_raw': default_bid_quote,
+            'quote_verified': bool(raw_req_quote and default_bid_quote),
+            'tender_start': r_start,
+            'tender_end': r_end,
+            'tender_page': t_page,
+            'tender_footer_page': t_footer,
+            'tender_is_docx': t_is_docx,
+            'bid_start': loc['start'],
+            'bid_end': loc['end'],
+            'bid_page': b_page,
+            'bid_footer_page': b_footer,
+            'bid_is_docx': b_is_docx,
+            'footer_page': b_footer if b_page is not None else t_footer,
+            'is_docx_page': b_is_docx if b_page is not None else t_is_docx,
+            'reason': f"模型单条调用降级（{type(exc).__name__}）",
+            'gate': loc.get('gate', 'direct'),
+            'evidence_warning': _EVIDENCE_WARNING_NOTE if ev_warn_fb else None,
+            'llm_status': 'error_fallback',
+        }
+        f_fb = None
+        if ev_warn_fb:
+            f_fb = {
+                'code': 'MISSING_EVIDENCE',
+                'severity': 'warning',
+                'req_index': idx,
+                'mark': req.get('mark', ''),
+                'clause_no': req.get('clause_no', ''),
+                'message': ev_warn_fb,
+                'tender_quote': raw_req_quote,
+                'bid_quote': default_bid_quote,
+                'quote_verified': bool(raw_req_quote and default_bid_quote),
+                'tender_start': r_start,
+                'tender_end': r_end,
+                'tender_page': t_page,
+                'tender_footer_page': t_footer,
+                'tender_is_docx': t_is_docx,
+                'bid_start': loc['start'],
+                'bid_end': loc['end'],
+                'bid_page': b_page,
+                'bid_footer_page': b_footer,
+                'bid_is_docx': b_is_docx,
+                'footer_page': b_footer if b_page is not None else t_footer,
+                'is_docx_page': b_is_docx if b_page is not None else t_is_docx,
+                'evidence_warning': _EVIDENCE_WARNING_NOTE,
+            }
+        return idx, rec_fb, f_fb
+
+    status = (parsed or {}).get('status', 'RESPONSE_OK')
+    if status not in ('RESPONSE_OK', 'MISSING_RESPONSE', 'CONTRADICTION'):
+        status = 'RESPONSE_OK'
+
+    llm_t_quote = str((parsed or {}).get('tender_quote', '')).strip()
+    llm_b_quote = str((parsed or {}).get('bid_quote', '')).strip()
+    reason = str((parsed or {}).get('reason', '')).strip()
+
+    t_verified = bool(llm_t_quote) and verify_quote(llm_t_quote, tender_text)
+    final_t_quote = llm_t_quote if t_verified else raw_req_quote
+    t_ok = bool(final_t_quote) and verify_quote(final_t_quote, tender_text)
+    if not t_ok:
+        final_t_quote = ''
+
+    if status == 'MISSING_RESPONSE':
+        final_b_quote = ''
+        b_ok = True
+    else:
+        b_ok = bool(llm_b_quote) and verify_quote(llm_b_quote, bid_text)
+        final_b_quote = llm_b_quote if b_ok else ''
+
+    quote_verified = (t_ok and b_ok)
+    if status == 'MISSING_RESPONSE':
+        b_real_start = None
+        b_real_end = None
+    else:
+        found_b_pos = bid_text.find(final_b_quote) if (final_b_quote and bid_text) else -1
+        b_real_start = found_b_pos if found_b_pos >= 0 else loc['start']
+        b_real_end = (
+            (b_real_start + len(final_b_quote))
+            if (final_b_quote and found_b_pos >= 0 and b_real_start is not None)
+            else loc['end']
+        )
+
+    b_real_page, b_real_footer, b_real_is_docx = _resolve_unified_page(b_real_start, bid_ctx)
+
+    ev_warn_llm = None
+    if status == 'RESPONSE_OK':
+        ev_warn_llm = _check_missing_evidence(
+            req_text=expanded_req_text,
+            bid_quote=final_b_quote or default_bid_quote,
+            bid_window=bid_window,
+            bid_text=bid_text,
+        )
+
+    display_llm_b_quote = (
+        f"{final_b_quote}{_EVIDENCE_WARNING_NOTE}"
+        if (ev_warn_llm and final_b_quote)
+        else final_b_quote
+    )
+
+    rec = {
+        'status': status,
+        'req_index': idx,
+        'mark': req.get('mark', ''),
+        'clause_no': req.get('clause_no', ''),
+        'tender_quote': final_t_quote,
+        'bid_quote': display_llm_b_quote,
+        'bid_quote_raw': final_b_quote,
+        'quote_verified': quote_verified,
+        'tender_start': r_start,
+        'tender_end': r_end,
+        'tender_page': t_page,
+        'tender_footer_page': t_footer,
+        'tender_is_docx': t_is_docx,
+        'bid_start': b_real_start,
+        'bid_end': b_real_end,
+        'bid_page': b_real_page,
+        'bid_footer_page': b_real_footer,
+        'bid_is_docx': b_real_is_docx,
+        'footer_page': b_real_footer if b_real_page is not None else t_footer,
+        'is_docx_page': b_real_is_docx if b_real_page is not None else t_is_docx,
+        'reason': reason,
+        'gate': loc.get('gate', 'direct'),
+        'evidence_warning': _EVIDENCE_WARNING_NOTE if ev_warn_llm else None,
+        'llm_status': 'done',
+    }
+
+    finding_item: Optional[dict[str, Any]] = None
+    if status in ('MISSING_RESPONSE', 'CONTRADICTION'):
+        finding_item = {
+            'code': status,
+            'severity': 'error',
+            'req_index': idx,
+            'mark': req.get('mark', ''),
+            'clause_no': req.get('clause_no', ''),
+            'message': reason or (
+                f"实质性条款漏应答：{final_t_quote[:50]}"
+                if status == 'MISSING_RESPONSE'
+                else f"响应内容与招标要求存在冲突：{reason}"
+            ),
+            'tender_quote': final_t_quote,
+            'bid_quote': final_b_quote,
+            'quote_verified': quote_verified,
+            'tender_start': r_start,
+            'tender_end': r_end,
+            'tender_page': t_page,
+            'tender_footer_page': t_footer,
+            'tender_is_docx': t_is_docx,
+            'bid_start': b_real_start,
+            'bid_end': b_real_end,
+            'bid_page': b_real_page,
+            'bid_footer_page': b_real_footer,
+            'bid_is_docx': b_real_is_docx,
+            'footer_page': b_real_footer if b_real_page is not None else t_footer,
+            'is_docx_page': b_real_is_docx if b_real_page is not None else t_is_docx,
+        }
+    elif ev_warn_llm:
+        finding_item = {
+            'code': 'MISSING_EVIDENCE',
+            'severity': 'warning',
+            'req_index': idx,
+            'mark': req.get('mark', ''),
+            'clause_no': req.get('clause_no', ''),
+            'message': ev_warn_llm,
+            'tender_quote': final_t_quote,
+            'bid_quote': final_b_quote,
+            'quote_verified': quote_verified,
+            'tender_start': r_start,
+            'tender_end': r_end,
+            'tender_page': t_page,
+            'tender_footer_page': t_footer,
+            'tender_is_docx': t_is_docx,
+            'bid_start': b_real_start,
+            'bid_end': b_real_end,
+            'bid_page': b_real_page,
+            'bid_footer_page': b_real_footer,
+            'bid_is_docx': b_real_is_docx,
+            'footer_page': b_real_footer if b_real_page is not None else t_footer,
+            'is_docx_page': b_real_is_docx if b_real_page is not None else t_is_docx,
+            'evidence_warning': _EVIDENCE_WARNING_NOTE,
+        }
+
+    return idx, rec, finding_item
+
+
 def check_star_responses(
     tender_text: str,
     bid_text: str,
@@ -703,7 +943,7 @@ def check_star_responses(
     tender_path: Optional[str | Path] = None,
     bid_path: Optional[str | Path] = None,
 ) -> dict[str, Any]:
-    """执行招标 ★/▲ 要求 ↔ 投标响应逐条勾稽核验（公共签名与返回结构保持一字不变）。"""
+    """执行招标 ★/▲ 要求 ↔ 投标响应逐条勾稽核验（公共签名与返回结构保持一字不变，E19 升级双阶段并发）。"""
     if requirements is None:
         marked = extract_marked_clauses(tender_text or '')
         wording = extract_invalid_bid_clauses(tender_text or '')
@@ -718,12 +958,16 @@ def check_star_responses(
     _, bid_units = _build_clause_units(bid_text or '')
     align_map = align_res.get('alignment_map', {})
 
-    findings: list[dict] = []
-    results: list[dict] = []
+    # 按 req_index 映射槽位，确保并发归位后 results 与 findings 顺序与串行版逐字节一致
+    results_by_idx: dict[int, dict[str, Any]] = {}
+    findings_by_idx: dict[int, dict[str, Any]] = {}
+    llm_tasks: list[dict[str, Any]] = []
+
     hit_count = 0
     direct_gate_hits = 0
     hybrid_gate_hits = 0
 
+    # ── 阶段 A（按原序串行预定位，严禁进线程池，保护 hybrid 向量缓存 np.load/np.save）──
     for idx, req in enumerate(valid_reqs, start=1):
         expanded_req_text, r_start, r_end = _expand_req_text(tender_text, req)
         t_lo = max(0, r_start - _REQ_EXPAND_BEFORE)
@@ -775,8 +1019,8 @@ def check_star_responses(
                 'is_docx_page': t_is_docx if t_page is not None else False,
                 'llm_status': 'skipped' if client is None else 'confirmed_missing',
             }
-            findings.append(finding)
-            results.append({**finding, 'status': 'MISSING_RESPONSE'})
+            findings_by_idx[idx] = finding
+            results_by_idx[idx] = {**finding, 'status': 'MISSING_RESPONSE'}
             continue
 
         hit_count += 1
@@ -826,8 +1070,8 @@ def check_star_responses(
                     'is_docx_page': b_is_docx if b_page is not None else t_is_docx,
                     'llm_status': 'skipped',
                 }
-                findings.append(f_item)
-                results.append({**f_item, 'status': 'CONTRADICTION'})
+                findings_by_idx[idx] = f_item
+                results_by_idx[idx] = {**f_item, 'status': 'CONTRADICTION'}
             else:
                 ev_warn_msg = _check_missing_evidence(
                     req_text=expanded_req_text,
@@ -866,10 +1110,10 @@ def check_star_responses(
                     'evidence_warning': _EVIDENCE_WARNING_NOTE if ev_warn_msg else None,
                     'llm_status': 'skipped',
                 }
-                results.append(rec_ok)
+                results_by_idx[idx] = rec_ok
 
                 if ev_warn_msg:
-                    findings.append({
+                    findings_by_idx[idx] = {
                         'code': 'MISSING_EVIDENCE',
                         'severity': 'warning',
                         'req_index': idx,
@@ -893,154 +1137,69 @@ def check_star_responses(
                         'is_docx_page': b_is_docx if b_page is not None else t_is_docx,
                         'evidence_warning': _EVIDENCE_WARNING_NOTE,
                         'llm_status': 'skipped',
-                    })
+                    }
             continue
 
-        # 大模型① 逐条判定
-        prompt = _RESPONSE_CHECK_PROMPT.format(
-            tender_window=tender_window,
-            req_text=expanded_req_text,
-            bid_window=bid_window,
-        )
-        resp = client.chat([{'role': 'user', 'content': prompt}], model_tier='flash')
-        parsed = _parse_llm_json(getattr(resp, 'content', '') or '')
+        # 收集待进入阶段 B 并发调用 client.chat 的任务上下文
+        llm_tasks.append({
+            'idx': idx,
+            'req': req,
+            'expanded_req_text': expanded_req_text,
+            'r_start': r_start,
+            'r_end': r_end,
+            'tender_window': tender_window,
+            'loc': loc,
+            't_page': t_page,
+            't_footer': t_footer,
+            't_is_docx': t_is_docx,
+            'b_page': b_page,
+            'b_footer': b_footer,
+            'b_is_docx': b_is_docx,
+            'raw_req_quote': raw_req_quote,
+            'bid_window': bid_window,
+            'default_bid_quote': default_bid_quote,
+        })
 
-        status = (parsed or {}).get('status', 'RESPONSE_OK')
-        if status not in ('RESPONSE_OK', 'MISSING_RESPONSE', 'CONTRADICTION'):
-            status = 'RESPONSE_OK'
+    # ── 阶段 B（仅 client.chat 进线程池并发，按 req_index 严格升序归位）──
+    if llm_tasks and client is not None:
+        try:
+            raw_conc = int(os.environ.get('BIDGUARD_F4_CONCURRENCY', '4') or '4')
+        except ValueError:
+            raw_conc = 4
+        max_workers = max(1, min(raw_conc, len(llm_tasks)))
 
-        llm_t_quote = str((parsed or {}).get('tender_quote', '')).strip()
-        llm_b_quote = str((parsed or {}).get('bid_quote', '')).strip()
-        reason = str((parsed or {}).get('reason', '')).strip()
-
-        t_verified = bool(llm_t_quote) and verify_quote(llm_t_quote, tender_text)
-        final_t_quote = llm_t_quote if t_verified else raw_req_quote
-        t_ok = bool(final_t_quote) and verify_quote(final_t_quote, tender_text)
-        if not t_ok:
-            final_t_quote = ''
-
-        if status == 'MISSING_RESPONSE':
-            final_b_quote = ''
-            b_ok = True
+        if max_workers == 1:
+            for t_ctx in llm_tasks:
+                r_idx, rec_out, f_out = _evaluate_single_llm_req(
+                    t_ctx, tender_text, bid_text, bid_ctx, client
+                )
+                results_by_idx[r_idx] = rec_out
+                if f_out is not None:
+                    findings_by_idx[r_idx] = f_out
         else:
-            b_ok = bool(llm_b_quote) and verify_quote(llm_b_quote, bid_text)
-            final_b_quote = llm_b_quote if b_ok else ''
-
-        quote_verified = (t_ok and b_ok)
-        if status == 'MISSING_RESPONSE':
-            b_real_start = None
-            b_real_end = None
-        else:
-            found_b_pos = bid_text.find(final_b_quote) if (final_b_quote and bid_text) else -1
-            b_real_start = found_b_pos if found_b_pos >= 0 else loc['start']
-            b_real_end = (
-                (b_real_start + len(final_b_quote))
-                if (final_b_quote and found_b_pos >= 0 and b_real_start is not None)
-                else loc['end']
-            )
-
-        b_real_page, b_real_footer, b_real_is_docx = _resolve_unified_page(b_real_start, bid_ctx)
-
-        ev_warn_llm = None
-        if status == 'RESPONSE_OK':
-            ev_warn_llm = _check_missing_evidence(
-                req_text=expanded_req_text,
-                bid_quote=final_b_quote or default_bid_quote,
-                bid_window=bid_window,
-                bid_text=bid_text,
-            )
-
-        display_llm_b_quote = (
-            f"{final_b_quote}{_EVIDENCE_WARNING_NOTE}"
-            if (ev_warn_llm and final_b_quote)
-            else final_b_quote
-        )
-
-        rec = {
-            'status': status,
-            'req_index': idx,
-            'mark': req.get('mark', ''),
-            'clause_no': req.get('clause_no', ''),
-            'tender_quote': final_t_quote,
-            'bid_quote': display_llm_b_quote,
-            'bid_quote_raw': final_b_quote,
-            'quote_verified': quote_verified,
-            'tender_start': r_start,
-            'tender_end': r_end,
-            'tender_page': t_page,
-            'tender_footer_page': t_footer,
-            'tender_is_docx': t_is_docx,
-            'bid_start': b_real_start,
-            'bid_end': b_real_end,
-            'bid_page': b_real_page,
-            'bid_footer_page': b_real_footer,
-            'bid_is_docx': b_real_is_docx,
-            'footer_page': b_real_footer if b_real_page is not None else t_footer,
-            'is_docx_page': b_real_is_docx if b_real_page is not None else t_is_docx,
-            'reason': reason,
-            'gate': loc.get('gate', 'direct'),
-            'evidence_warning': _EVIDENCE_WARNING_NOTE if ev_warn_llm else None,
-            'llm_status': 'done',
-        }
-        results.append(rec)
-
-        if status in ('MISSING_RESPONSE', 'CONTRADICTION'):
-            findings.append({
-                'code': status,
-                'severity': 'error',
-                'req_index': idx,
-                'mark': req.get('mark', ''),
-                'clause_no': req.get('clause_no', ''),
-                'message': reason or (
-                    f"实质性条款漏应答：{final_t_quote[:50]}"
-                    if status == 'MISSING_RESPONSE'
-                    else f"响应内容与招标要求存在冲突：{reason}"
-                ),
-                'tender_quote': final_t_quote,
-                'bid_quote': final_b_quote,
-                'quote_verified': quote_verified,
-                'tender_start': r_start,
-                'tender_end': r_end,
-                'tender_page': t_page,
-                'tender_footer_page': t_footer,
-                'tender_is_docx': t_is_docx,
-                'bid_start': b_real_start,
-                'bid_end': b_real_end,
-                'bid_page': b_real_page,
-                'bid_footer_page': b_real_footer,
-                'bid_is_docx': b_real_is_docx,
-                'footer_page': b_real_footer if b_real_page is not None else t_footer,
-                'is_docx_page': b_real_is_docx if b_real_page is not None else t_is_docx,
-            })
-        elif ev_warn_llm:
-            findings.append({
-                'code': 'MISSING_EVIDENCE',
-                'severity': 'warning',
-                'req_index': idx,
-                'mark': req.get('mark', ''),
-                'clause_no': req.get('clause_no', ''),
-                'message': ev_warn_llm,
-                'tender_quote': final_t_quote,
-                'bid_quote': final_b_quote,
-                'quote_verified': quote_verified,
-                'tender_start': r_start,
-                'tender_end': r_end,
-                'tender_page': t_page,
-                'tender_footer_page': t_footer,
-                'tender_is_docx': t_is_docx,
-                'bid_start': b_real_start,
-                'bid_end': b_real_end,
-                'bid_page': b_real_page,
-                'bid_footer_page': b_real_footer,
-                'bid_is_docx': b_real_is_docx,
-                'footer_page': b_real_footer if b_real_page is not None else t_footer,
-                'is_docx_page': b_real_is_docx if b_real_page is not None else t_is_docx,
-                'evidence_warning': _EVIDENCE_WARNING_NOTE,
-            })
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='f4_llm') as pool:
+                futures = [
+                    pool.submit(
+                        _evaluate_single_llm_req,
+                        t_ctx,
+                        tender_text,
+                        bid_text,
+                        bid_ctx,
+                        client,
+                    )
+                    for t_ctx in llm_tasks
+                ]
+                for fut in futures:
+                    r_idx, rec_out, f_out = fut.result()
+                    results_by_idx[r_idx] = rec_out
+                    if f_out is not None:
+                        findings_by_idx[r_idx] = f_out
 
     total_reqs = len(valid_reqs)
+    results: list[dict] = [results_by_idx[i] for i in range(1, total_reqs + 1) if i in results_by_idx]
+    findings: list[dict] = [findings_by_idx[i] for i in range(1, total_reqs + 1) if i in findings_by_idx]
 
-    # ── E2 验收修正：混合命中跨需求污染降级 ─────────────────────────────────
+    # ── E2 验收修正：混合命中跨需求污染降级（保持在并发组装之后按原序执行）─────────
     direct_spans = [
         (int(r['bid_start']), int(r['bid_end']))
         for r in results
