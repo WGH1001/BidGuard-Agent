@@ -2,9 +2,10 @@
 import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
-import { auditApi, checksApi, http, reportsApi } from '@/api'
+import { auditApi, checksApi, reportsApi } from '@/api'
 import type {
   AuditLogItemOut,
+  BatchDeliverFailedItem,
   BatchDeliverZipOut,
   BidTaskOut,
   DeliverIncludeKey,
@@ -84,14 +85,14 @@ async function handleBatchZipSubmit(): Promise<void> {
   batchSubmitting.value = true
   try {
     const taskIds = selectedTasks.value.map((t) => t.id)
-    const { data } = await http.post<BatchDeliverZipOut>('/reports/batch-zip', {
+    const data = await reportsApi.batchDeliverZip({
       task_ids: taskIds,
       include: batchInclude.value,
     })
 
     if (data.failed && data.failed.length > 0) {
       const failDesc = data.failed
-        .map((f) => `#${f.task_id}（${f.reason}）`)
+        .map((f: BatchDeliverFailedItem) => `#${f.task_id}（${f.reason}）`)
         .join('；')
       ElMessage.warning({
         message: `部分任务已跳过：${failDesc}`,
@@ -172,8 +173,8 @@ async function handleDownloadSignoffDocx(task: Partial<BidTaskOut>): Promise<voi
   if (busyDownload.value[key]) return
   busyDownload.value[key] = true
   try {
-    const fn = await checksApi.downloadStoredFile(
-      `/api/reports/${task.id}/signoff`,
+    const fn = await reportsApi.downloadSignoff(
+      task.id,
       `${task.title}_封标前人工终核签字确认单.docx`,
     )
     ElMessage.success(`已下载人工终核签字确认单：${fn}`)

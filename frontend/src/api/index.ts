@@ -2,6 +2,7 @@ import { del, get, post, put } from './http'
 import { downloadFromApi } from './download'
 import type {
   AuditLogListOut,
+  BatchDeliverZipOut,
   BidFindingOut,
   BidRuleConfigOut,
   BidRuleConfigUpsertRequest,
@@ -12,6 +13,7 @@ import type {
   CertificateUpsertRequest,
   ChangePasswordRequest,
   DashboardStatsOut,
+  DeliverIncludeKey,
   DeviationExportOut,
   ExtractChecklistOut,
   FindingFeedbackRequest,
@@ -247,8 +249,20 @@ export const reportsApi = {
   downloadRedline(taskId: number, fallbackName = `${taskId}_标红原件.docx`): Promise<string> {
     return downloadFromApi(`/reports/${taskId}/redline`, fallbackName)
   },
+  downloadSignoff(
+    taskId: number,
+    fallbackName = `${taskId}_封标前人工终核签字确认单.docx`,
+  ): Promise<string> {
+    return downloadFromApi(`/reports/${taskId}/signoff`, fallbackName)
+  },
   downloadDeliverZip(taskId: number, fallbackName = `${taskId}_封标交付包.zip`): Promise<string> {
     return downloadFromApi(`/reports/${taskId}/deliver.zip`, fallbackName)
+  },
+  batchDeliverZip(payload: {
+    task_ids: number[]
+    include: DeliverIncludeKey[]
+  }): Promise<BatchDeliverZipOut> {
+    return post<BatchDeliverZipOut>('/reports/batch-zip', payload)
   },
   listAuditLogs(params?: {
     action?: string

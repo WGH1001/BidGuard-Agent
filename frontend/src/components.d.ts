@@ -14,6 +14,7 @@ declare module 'vue' {
     CheckTaskList: typeof import('./components/CheckTaskList.vue')['default']
     ElButton: typeof import('element-plus/es/components/button/index')['ElButton']
     ElCheckbox: typeof import('element-plus/es/components/checkbox/index')['ElCheckbox']
+    ElCheckboxGroup: typeof import('element-plus/es/components/checkbox/index')['ElCheckboxGroup']
     ElDialog: typeof import('element-plus/es/components/dialog/index')['ElDialog']
     ElEmpty: typeof import('element-plus/es/components/empty/index')['ElEmpty']
     ElForm: typeof import('element-plus/es/components/form/index')['ElForm']
