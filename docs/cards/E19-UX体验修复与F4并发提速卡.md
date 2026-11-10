@@ -2,7 +2,7 @@
 
 > 状态：待派发（建议 Gemini，Antigravity 留作交付后交叉复查）｜ 立卡：2026-11-10 ｜ 基线：commit a99b500
 > 来源：用户实测反馈六个问题（F1 时间错 8 小时/白屏/F2-F4 慢/切页面虚假报错/上传体验/F7 布局与思考深度）；Antigravity 全链路排查 + 双方两轮架构把关
-> 拆卡纪律：六个子项在 CheckDetailView.vue 上有文件交集，两张卡并行必冲突——合并单卡、强制 3 个 commit（每 commit 独立可回退）；F6 布局改造不进本卡（待办池）
+> 拆卡纪律：六个子项在 CheckDetailView.vue 上有文件交集，两张卡并行必冲突——合并单卡、强制 3 个 commit（每 commit 独立可回退）；F7 布局改造（左侧抽屉折叠等）不进本卡（待办池）
 
 ## 1. 背景（全部代码实锤）
 
@@ -24,8 +24,8 @@
 1. **F1 时区修正**：`ExtractView.vue` 历史时间改浏览器本地时区格式化（`Intl.DateTimeFormat('zh-CN', {...})` 或手拼年月日时分），严禁 toISOString；
 2. **F1 上传卡片化 + 批量多文件**：点击/拖拽一体化上传卡片（虚线边框，整块可点可拖入），支持一次多文件排队依次提取；下方近期记录批量陈列（沿用现有 localStorage 历史机制，条数上限可放宽）；
 3. **F1 局部 loading + 超时放宽**：取消 L277 整页 `v-loading`，改为上传卡片内进度条 + "正在结构化提取中…"动效，历史列表可正常滚动；`api/index.ts` 的 `extractApi.extract` 单独 `timeout: 600000`（10 分钟），其余 API 沿用全局 3 分钟；
-4. **F2-F4 在途读秒**：任务处于 extracting/checking/grading 在途态时，CheckTaskList 列表行与 CheckDetailView 卡片挂实时秒表（`⏱ 已耗时 02:45`，以 started_at 为基准每秒跳动）；任务到达终态后回落显示 E11 的真实总耗时；
-5. **F7 三挡思考深度**：QaChatView 输入区加 ⚡极速/⚖均衡/🧠深度 三挡切换器（默认均衡=不传参），选择持久化到 localStorage；qa 请求体带 `reasoning_effort`（'low'/'high'/空）。
+4. **F2-F4 在途读秒**：任务处于 extracting/checking/grading 在途态时，CheckTaskList 列表行与 CheckDetailView 卡片挂实时秒表（`⏱ 已耗时 02:45`，以 started_at 为基准每秒跳动）；任务到达终态后回落显示 E11 的真实总耗时。**UTC 后缀坑（Antigravity 实锤）**：后端 checks.py L128/L324 返回的 started_at 是数据库 naive UTC 的 `.isoformat()`（**不带 Z 后缀**），浏览器会把无 Z 字符串当本地 UTC+8 时间——读秒必须先做规范化补 `'Z'`（复用 CheckDetailView.vue L85 既有 `endsWith('Z') || includes('+')` 模式）再计算 `Date.now() - new Date(normalized).getTime()`，否则任务刚跑 1 秒就会显示 08:00:01；
+5. **F7 三挡思考深度**：QaChatView 输入区加 ⚡极速/⚖均衡/🧠深度 三挡切换器，选择持久化到 localStorage；qa 请求体带 `reasoning_effort`。**挡位语义注意**（Antigravity 实锤：llm_gateway L73 在 supports_reasoning_effort=True 时 chat_options 默认已填 'low'，"不传参"实际就是 low，与极速无差异）：**⚡极速='low'、⚖均衡='medium'、🧠深度='high'**，三挡必须显式传值才能真实拉开推理深度差异；未选择时不传参数走网关默认。
 
 ### Commit 2 · SSE 状态对齐（消除虚假报错）
 
@@ -43,7 +43,7 @@
 
 ## 3. 验收标准
 
-1. pytest 新增：① F4 并发结果与串行结果一致性（同输入构造，断言 findings 顺序与内容逐条一致）；② BIDGUARD_F4_CONCURRENCY=1 与 =4 结果一致；③ 单条 chat 抛异常 → 该条降级其余正常；④ reasoning_effort 透传（mock client 断言收到参数；不支持思考的模型断言不传）；⑤ qa 路由非法 effort 值忽略；
+1. pytest 新增：① F4 并发结果与串行结果一致性（同输入构造，断言 findings 顺序与内容逐条一致）；② BIDGUARD_F4_CONCURRENCY=1 与 =4 结果一致；③ 单条 chat 抛异常 → 该条降级其余正常；④ reasoning_effort 透传（mock client 断言收到参数；不支持思考的模型断言不传）；⑤ qa 路由非法 effort 值忽略；⑥ F7 三挡断言：极速传 low、均衡传 medium、深度传 high（挡位间必须存在真实参数差异）；
 2. 全量 pytest（基线 157 项 + 新增）零回归全绿；`npm run build`（vue-tsc --noEmit && vite build）全链路通过——**vue-tsc 退出码必须在无管道干扰下取**（`cmd > log 2>&1; echo $?`，管道后 $? 是 tail 的）；
 3. 前端走查：F1 历史时间为本地时区、拖拽/点击/多文件队列可用、大文件提取时页面可操作；在途任务读秒跳动、终态回落真实耗时；切页面回来不出现虚假"失败"（连接中断态显示后台跟踪提示并自动对齐）；F7 三挡切换生效。
 
@@ -51,5 +51,5 @@
 
 - 三个 commit 严禁混（前端 UX / SSE 对齐 / 后端并发各一个，信息用中文）；
 - F4 阶段 A 严禁进线程池（hybrid 缓存 np.load/np.save 无文件锁，并发即损坏）；输出顺序必须与串行版一致；
-- SSE 帧协议后端零改动；F6 布局改造不在本卡范围严禁顺手做；
-- 文件白名单：frontend/src/views/ExtractView.vue、QaChatView.vue、CheckDetailView.vue、frontend/src/components/CheckTaskList.vue、SseProgress.vue、frontend/src/api/index.ts（+types.ts 如需）、core/response_checker.py、core/bid_react_agent.py、backend/routers/qa.py、可新增测试文件；严禁动 core/llm_gateway.py（网关层零改动）、core/parser.py、core/hybrid_retriever.py。
+- SSE 帧协议后端零改动；F7 布局改造（左侧抽屉折叠等）不在本卡范围严禁顺手做；
+- 文件白名单：frontend/src/views/ExtractView.vue、QaChatView.vue、CheckDetailView.vue、frontend/src/components/CheckTaskList.vue、SseProgress.vue、frontend/src/api/index.ts、frontend/src/api/types.ts（补 QaAskRequest.reasoning_effort 与 SSEProgressFrame.started_at 等字段）、backend/routers/qa.py、backend/schemas.py（**仅** QaAskRequest 补 reasoning_effort 字段，L255，严禁动其他模型）、core/response_checker.py、core/bid_react_agent.py、可新增测试文件；严禁动 core/llm_gateway.py（网关层零改动）、core/parser.py、core/hybrid_retriever.py。
