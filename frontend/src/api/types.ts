@@ -390,9 +390,12 @@ export interface QaSessionOut {
   updated_at?: string | null
 }
 
+export type ReasoningEffortLevel = 'low' | 'medium' | 'high'
+
 export interface QaAskRequest {
   question: string
   max_rounds?: number
+  reasoning_effort?: ReasoningEffortLevel | null
 }
 
 export interface QaAskResponseOut {
@@ -531,6 +534,7 @@ export interface SSEProgressFrame {
   stage_detail?: string
   stats?: BidTaskStats
   error_msg?: string
+  started_at?: string | null
 }
 
 // ── 12. E4 招投标法规库与法条三态真伪核验 (/api/regulations) ─────────────

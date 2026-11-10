@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { checksApi, validateUploadFile } from '@/api'
 import type { BidTaskOut } from '@/api/types'
@@ -81,26 +81,62 @@ function formatDurationMs(ms?: number | null): string {
   return remSec > 0 ? `${mins}分${remSec}秒` : `${mins}分`
 }
 
+const nowTick = ref<number>(Date.now())
+let tickTimer: ReturnType<typeof setInterval> | null = null
+
+function parseNaiveUtcMs(isoStr?: string | null): number | null {
+  if (!isoStr) return null
+  const normalized = isoStr.endsWith('Z') || isoStr.includes('+') ? isoStr : `${isoStr}Z`
+  const ms = new Date(normalized).getTime()
+  return Number.isFinite(ms) ? ms : null
+}
+
+function formatLiveStopwatch(elapsedMs: number): string {
+  const totalSec = Math.max(0, Math.floor(elapsedMs / 1000))
+  const mins = String(Math.floor(totalSec / 60)).padStart(2, '0')
+  const secs = String(totalSec % 60).padStart(2, '0')
+  return `已耗时 ${mins}:${secs}`
+}
+
 /**
- * 仅对终态任务（delivered / failed / need_manual）返回总耗时文案，运行中或未启动任务不显示
+ * E19 §2 Commit1.4：在途任务（extracting/checking/grading）实时跳秒；终态任务回落显示 E11 真实总耗时
  */
 function getTerminalDurationLabel(item: BidTaskOut): string {
+  const ext = item as TaskWithDuration
+  if (['extracting', 'checking', 'grading'].includes(item.status)) {
+    const startMs = parseNaiveUtcMs(ext.started_at || ext.updated_at || ext.created_at)
+    if (startMs !== null) {
+      return formatLiveStopwatch(Math.max(0, nowTick.value - startMs))
+    }
+    return ''
+  }
   if (!['delivered', 'failed', 'need_manual'].includes(item.status)) {
     return ''
   }
-  const ext = item as TaskWithDuration
   const totalMs = ext.duration?.total_ms
   if (typeof totalMs === 'number' && totalMs >= 0) {
     return formatDurationMs(totalMs)
   }
-  if (ext.started_at && ext.finished_at) {
-    const diff = new Date(ext.finished_at).getTime() - new Date(ext.started_at).getTime()
-    if (Number.isFinite(diff) && diff >= 0) {
-      return formatDurationMs(diff)
-    }
+  const sMs = parseNaiveUtcMs(ext.started_at)
+  const fMs = parseNaiveUtcMs(ext.finished_at)
+  if (sMs !== null && fMs !== null && fMs >= sMs) {
+    return formatDurationMs(fMs - sMs)
   }
   return ''
 }
+
+onMounted(() => {
+  tickTimer = setInterval(() => {
+    nowTick.value = Date.now()
+  }, 1000)
+})
+
+onBeforeUnmount(() => {
+  if (tickTimer) {
+    clearInterval(tickTimer)
+    tickTimer = null
+  }
+})
 
 function openCreateModal(): void {
   tenderFile.value = null

@@ -159,6 +159,7 @@ export const extractApi = {
     fd.append('file', file, file.name)
     return post<ExtractChecklistOut>('/extract', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 600000, // E19：F1 大标书 LLM 结构化提取单独放宽至 10 分钟（600000ms），其余 API 保持 3 分钟
     })
   },
 }

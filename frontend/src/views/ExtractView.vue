@@ -18,7 +18,14 @@ const loading = ref(false)
 const activeTab = ref<'marked' | 'wording' | 'qual_comp' | 'scoring'>('marked')
 const kindFilter = ref<'ALL' | 'requirement' | 'non_req'>('ALL')
 const result = ref<ExtractChecklistOut | null>(null)
-const selectedFile = ref<File | null>(null)
+
+// E19：支持点击/拖拽多文件排队依次提取
+const fileInputRef = ref<HTMLInputElement | null>(null)
+const isDragOver = ref(false)
+const pendingFiles = ref<File[]>([])
+const queueTotal = ref(0)
+const queueDone = ref(0)
+const currentExtractingName = ref('')
 
 interface ExtractHistoryItem {
   id: string
@@ -26,12 +33,21 @@ interface ExtractHistoryItem {
   data: ExtractChecklistOut
 }
 
+const MAX_HISTORY_ITEMS = 20
 const historyList = ref<ExtractHistoryItem[]>([])
 const activeHistoryId = ref<string>('')
 
 interface CachedExtractPayload {
   username: string
   data: ExtractChecklistOut
+}
+
+/**
+ * E19 §2 Commit1.1：使用浏览器本地时区格式化当前时间（YYYY-MM-DD HH:mm），严禁 toISOString 慢 8 小时
+ */
+function formatLocalNowStr(d = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 function getHistoryStorageKey(): string {
@@ -55,17 +71,20 @@ function loadHistoryFromStorage(): void {
 
 function persistHistoryToStorage(): void {
   try {
-    localStorage.setItem(getHistoryStorageKey(), JSON.stringify(historyList.value.slice(0, 8)))
+    localStorage.setItem(
+      getHistoryStorageKey(),
+      JSON.stringify(historyList.value.slice(0, MAX_HISTORY_ITEMS)),
+    )
   } catch {
     // ignore storage quota errors
   }
 }
 
 function pushToHistory(data: ExtractChecklistOut): void {
-  const nowStr = new Date().toISOString().slice(0, 16).replace('T', ' ')
+  const nowStr = formatLocalNowStr()
   const id = `${data.filename}_${Date.now()}`
   const filtered = historyList.value.filter((h) => h.data.filename !== data.filename)
-  historyList.value = [{ id, createdAt: nowStr, data }, ...filtered].slice(0, 8)
+  historyList.value = [{ id, createdAt: nowStr, data }, ...filtered].slice(0, MAX_HISTORY_ITEMS)
   activeHistoryId.value = id
   persistHistoryToStorage()
 }
@@ -155,39 +174,100 @@ function restoreFromSessionStorage(): void {
 
 function handleAuthChanged(): void {
   result.value = null
-  selectedFile.value = null
+  pendingFiles.value = []
   historyList.value = []
   activeHistoryId.value = ''
   loadHistoryFromStorage()
 }
 
-function onFileChange(ev: Event): void {
-  const input = ev.target as HTMLInputElement
-  const f = input.files?.[0]
-  if (!f) return
-  const check = validateUploadFile(f)
-  if (!check.valid) {
-    ElMessage.warning(check.message)
-    input.value = ''
-    return
-  }
-  selectedFile.value = f
+function triggerFilePicker(): void {
+  if (loading.value) return
+  fileInputRef.value?.click()
 }
 
+function addFilesToQueue(fileList: FileList | File[]): void {
+  const incoming = Array.from(fileList || [])
+  if (incoming.length === 0) return
+  const validOnes: File[] = []
+  for (const f of incoming) {
+    const check = validateUploadFile(f)
+    if (!check.valid) {
+      ElMessage.warning(check.message)
+      continue
+    }
+    if (!pendingFiles.value.some((p) => p.name === f.name && p.size === f.size)) {
+      validOnes.push(f)
+    }
+  }
+  if (validOnes.length > 0) {
+    pendingFiles.value = [...pendingFiles.value, ...validOnes]
+  }
+}
+
+function onFileChange(ev: Event): void {
+  const input = ev.target as HTMLInputElement
+  if (input.files && input.files.length > 0) {
+    addFilesToQueue(input.files)
+  }
+  input.value = ''
+}
+
+function onDropFiles(ev: DragEvent): void {
+  isDragOver.value = false
+  if (loading.value) return
+  if (ev.dataTransfer?.files && ev.dataTransfer.files.length > 0) {
+    addFilesToQueue(ev.dataTransfer.files)
+  }
+}
+
+function removePendingFile(idx: number): void {
+  if (loading.value) return
+  pendingFiles.value.splice(idx, 1)
+}
+
+const queueProgressPct = computed<number>(() => {
+  if (!loading.value || queueTotal.value <= 0) return 0
+  return Math.min(95, Math.max(12, Math.round(((queueDone.value + 0.5) / queueTotal.value) * 100)))
+})
+
 async function handleRunExtract(): Promise<void> {
-  if (!selectedFile.value) {
-    ElMessage.warning('请先选择待提取的招标文件（.docx / .pdf / .txt）')
+  if (pendingFiles.value.length === 0) {
+    ElMessage.warning('请先点击或拖拽选择待提取的招标文件（支持多选 .docx / .pdf / .txt）')
     return
   }
   loading.value = true
+  queueTotal.value = pendingFiles.value.length
+  queueDone.value = 0
+  let successCount = 0
+
   try {
-    const extracted = await extractApi.extract(selectedFile.value)
-    result.value = extracted
-    saveToSessionStorage(extracted)
-    pushToHistory(extracted)
-    ElMessage.success(`成功提取「${extracted.filename}」四张必审红线清单`)
+    while (pendingFiles.value.length > 0) {
+      const nextFile = pendingFiles.value[0]
+      if (!nextFile) break
+      currentExtractingName.value = nextFile.name
+      try {
+        const extracted = await extractApi.extract(nextFile)
+        result.value = extracted
+        saveToSessionStorage(extracted)
+        pushToHistory(extracted)
+        successCount += 1
+      } catch {
+        // 单文件失败由全局拦截器提示，继续队列后续文件
+      } finally {
+        pendingFiles.value.shift()
+        queueDone.value += 1
+      }
+    }
+    if (successCount > 0) {
+      ElMessage.success(
+        successCount === 1
+          ? `成功提取「${result.value?.filename}」四张必审红线清单`
+          : `批量提取完成：成功提取 ${successCount} 份招标文件`,
+      )
+    }
   } finally {
     loading.value = false
+    currentExtractingName.value = ''
   }
 }
 
@@ -274,8 +354,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div v-loading="loading" class="extract-view">
-    <!-- 顶部上传与操作面板 -->
+  <!-- E19：移除根容器整页 v-loading，改为上传卡内部局部进度动效，提取期间历史列表与下方清单可正常浏览滚动 -->
+  <div class="extract-view">
     <section class="bg-panel ext-upload-bar">
       <div class="eu-left">
         <div class="eu-tag">F1 · 招标红线与 ★/▲ 强制条款提取器</div>
@@ -287,15 +367,77 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="eu-right">
-        <input
-          type="file"
-          accept=".docx,.pdf,.txt"
-          class="ext-file-input"
-          @change="onFileChange"
-        />
-        <el-button type="primary" :loading="loading" @click="handleRunExtract">
-          立即提取四张清单
+        <!-- E19：点击/拖拽一体化虚线上传卡片（支持一次多选/拖入多个标段文件排队提取） -->
+        <div
+          class="ext-dropzone"
+          :class="{ 'is-dragover': isDragOver, 'is-disabled': loading }"
+          @click="triggerFilePicker"
+          @dragover.prevent="isDragOver = true"
+          @dragleave.prevent="isDragOver = false"
+          @drop.prevent="onDropFiles"
+        >
+          <input
+            ref="fileInputRef"
+            type="file"
+            multiple
+            accept=".docx,.pdf,.txt"
+            style="display: none"
+            @change="onFileChange"
+          />
+          <div class="dz-main-txt">
+            点击或将招标文件拖拽至此区域（支持多文件批量排队）
+          </div>
+          <div class="dz-sub-txt">
+            支持 .docx / .pdf / .txt，单文件 ≤ 100MB
+          </div>
+        </div>
+
+        <el-button
+          type="primary"
+          size="large"
+          :loading="loading"
+          :disabled="pendingFiles.length === 0"
+          @click="handleRunExtract"
+        >
+          {{
+            loading
+              ? `正在提取 (${queueDone + 1}/${queueTotal})…`
+              : `立即提取四张清单${pendingFiles.length > 0 ? ` (${pendingFiles.length})` : ''}`
+          }}
         </el-button>
+      </div>
+
+      <!-- 待提取文件队列与局部提取进度条 -->
+      <div v-if="pendingFiles.length > 0 || loading" class="eu-queue-strip">
+        <div v-if="loading" class="eu-progress-box">
+          <div class="eup-head">
+            <span class="eup-pulse"></span>
+            <b>正在结构化提取中：{{ currentExtractingName }}</b>
+            <span class="mono-num">（队列进度 {{ queueDone }}/{{ queueTotal }}，大标书约需 1~3 分钟，您可正常浏览下方历史记录）</span>
+          </div>
+          <el-progress :percentage="queueProgressPct" :stroke-width="6" status="warning" />
+        </div>
+
+        <div class="eu-file-tags">
+          <span class="euf-lbl">待提取队列（{{ pendingFiles.length }}）：</span>
+          <span
+            v-for="(f, idx) in pendingFiles"
+            :key="`${f.name}_${f.size}`"
+            class="euf-chip"
+          >
+            <b>{{ f.name }}</b>
+            <span class="mono-num">({{ (f.size / 1024).toFixed(1) }} KB)</span>
+            <button
+              v-if="!loading"
+              type="button"
+              class="euf-rm"
+              title="移出队列"
+              @click.stop="removePendingFile(idx)"
+            >
+              ×
+            </button>
+          </span>
+        </div>
       </div>
     </section>
 
@@ -541,6 +683,11 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
+.eu-left {
+  flex: 1;
+  min-width: 280px;
+}
+
 .eu-tag {
   font-size: 11px;
   font-weight: 800;
@@ -563,12 +710,109 @@ onBeforeUnmount(() => {
 .eu-right {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 14px;
   flex-wrap: wrap;
 }
 
-.ext-file-input {
+.ext-dropzone {
+  min-width: 320px;
+  padding: 12px 18px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-subtle);
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: center;
+}
+
+.ext-dropzone:hover,
+.ext-dropzone.is-dragover {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.ext-dropzone.is-disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.dz-main-txt {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--txt-strong);
+}
+
+.dz-sub-txt {
+  font-size: 11.5px;
+  color: var(--txt-muted);
+  margin-top: 2px;
+}
+
+.eu-queue-strip {
+  width: 100%;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-line);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.eu-progress-box {
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.eup-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 12.5px;
+  color: #92400e;
+}
+
+.eup-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #d97706;
+  box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.25);
+}
+
+.eu-file-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.euf-lbl {
+  font-weight: 800;
+  color: var(--txt-sec);
+}
+
+.euf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 5px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-line);
+}
+
+.euf-rm {
+  border: none;
+  background: transparent;
+  color: var(--sev-error);
+  font-weight: 900;
+  cursor: pointer;
+  padding: 0 2px;
 }
 
 .ext-history-bar {

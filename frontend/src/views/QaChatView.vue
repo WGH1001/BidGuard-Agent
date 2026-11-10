@@ -27,6 +27,7 @@ function resetQaModuleCache(): void {
 </script>
 
 <script setup lang="ts">
+import type { ReasoningEffortLevel } from '@/api/types'
 import { computed, onActivated, onBeforeUnmount, onMounted, ref as localRef } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
@@ -55,6 +56,20 @@ const PRESET_QUESTIONS = [
   '本项目最高投标限价是多少？我方总报价是多少？',
   '招标文件中带 ★ 号的强制性技术要求有哪些？',
 ]
+
+const EFFORT_STORAGE_KEY = 'bidguard_qa_reasoning_effort_v1'
+const reasoningEffort = localRef<ReasoningEffortLevel>(
+  (localStorage.getItem(EFFORT_STORAGE_KEY) as ReasoningEffortLevel) || 'medium',
+)
+
+function setReasoningEffort(level: ReasoningEffortLevel): void {
+  reasoningEffort.value = level
+  try {
+    localStorage.setItem(EFFORT_STORAGE_KEY, level)
+  } catch {
+    // ignore storage errors
+  }
+}
 
 const activeSession = computed<QaSessionOut | null>(
   () => sessions.value.find((s) => s.id === activeSessionId.value) || null,
@@ -204,6 +219,7 @@ async function handleSendQuestion(question: string): Promise<void> {
     const res = await qaApi.ask(targetSessionId, {
       question,
       max_rounds: 6,
+      reasoning_effort: reasoningEffort.value,
     })
     const lastIdx = messages.value.length - 1
     if (lastIdx >= 0 && messages.value[lastIdx].role === 'assistant') {
@@ -327,6 +343,35 @@ onBeforeUnmount(() => {
             所有原文摘录强制通过 verify_quote 校验。
           </p>
         </div>
+
+        <!-- E19：三挡思考深度切换器（极速=low / 均衡=medium / 深度=high，显式传参拉开推理深度） -->
+        <div class="effort-switch" title="切换大模型 ReAct 推理思考深度">
+          <span class="es-lbl">推理深度：</span>
+          <button
+            type="button"
+            class="es-btn"
+            :class="{ active: reasoningEffort === 'low' }"
+            @click="setReasoningEffort('low')"
+          >
+            ⚡ 极速
+          </button>
+          <button
+            type="button"
+            class="es-btn"
+            :class="{ active: reasoningEffort === 'medium' }"
+            @click="setReasoningEffort('medium')"
+          >
+            ⚖ 均衡
+          </button>
+          <button
+            type="button"
+            class="es-btn"
+            :class="{ active: reasoningEffort === 'high' }"
+            @click="setReasoningEffort('high')"
+          >
+            🧠 深度
+          </button>
+        </div>
       </div>
 
       <div class="qst-body">
@@ -449,6 +494,43 @@ onBeforeUnmount(() => {
 .qst-header {
   padding: 16px 22px;
   border-bottom: 1px solid var(--border-line);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.effort-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-subtle);
+  padding: 4px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--border-line);
+}
+
+.es-lbl {
+  font-size: 11.5px;
+  font-weight: 800;
+  color: var(--txt-sec);
+}
+
+.es-btn {
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 3px 9px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--txt-sec);
+  cursor: pointer;
+}
+
+.es-btn.active {
+  background: var(--brand);
+  color: #ffffff;
 }
 
 .qst-header h2 {
