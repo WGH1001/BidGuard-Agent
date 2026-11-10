@@ -280,14 +280,16 @@ def locate_keyword_sections(text: str, keywords: tuple[str, ...],
 
 
 def build_review_checklist(file_path: str) -> dict:
-    """对一份招标文件跑确定性层全流程，汇总四类候选并附带真实 PDF 页码（docx 为 None）。"""
+    """对一份招标文件跑确定性层全流程，汇总四类候选并附带双轨页码（PDF 印刷/物理页码 + docx 估算页码）。"""
+    from core.response_checker import build_unified_page_context, resolve_unified_page
+
     doc = load_document(file_path)
     text = doc.text
-    page_spans = build_pdf_page_spans(file_path)
+    page_ctx = build_unified_page_context(file_path)
 
     def _attach_pages(items: list[dict]) -> list[dict]:
         for it in items:
-            it['page'] = offset_to_page(it.get('start'), page_spans)
+            it['page'] = resolve_unified_page(it.get('start'), page_ctx)[0]
         return items
 
     chapters = _attach_pages(locate_chapters(text))

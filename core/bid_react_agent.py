@@ -1,7 +1,7 @@
 ﻿# -*- coding: utf-8 -*-
-"""F7 标书专家 ReAct 追问引擎（★大模型③）—— 跨双书工具检索与溯源问答（E2 混合检索 + E4 第6工具 cite_regulation）。
+"""F7 标书专家 ReAct 追问引擎（★大模型③）—— 跨双书工具检索与溯源问答（E2 混合检索 + E4 第6工具 cite_regulation + E18 双轨页码统一）。
 
-模块定位（对应 PRD-02 §7 F7、E2 任务卡 §2.4 与 E4 任务卡 §1）：
+模块定位（对应 PRD-02 §7 F7、E2 任务卡 §2.4、E4 任务卡 §1 与 E18 双轨页码大一统）：
 1. 工具层（共 6 组确定性/混合检索工具函数，既有 5 工具签名一字不变）：
    - search_tender(keyword, ...) / search_bid(keyword, ...)：双书检索；
    - locate_chapter(text, chapter_title)：章节定位；
@@ -23,6 +23,7 @@ from core.price_sandbox import PriceSandbox
 from core.qualification_scanner import scan_qualifications
 from core.quote_verifier import verify_quote
 from core.regulation_library import cite_regulation as _lib_cite_regulation
+from core.response_checker import build_unified_page_context, resolve_unified_page
 from core.tender_extractor import locate_chapters, locate_keyword_sections
 
 _SEARCH_WINDOW = 200
@@ -79,35 +80,27 @@ def _parse_llm_json(content: str) -> Optional[dict]:
         return None
 
 
-def _build_pdf_page_spans(file_path: Optional[str | Path]) -> list[tuple[int, int, int]]:
-    """PDF 文件用 pymupdf 计算每页字符偏移区间 (start, end, page_no)；docx 返回空列表（页码置 None）。"""
-    if not file_path:
-        return []
-    path = Path(file_path)
-    if not path.exists() or path.suffix.lower() != '.pdf':
-        return []
-    try:
-        import pymupdf
-        spans: list[tuple[int, int, int]] = []
-        cursor = 0
-        with pymupdf.open(str(path)) as doc:
-            for idx, page in enumerate(doc):
-                ptxt = page.get_text()
-                end = cursor + len(ptxt)
-                spans.append((cursor, end, idx + 1))
-                cursor = end + 1
-        return spans
-    except Exception:
-        return []
-
-
 def _offset_to_page(offset: Optional[int], page_spans: list[tuple[int, int, int]]) -> Optional[int]:
+    """向后兼容辅助函数：当调用方直接传入旧版 [(start, end, page_no)] 列表时换算页码。"""
     if offset is None or offset < 0 or not page_spans:
         return None
     for lo, hi, pno in page_spans:
         if lo <= offset <= hi:
             return pno
     return page_spans[-1][2] if offset >= page_spans[-1][0] else None
+
+
+def _resolve_page_adaptive(
+    offset: Optional[int],
+    ctx_or_spans: Optional[dict[str, Any] | list[tuple[int, int, int]]],
+) -> Optional[int]:
+    """E18 自适应页码解析：
+    - 若传入 unified page context (dict)，调用 resolve_unified_page(offset, ctx)[0]（支持 PDF + docx 双轨页码）；
+    - 若传入旧版 page_spans (list)，调用 _offset_to_page(offset, spans) 确保老单测 100% 零回归。
+    """
+    if isinstance(ctx_or_spans, dict):
+        return resolve_unified_page(offset, ctx_or_spans)[0]
+    return _offset_to_page(offset, ctx_or_spans or [])
 
 
 def _extract_keywords_from_question(question: str) -> list[str]:
@@ -128,10 +121,10 @@ def _search_text_windows(
     keyword: str,
     source_label: str,
     window: int = _SEARCH_WINDOW,
-    page_spans: Optional[list[tuple[int, int, int]]] = None,
+    page_spans: Optional[list[tuple[int, int, int]] | dict[str, Any]] = None,
     client: Any = None,
 ) -> list[dict[str, Any]]:
-    """在文本中检索关键词，返回 ±200 字符窗口、字符偏移与页码。"""
+    """在文本中检索关键词，返回 ±200 字符窗口、字符偏移与页码（自适应兼容 unified_ctx 字典与旧版 page_spans 列表）。"""
     if not text or not keyword:
         return []
 
@@ -145,7 +138,7 @@ def _search_text_windows(
 
     hits: list[dict[str, Any]] = []
     seen_offsets: list[int] = []
-    spans = page_spans or []
+    ctx_or_spans = page_spans
 
     for term in search_terms:
         if not term:
@@ -168,7 +161,7 @@ def _search_text_windows(
                     'keyword': term,
                     'quote': snippet,
                     'offset': real_off,
-                    'page': _offset_to_page(idx, spans),
+                    'page': _resolve_page_adaptive(idx, ctx_or_spans),
                 })
             start = idx + len(term)
         if hits:
@@ -190,7 +183,7 @@ def _search_text_windows(
                 'keyword': kw,
                 'quote': h['window'].strip() or h['quote'],
                 'offset': off,
-                'page': _offset_to_page(off, spans),
+                'page': _resolve_page_adaptive(off, ctx_or_spans),
             })
 
     return hits
@@ -202,7 +195,7 @@ def search_tender(
     keyword: str,
     tender_text: str = '',
     window: int = _SEARCH_WINDOW,
-    page_spans: Optional[list[tuple[int, int, int]]] = None,
+    page_spans: Optional[list[tuple[int, int, int]] | dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
     """工具 1a：在招标文件中检索关键词，返回 ±200 字符窗口 + 偏移 + 页码。"""
     return _search_text_windows(tender_text, keyword, 'tender', window=window, page_spans=page_spans)
@@ -212,7 +205,7 @@ def search_bid(
     keyword: str,
     bid_text: str = '',
     window: int = _SEARCH_WINDOW,
-    page_spans: Optional[list[tuple[int, int, int]]] = None,
+    page_spans: Optional[list[tuple[int, int, int]] | dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
     """工具 1b：在投标文件中检索关键词，返回 ±200 字符窗口 + 偏移 + 页码。"""
     return _search_text_windows(bid_text, keyword, 'bid', window=window, page_spans=page_spans)
@@ -295,8 +288,8 @@ def _verify_and_locate_quotes(
     raw_quotes: list[Any],
     tender_text: str,
     bid_text: str,
-    tender_pages: list[tuple[int, int, int]],
-    bid_pages: list[tuple[int, int, int]],
+    tender_pages: Optional[list[tuple[int, int, int]] | dict[str, Any]],
+    bid_pages: Optional[list[tuple[int, int, int]] | dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """对 LLM final 输出的每条 quote 强制执行 verify_quote 溯源。"""
     verified_list: list[dict[str, Any]] = []
@@ -335,7 +328,7 @@ def _verify_and_locate_quotes(
             continue
 
         doc_txt = tender_text if src == 'tender' else bid_text
-        p_spans = tender_pages if src == 'tender' else bid_pages
+        p_ctx_or_spans = tender_pages if src == 'tender' else bid_pages
         off = doc_txt.find(q_str)
         if off < 0:
             head = re.sub(r'\s+', '', q_str)[:8]
@@ -347,7 +340,7 @@ def _verify_and_locate_quotes(
             'source': src,
             'quote': q_str,
             'offset': off,
-            'page': _offset_to_page(off, p_spans),
+            'page': _resolve_page_adaptive(off, p_ctx_or_spans),
             'quote_verified': True,
         })
 
@@ -367,21 +360,21 @@ def ask_bid_expert(
     tender_text = tender_doc.text or ''
     bid_text = bid_doc.text or ''
 
-    tender_pages = _build_pdf_page_spans(tender_path)
-    bid_pages = _build_pdf_page_spans(bid_path)
+    tender_ctx = build_unified_page_context(tender_path)
+    bid_ctx = build_unified_page_context(bid_path)
 
     if client is None:
         keywords = _extract_keywords_from_question(question)
         t_hits: list[dict[str, Any]] = []
         b_hits: list[dict[str, Any]] = []
         for kw in keywords:
-            t_hits.extend(search_tender(kw, tender_text=tender_text, page_spans=tender_pages))
-            b_hits.extend(search_bid(kw, bid_text=bid_text, page_spans=bid_pages))
+            t_hits.extend(search_tender(kw, tender_text=tender_text, page_spans=tender_ctx))
+            b_hits.extend(search_bid(kw, bid_text=bid_text, page_spans=bid_ctx))
 
         if not t_hits and tender_text:
-            t_hits.extend(_search_text_windows(tender_text, question, 'tender', page_spans=tender_pages))
+            t_hits.extend(_search_text_windows(tender_text, question, 'tender', page_spans=tender_ctx))
         if not b_hits and bid_text:
-            b_hits.extend(_search_text_windows(bid_text, question, 'bid', page_spans=bid_pages))
+            b_hits.extend(_search_text_windows(bid_text, question, 'bid', page_spans=bid_ctx))
 
         quotes = []
         for h in (t_hits[:2] + b_hits[:2]):
@@ -463,8 +456,8 @@ def ask_bid_expert(
                 raw_quotes=raw_quotes,
                 tender_text=tender_text,
                 bid_text=bid_text,
-                tender_pages=tender_pages,
-                bid_pages=bid_pages,
+                tender_pages=tender_ctx,
+                bid_pages=bid_ctx,
             )
 
             valid_locs = []
@@ -499,7 +492,7 @@ def ask_bid_expert(
         if action == 'search_tender':
             kw = action_input.get('keyword', '') if isinstance(action_input, dict) else str(action_input or '')
             observation = _search_text_windows(
-                tender_text, kw, 'tender', page_spans=tender_pages, client=client
+                tender_text, kw, 'tender', page_spans=tender_ctx, client=client
             )
             for h in observation[:2]:
                 collected_tool_quotes.append({
@@ -509,7 +502,7 @@ def ask_bid_expert(
         elif action == 'search_bid':
             kw = action_input.get('keyword', '') if isinstance(action_input, dict) else str(action_input or '')
             observation = _search_text_windows(
-                bid_text, kw, 'bid', page_spans=bid_pages, client=client
+                bid_text, kw, 'bid', page_spans=bid_ctx, client=client
             )
             for h in observation[:2]:
                 collected_tool_quotes.append({

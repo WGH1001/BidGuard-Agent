@@ -23,8 +23,8 @@ from typing import Any, Optional
 
 from core.parser import parse_document
 from core.quote_verifier import verify_quote
-# E3R 验收修正：页码助手已公共化至 parser（tender_extractor 无此二函数）
-from core.parser import build_pdf_page_spans as _build_pdf_page_spans, offset_to_page as _offset_to_page
+# E18：统一复用 response_checker 的双轨页码上下文入口（同时支持 PDF 与 docx 页码定位）
+from core.response_checker import build_unified_page_context, resolve_unified_page
 
 _WINDOW_BEFORE = 80
 _WINDOW_AFTER = 220
@@ -249,7 +249,7 @@ def scan_rigging_radar(tender_path: str | Path, client=None) -> dict[str, Any]:
     """
     doc = parse_document(str(tender_path))
     full_text = doc.text or ''
-    page_spans = _build_pdf_page_spans(str(tender_path))
+    page_ctx = build_unified_page_context(str(tender_path))
     candidates = extract_suspicious_candidates(full_text)
 
     if client is None:
@@ -259,7 +259,7 @@ def scan_rigging_radar(tender_path: str | Path, client=None) -> dict[str, Any]:
                 suspicious_params.append({
                     'quote': c['quote'],
                     'offset': c['offset'],
-                    'page': _offset_to_page(c['offset'], page_spans),
+                    'page': resolve_unified_page(c['offset'], page_ctx)[0],
                     'exclusive_type': c['exclusive_type'],
                     'confidence': c['confidence'],
                     'reason': _ensure_suspected_prefix(c['reason']),
@@ -318,7 +318,7 @@ def scan_rigging_radar(tender_path: str | Path, client=None) -> dict[str, Any]:
         verified_params.append({
             'quote': llm_quote,
             'offset': real_off,
-            'page': _offset_to_page(real_off, page_spans),
+            'page': resolve_unified_page(real_off, page_ctx)[0],
             'exclusive_type': ex_type,
             'confidence': round(min(max(conf, 0.0), 1.0), 2),
             'reason': reason,
