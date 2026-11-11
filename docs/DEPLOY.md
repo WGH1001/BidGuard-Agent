@@ -17,7 +17,7 @@
 |---|---|---|---|
 | `bidguard-nginx` | `nginx:alpine` | 对外唯一 Web 入口：静态直发 `frontend/dist`（含 SPA 路由回退）+ `/api/` 反代至 `app:8000`（配置 SSE 零缓冲与 `100m` 上传上限） | 宿主机 `${APP_PORT:-8000}:80` |
 | `bidguard-app` | 本地 `Dockerfile` (`python:3.12-slim`) | 核心引擎 F1~F7 + FastAPI **11 组路由** + RapidOCR 离线识别 + 后台核验线程池 | 内部 `8000`；挂载 `app-data:/app/data`、`app-output:/app/output`、`./config:/app/config:ro`、`./data/corpus/regulations:/app/data/corpus/regulations:ro` |
-| `bidguard-postgres` | `postgres:16-alpine` | 生产关系型主库（存储 **11 张核心业务表**：租户、用户、任务、风险项、规则、证照、会话、审计、模型配置、法规主表、法规条文表） | 绑定回环 `127.0.0.1:5432:5432`；挂载 `pgdata:/var/lib/postgresql/data` |
+| `bidguard-postgres` | `postgres:16-alpine` | 生产关系型主库（存储 **11 张核心业务表**：租户、用户、任务、风险项、规则、证照、会话、审计、模型配置、法规主表、法规条文表） | 绑定回环 `127.0.0.1:${POSTGRES_PORT:-15432}:5432`（与老项目 `5432` 隔离，支持双项目同机双开）；挂载 `pgdata:/var/lib/postgresql/data` |
 | `bidguard-redis` | `redis:7-alpine` | 预留扩展容器（开启 AOF 持久化 `--appendonly yes`） | 内部 `6379`；挂载 `redis-data:/data` |
 
 ---
@@ -265,9 +265,9 @@ docker compose up -d --build app nginx
 docker compose ps
 ```
 
-> **提示**：如想在宿主机用 `.venv` 直接对容器内的 PostgreSQL 跑全量回归测试（`postgres` 容器映射了 `127.0.0.1:5432`）：
+> **提示**：如想在宿主机用 `.venv` 或 DBeaver/Navicat 直接连接容器内的 PostgreSQL（`postgres` 容器默认映射宿主机 `127.0.0.1:15432`，容器内 `app -> postgres:5432` 走虚拟内网不变）：
 > ```powershell
-> $env:DATABASE_URL="postgresql+psycopg2://bidguard:ChangeMe_2026_Str0ng!@127.0.0.1:5432/bidguard"
+> $env:DATABASE_URL="postgresql+psycopg2://bidguard:ChangeMe_2026_Str0ng!@127.0.0.1:15432/bidguard"
 > .venv\Scripts\python.exe -m pytest tests/ -q
 > ```
 
@@ -305,8 +305,8 @@ docker compose ps
    - 当 `.env` 配置了 `DEBUG=0` 时，必须把 `AUTH_SECRET` 修改为非开发默认值的强随机串。
 4. **启动报 `环境中未找到配置: private`**：
    - `config/models.yaml` 内网网关档位名称为 `prod`，请将 `.env` 中的 `MODEL_ENV` 改为 `prod`。
-5. **端口 `8000` 或 `5432` 被占用（`bind: address already in use`）**：
-   - 停止本机残留 `uvicorn` 或本地 PostgreSQL 服务；或在 `.env` 中将 `APP_PORT` 改为如 `8080`。
+5. **端口 `8000` 或 `15432` 被占用（`bind: address already in use`）与多项目同机双开**：
+   - 本项目默认使用 `APP_PORT=8000` 与 `POSTGRES_PORT=15432`，已与 `Contract-Review-Agent`（`8080` + `5432`）彻底错开，两个项目的 Docker 容器可随时同时启动并行运行；若仍冲突，可在 `.env` 中自定义 `APP_PORT` 与 `POSTGRES_PORT`。
 6. **体检进度条长期不动，直到最后突然跳 100%**：
    - 反向代理开启了缓冲。核查 Nginx `/api/` 与 `/api/checks/[0-9]+/stream` 均已配 `proxy_buffering off;`、`proxy_cache off;`、`proxy_read_timeout 3600s;`，并重启 nginx。
 7. **修改 `.env` 中的 `POSTGRES_PASSWORD` 后 `app` 报 `password authentication failed`**：

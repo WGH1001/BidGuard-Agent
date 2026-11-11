@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { checksApi, deviationApi } from '@/api'
-import type { BidTaskOut, DeviationExportOut } from '@/api/types'
+import type { BidTaskOut, DeviationExportOut, DeviationRowItem } from '@/api/types'
 import { useAppStore } from '@/stores/app'
 
 const route = useRoute()
 const appStore = useAppStore()
+
+type DeviationFilterKind = 'ALL' | 'no_deviation' | 'negative' | 'missing' | 'contradiction'
 
 const loadingTasks = ref(false)
 const generating = ref(false)
@@ -16,6 +18,31 @@ const downloading = ref(false)
 const tasks = ref<BidTaskOut[]>([])
 const selectedTaskId = ref<number | null>(null)
 const devResult = ref<DeviationExportOut | null>(null)
+const statusFilter = ref<DeviationFilterKind>('ALL')
+
+/**
+ * E20 子项 1：按选定种类过滤预览行（仅前端视图过滤，不影响 Word 导出全量行与 F4 后端契约）
+ */
+const filteredRows = computed<DeviationRowItem[]>(() => {
+  const rows = devResult.value?.rows || []
+  if (statusFilter.value === 'no_deviation') {
+    return rows.filter((r) => !r.is_negative)
+  }
+  if (statusFilter.value === 'negative') {
+    return rows.filter((r) => Boolean(r.is_negative))
+  }
+  if (statusFilter.value === 'missing') {
+    return rows.filter((r) => r.status === 'MISSING_RESPONSE')
+  }
+  if (statusFilter.value === 'contradiction') {
+    return rows.filter((r) => r.status === 'CONTRADICTION')
+  }
+  return rows
+})
+
+function setStatusFilter(kind: DeviationFilterKind): void {
+  statusFilter.value = kind
+}
 
 async function loadAvailableTasks(): Promise<void> {
   loadingTasks.value = true
@@ -46,6 +73,7 @@ async function handleLoadDeviation(): Promise<void> {
   generating.value = true
   try {
     devResult.value = await deviationApi.get(selectedTaskId.value)
+    statusFilter.value = 'ALL'
   } finally {
     generating.value = false
   }
@@ -60,6 +88,7 @@ async function handleGenerateDeviation(): Promise<void> {
   generating.value = true
   try {
     devResult.value = await deviationApi.generate(selectedTaskId.value)
+    statusFilter.value = 'ALL'
     ElMessage.success(`偏离表生成完成：共对齐 ${devResult.value.total_rows} 条实质性条款`)
   } finally {
     generating.value = false
@@ -133,29 +162,54 @@ onMounted(() => {
     </section>
 
     <template v-if="devResult">
-      <!-- 统计概览卡片（负偏离与漏应答红色高亮） -->
+      <!-- 统计概览卡片（支持点击卡片直接联动筛选对应种类的偏离行） -->
       <div class="dev-stats-grid">
-        <div class="ds-card bg-panel">
+        <div
+          class="ds-card bg-panel clickable-card"
+          :class="{ 'is-active-filter': statusFilter === 'ALL' }"
+          title="点击查看全部实质性条款"
+          @click="setStatusFilter('ALL')"
+        >
           <div class="ds-lbl">核验实质性要求总数</div>
           <div class="ds-val mono-num">{{ devResult.total_rows }}</div>
         </div>
 
-        <div class="ds-card bg-panel ok-card">
+        <div
+          class="ds-card bg-panel ok-card clickable-card"
+          :class="{ 'is-active-filter': statusFilter === 'no_deviation' }"
+          title="点击仅看无偏离（正面响应满足）条款"
+          @click="setStatusFilter('no_deviation')"
+        >
           <div class="ds-lbl">无偏离（正面响应满足）</div>
           <div class="ds-val mono-num ok-txt">{{ devResult.no_deviation_count }}</div>
         </div>
 
-        <div class="ds-card bg-panel err-card">
+        <div
+          class="ds-card bg-panel err-card clickable-card"
+          :class="{ 'is-active-filter': statusFilter === 'negative' }"
+          title="点击仅看全部负偏离条款"
+          @click="setStatusFilter('negative')"
+        >
           <div class="ds-lbl">负偏离总数（高危废标/扣分）</div>
           <div class="ds-val mono-num err-txt">{{ devResult.negative_deviation_count }}</div>
         </div>
 
-        <div class="ds-card bg-panel err-card">
+        <div
+          class="ds-card bg-panel err-card clickable-card"
+          :class="{ 'is-active-filter': statusFilter === 'missing' }"
+          title="点击仅看实质性条款漏应答"
+          @click="setStatusFilter('missing')"
+        >
           <div class="ds-lbl">其中：实质性条款漏应答</div>
           <div class="ds-val mono-num err-txt">{{ devResult.missing_count }}</div>
         </div>
 
-        <div class="ds-card bg-panel warn-card">
+        <div
+          class="ds-card bg-panel warn-card clickable-card"
+          :class="{ 'is-active-filter': statusFilter === 'contradiction' }"
+          title="点击仅看参数响应冲突条款"
+          @click="setStatusFilter('contradiction')"
+        >
           <div class="ds-lbl">其中：参数响应冲突</div>
           <div class="ds-val mono-num warn-txt">{{ devResult.contradiction_count }}</div>
         </div>
@@ -170,8 +224,33 @@ onMounted(() => {
           </span>
         </div>
 
+        <!-- E20 子项 1：偏离种类多维分类筛选栏 -->
+        <div class="dt-filter-bar">
+          <span class="dtf-label">偏离种类筛选：</span>
+          <el-radio-group v-model="statusFilter" size="small">
+            <el-radio-button value="ALL">
+              全部 ({{ devResult.rows.length }})
+            </el-radio-button>
+            <el-radio-button value="no_deviation">
+              无偏离 ({{ devResult.no_deviation_count }})
+            </el-radio-button>
+            <el-radio-button value="negative">
+              负偏离（全部）({{ devResult.negative_deviation_count }})
+            </el-radio-button>
+            <el-radio-button value="missing">
+              漏应答 ({{ devResult.missing_count }})
+            </el-radio-button>
+            <el-radio-button value="contradiction">
+              参数冲突 ({{ devResult.contradiction_count }})
+            </el-radio-button>
+          </el-radio-group>
+          <span class="dtf-count mono-num">
+            当前显示 {{ filteredRows.length }} / {{ devResult.rows.length }} 条
+          </span>
+        </div>
+
         <el-table
-          :data="devResult.rows"
+          :data="filteredRows"
           border
           :row-class-name="rowClassName"
           style="width: 100%"
@@ -262,6 +341,20 @@ onMounted(() => {
 .ds-card {
   padding: 16px 18px;
   border-top: 3px solid var(--brand);
+  transition: all 0.15s ease;
+}
+
+.clickable-card {
+  cursor: pointer;
+}
+
+.clickable-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
+}
+
+.ds-card.is-active-filter {
+  box-shadow: 0 0 0 2px var(--brand);
 }
 
 .ds-card.ok-card {
@@ -312,7 +405,7 @@ onMounted(() => {
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
 .dt-hd h3 {
@@ -324,6 +417,31 @@ onMounted(() => {
 .dt-note {
   font-size: 12px;
   color: var(--txt-muted);
+}
+
+.dt-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-line);
+}
+
+.dtf-label {
+  font-size: 12.5px;
+  font-weight: 800;
+  color: var(--txt-strong);
+}
+
+.dtf-count {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--txt-sec);
 }
 
 .dev-neg-text {

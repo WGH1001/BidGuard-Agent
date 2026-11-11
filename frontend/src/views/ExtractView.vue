@@ -69,14 +69,25 @@ function loadHistoryFromStorage(): void {
   }
 }
 
+/**
+ * E20 子项 3.2：localStorage 5MB 配额超限 LRU 淘汰重试——
+ * 当多份特大标书 JSON 累计超浏览器配额抛 QuotaExceededError 时，循环弹出尾部最早的旧记录重试，
+ * 确保最新提取出的成果 100% 落盘不丢失。
+ */
 function persistHistoryToStorage(): void {
-  try {
-    localStorage.setItem(
-      getHistoryStorageKey(),
-      JSON.stringify(historyList.value.slice(0, MAX_HISTORY_ITEMS)),
-    )
-  } catch {
-    // ignore storage quota errors
+  const key = getHistoryStorageKey()
+  const trimmed = historyList.value.slice(0, MAX_HISTORY_ITEMS)
+  while (trimmed.length > 0) {
+    try {
+      localStorage.setItem(key, JSON.stringify(trimmed))
+      historyList.value = trimmed
+      return
+    } catch {
+      if (trimmed.length <= 1) {
+        break
+      }
+      trimmed.pop()
+    }
   }
 }
 
@@ -93,6 +104,13 @@ function handleSelectHistoryItem(item: ExtractHistoryItem): void {
   activeHistoryId.value = item.id
   result.value = item.data
   saveToSessionStorage(item.data)
+}
+
+function handleQuickSelectById(id: string): void {
+  const found = historyList.value.find((h) => h.id === id)
+  if (found) {
+    handleSelectHistoryItem(found)
+  }
 }
 
 async function handleDeleteHistoryItem(item: ExtractHistoryItem): Promise<void> {
@@ -441,7 +459,7 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <!-- F1 提取历史记录条（支持点击切换查看 + 二次确认删除） -->
+    <!-- E20 子项 3.1：F1 提取历史单行横向滚动芯片条 + 右侧可搜索下拉切换器（绝不折行撑破页面） -->
     <section v-if="historyList.length > 0" class="bg-panel ext-history-bar">
       <div class="ehb-label">近期提取记录（{{ historyList.length }}）：</div>
       <div class="ehb-chips">
@@ -467,6 +485,22 @@ onBeforeUnmount(() => {
           </el-button>
         </div>
       </div>
+
+      <el-select
+        v-model="activeHistoryId"
+        filterable
+        size="small"
+        placeholder="搜索切换历史记录…"
+        class="ehb-quick-select"
+        @change="handleQuickSelectById"
+      >
+        <el-option
+          v-for="item in historyList"
+          :key="`opt_${item.id}`"
+          :value="item.id"
+          :label="`${item.data.filename} (${item.createdAt})`"
+        />
+      </el-select>
     </section>
 
     <!-- 0-Token 确定性模式提示横幅（当 llm_status === 'skipped' 时显示） -->
@@ -820,7 +854,8 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow: hidden;
 }
 
 .ehb-label {
@@ -831,13 +866,18 @@ onBeforeUnmount(() => {
 }
 
 .ehb-chips {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding-bottom: 2px;
 }
 
 .ehb-chip {
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -848,6 +888,11 @@ onBeforeUnmount(() => {
   cursor: pointer;
   font-size: 12px;
   transition: all 0.15s;
+}
+
+.ehb-quick-select {
+  width: 220px;
+  flex-shrink: 0;
 }
 
 .ehb-chip:hover {

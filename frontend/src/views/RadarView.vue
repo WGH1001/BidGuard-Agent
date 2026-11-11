@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { radarApi, validateUploadFile } from '@/api'
@@ -11,16 +11,38 @@ defineOptions({ name: 'RadarView' })
 const authStore = useAuthStore()
 
 const loading = ref(false)
+const detailLoading = ref(false)
 const listLoading = ref(false)
 const historyTasks = ref<BidTaskOut[]>([])
-const tenderFile = ref<File | null>(null)
-const customTitle = ref('')
-const lastAutoTitle = ref('')
 const scanResult = ref<RadarScanOut | null>(null)
+
+// E20 子项 2：点击/拖拽一体化多文件排队扫描状态（移除易误导的旧任务名文本框）
+const fileInputRef = ref<HTMLInputElement | null>(null)
+const isDragOver = ref(false)
+const pendingFiles = ref<File[]>([])
+const queueTotal = ref(0)
+const queueDone = ref(0)
+const currentScanningName = ref('')
 
 interface CachedRadarPayload {
   username: string
   data: RadarScanOut
+}
+
+/**
+ * E20 子项 2.3：将后端返回的 naive UTC 时间字符串规范化补 'Z' 后转为浏览器本地时区 YYYY-MM-DD HH:mm
+ */
+function formatLocalCreatedAt(isoStr?: string | null): string {
+  if (!isoStr) return '—'
+  const raw = String(isoStr).trim()
+  if (!raw) return '—'
+  const normalized = raw.endsWith('Z') || raw.includes('+') ? raw : `${raw}Z`
+  const dt = new Date(normalized)
+  if (Number.isNaN(dt.getTime())) {
+    return raw.slice(0, 16).replace('T', ' ')
+  }
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}`
 }
 
 function saveToSessionStorage(data: RadarScanOut): void {
@@ -44,7 +66,6 @@ function restoreFromSessionStorage(): void {
     const curUser = authStore.user?.username || ''
     if (parsed && parsed.data && (!parsed.username || parsed.username === curUser)) {
       scanResult.value = parsed.data
-      customTitle.value = parsed.data.title || ''
     } else {
       sessionStorage.removeItem(RADAR_CACHE_KEY)
     }
@@ -81,13 +102,13 @@ async function loadHistoryList(autoSelectFirst = false): Promise<void> {
 }
 
 async function handleSelectHistory(task: BidTaskOut): Promise<void> {
-  loading.value = true
+  detailLoading.value = true
   try {
     const res = await radarApi.detail(task.id)
     scanResult.value = res
     saveToSessionStorage(res)
   } finally {
-    loading.value = false
+    detailLoading.value = false
   }
 }
 
@@ -121,45 +142,98 @@ async function handleDeleteHistory(task: BidTaskOut): Promise<void> {
 function handleAuthChanged(): void {
   scanResult.value = null
   historyTasks.value = []
-  tenderFile.value = null
-  customTitle.value = ''
-  lastAutoTitle.value = ''
+  pendingFiles.value = []
+}
+
+function triggerFilePicker(): void {
+  if (loading.value) return
+  fileInputRef.value?.click()
+}
+
+function addFilesToQueue(fileList: FileList | File[]): void {
+  const incoming = Array.from(fileList || [])
+  if (incoming.length === 0) return
+  const validOnes: File[] = []
+  for (const f of incoming) {
+    const check = validateUploadFile(f)
+    if (!check.valid) {
+      ElMessage.warning(check.message)
+      continue
+    }
+    if (!pendingFiles.value.some((p) => p.name === f.name && p.size === f.size)) {
+      validOnes.push(f)
+    }
+  }
+  if (validOnes.length > 0) {
+    pendingFiles.value = [...pendingFiles.value, ...validOnes]
+  }
 }
 
 function onPickFile(ev: Event): void {
   const input = ev.target as HTMLInputElement
-  const f = input.files?.[0]
-  if (!f) return
-  const check = validateUploadFile(f)
-  if (!check.valid) {
-    ElMessage.warning(check.message)
-    input.value = ''
-    return
+  if (input.files && input.files.length > 0) {
+    addFilesToQueue(input.files)
   }
-  tenderFile.value = f
-  const autoTitle = `${f.name.replace(/\.[^.]+$/, '')}-投前控标评估`
-  // 标题为空或仍是上一个文件的自动标题（用户未手动定制）时，跟随新文件刷新，
-  // 否则连续扫描多份标书时右侧文本框永远显示第一次的标书名（生产实锤 2026-11-09）
-  if (!customTitle.value.trim() || customTitle.value === lastAutoTitle.value) {
-    customTitle.value = autoTitle
-  }
-  lastAutoTitle.value = autoTitle
+  input.value = ''
 }
 
+function onDropFiles(ev: DragEvent): void {
+  isDragOver.value = false
+  if (loading.value) return
+  if (ev.dataTransfer?.files && ev.dataTransfer.files.length > 0) {
+    addFilesToQueue(ev.dataTransfer.files)
+  }
+}
+
+function removePendingFile(idx: number): void {
+  if (loading.value) return
+  pendingFiles.value.splice(idx, 1)
+}
+
+const queueProgressPct = computed<number>(() => {
+  if (!loading.value || queueTotal.value <= 0) return 0
+  return Math.min(95, Math.max(12, Math.round(((queueDone.value + 0.5) / queueTotal.value) * 100)))
+})
+
 async function handleRunRadar(): Promise<void> {
-  if (!tenderFile.value) {
-    ElMessage.warning('请先选择待扫描的招标文件（.docx / .pdf / .txt）')
+  if (pendingFiles.value.length === 0) {
+    ElMessage.warning('请先点击或拖拽选择待扫描的招标文件（支持多选 .docx / .pdf / .txt）')
     return
   }
   loading.value = true
+  queueTotal.value = pendingFiles.value.length
+  queueDone.value = 0
+  let successCount = 0
+
   try {
-    const res = await radarApi.scan(tenderFile.value, customTitle.value)
-    scanResult.value = res
-    saveToSessionStorage(res)
-    await loadHistoryList(false)
-    ElMessage.success('F6 投前控标雷达扫描完成')
+    while (pendingFiles.value.length > 0) {
+      const nextFile = pendingFiles.value[0]
+      if (!nextFile) break
+      currentScanningName.value = nextFile.name
+      const autoTitle = `${nextFile.name.replace(/\.[^.]+$/, '')}-投前控标评估`
+      try {
+        const res = await radarApi.scan(nextFile, autoTitle)
+        scanResult.value = res
+        saveToSessionStorage(res)
+        successCount += 1
+        await loadHistoryList(false)
+      } catch {
+        // 单文件异常由全局拦截器提示，继续扫描队列后续文件
+      } finally {
+        pendingFiles.value.shift()
+        queueDone.value += 1
+      }
+    }
+    if (successCount > 0) {
+      ElMessage.success(
+        successCount === 1
+          ? `F6 投前控标雷达扫描完成：${scanResult.value?.title}`
+          : `批量控标雷达扫描完成：成功扫描 ${successCount} 份招标文件`,
+      )
+    }
   } finally {
     loading.value = false
+    currentScanningName.value = ''
   }
 }
 
@@ -241,7 +315,7 @@ onBeforeUnmount(() => {
           </div>
           <div class="rri-meta">
             <span>疑似项 {{ item.stats_json?.suspicious_count ?? 0 }} 处</span>
-            <span class="mono-num">{{ (item.created_at || '').slice(0, 16).replace('T', ' ') }}</span>
+            <span class="mono-num">{{ formatLocalCreatedAt(item.created_at) }}</span>
           </div>
         </div>
 
@@ -253,8 +327,8 @@ onBeforeUnmount(() => {
       </div>
     </aside>
 
-    <!-- 右栏：上传面板 + 扫描详情 -->
-    <div v-loading="loading" class="radar-view">
+    <!-- 右栏：上传面板 + 扫描详情（E20：移除右栏整块 v-loading 锁死，改为上传卡内局部进度条） -->
+    <div v-loading="detailLoading" class="radar-view">
       <!-- 顶部上传与扫描触发面板 -->
       <section class="bg-panel radar-upload-card">
         <div class="ru-left">
@@ -267,20 +341,78 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="ru-controls">
-          <input
-            type="file"
-            accept=".docx,.pdf,.txt"
-            class="radar-file-input"
-            @change="onPickFile"
-          />
-          <el-input
-            v-model.trim="customTitle"
-            placeholder="立项评估任务名称（可选）"
-            style="width: 240px"
-          />
-          <el-button type="primary" :loading="loading" @click="handleRunRadar">
-            启动控标雷达扫描
+          <div
+            class="radar-dropzone"
+            :class="{ 'is-dragover': isDragOver, 'is-disabled': loading }"
+            @click="triggerFilePicker"
+            @dragover.prevent="isDragOver = true"
+            @dragleave.prevent="isDragOver = false"
+            @drop.prevent="onDropFiles"
+          >
+            <input
+              ref="fileInputRef"
+              type="file"
+              multiple
+              accept=".docx,.pdf,.txt"
+              style="display: none"
+              @change="onPickFile"
+            />
+            <div class="rdz-main-txt">
+              点击或将招标文件拖拽至此区域（支持多文件批量排队）
+            </div>
+            <div class="rdz-sub-txt">
+              按文件名自动生成评估标题 · 支持 .docx / .pdf / .txt（≤100MB）
+            </div>
+          </div>
+
+          <el-button
+            type="primary"
+            size="large"
+            :loading="loading"
+            :disabled="pendingFiles.length === 0"
+            @click="handleRunRadar"
+          >
+            {{
+              loading
+                ? `正在扫描 (${queueDone + 1}/${queueTotal})…`
+                : `启动控标雷达扫描${pendingFiles.length > 0 ? ` (${pendingFiles.length})` : ''}`
+            }}
           </el-button>
+        </div>
+
+        <!-- 待扫描队列与局部扫描进度动效 -->
+        <div v-if="pendingFiles.length > 0 || loading" class="ru-queue-strip">
+          <div v-if="loading" class="ru-progress-box">
+            <div class="rup-head">
+              <span class="rup-pulse"></span>
+              <b>正在执行控标雷达扫描：{{ currentScanningName }}</b>
+              <span class="mono-num">
+                （队列进度 {{ queueDone }}/{{ queueTotal }}，扫描期间您可随时点击左侧历史记录查阅已扫结果）
+              </span>
+            </div>
+            <el-progress :percentage="queueProgressPct" :stroke-width="6" status="warning" />
+          </div>
+
+          <div class="ru-file-tags">
+            <span class="ruf-lbl">待扫描队列（{{ pendingFiles.length }}）：</span>
+            <span
+              v-for="(f, idx) in pendingFiles"
+              :key="`${f.name}_${f.size}`"
+              class="ruf-chip"
+            >
+              <b>{{ f.name }}</b>
+              <span class="mono-num">({{ (f.size / 1024).toFixed(1) }} KB)</span>
+              <button
+                v-if="!loading"
+                type="button"
+                class="ruf-rm"
+                title="移出队列"
+                @click.stop="removePendingFile(idx)"
+              >
+                ×
+              </button>
+            </span>
+          </div>
         </div>
       </section>
 
@@ -365,7 +497,7 @@ onBeforeUnmount(() => {
       </template>
 
       <div v-else class="bg-panel radar-empty">
-        <el-empty description="请在上方选择招标书启动控标雷达扫描，或在左侧点击历史记录回放" />
+        <el-empty description="请在上方点击或拖拽招标书启动控标雷达扫描，或在左侧点击历史记录回放" />
       </div>
     </div>
   </div>
@@ -512,6 +644,11 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
+.ru-left {
+  flex: 1;
+  min-width: 260px;
+}
+
 .ru-tag {
   font-size: 11px;
   font-weight: 800;
@@ -534,12 +671,109 @@ onBeforeUnmount(() => {
 .ru-controls {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex-wrap: wrap;
 }
 
-.radar-file-input {
+.radar-dropzone {
+  min-width: 310px;
+  padding: 11px 16px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-subtle);
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: center;
+}
+
+.radar-dropzone:hover,
+.radar-dropzone.is-dragover {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.radar-dropzone.is-disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.rdz-main-txt {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--txt-strong);
+}
+
+.rdz-sub-txt {
+  font-size: 11px;
+  color: var(--txt-muted);
+  margin-top: 2px;
+}
+
+.ru-queue-strip {
+  width: 100%;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-line);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ru-progress-box {
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rup-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 12.5px;
+  color: #92400e;
+}
+
+.rup-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #d97706;
+  box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.25);
+}
+
+.ru-file-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.ruf-lbl {
+  font-weight: 800;
+  color: var(--txt-sec);
+}
+
+.ruf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 5px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-line);
+}
+
+.ruf-rm {
+  border: none;
+  background: transparent;
+  color: var(--sev-error);
+  font-weight: 900;
+  cursor: pointer;
+  padding: 0 2px;
 }
 
 .conclusion-banner {
