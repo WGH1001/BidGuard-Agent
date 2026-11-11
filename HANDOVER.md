@@ -54,25 +54,25 @@ BidGuard-Agent/
 ├── core/                                # 19 个模块（F1~F7 + 混合检索 + 法规库，逐项状态见 §3）
 ├── backend/                             # main + models(11表) + schemas + 11 组路由
 ├── frontend/                            # Vue3 + TS：12 个视图全部落地
-├── tests/                               # 24 个测试文件（test_*.py）161 项全绿
+├── tests/                               # 26 个测试文件（test_*.py）166 项全绿
 ├── scripts/                             # build_f1_baseline.py / eval_f1_llm.py
 ├── data/
 │   ├── corpus/m0_samples/               # 11 份语料 + baseline / ground_truth / llm_eval 三本账（§4）
 │   ├── corpus/regulations/              # E4：4 部法律 JSON 种子 + originals/ 原文（含 87 号令扫描 PDF）
 │   └── rules/law_source/                # 4 部法规官方文本
 ├── deploy/nginx/nginx.conf              # 静态直发 + /api/ 反代 SSE 防缓冲三件套
-└── docs/                                # DEPLOY.md / cards/（任务卡归档 B1~E19，共 26 份）/ 待立卡-E1E2升级点定案.md
+└── docs/                                # DEPLOY.md / cards/（任务卡归档 B1~E21，共 28 份）/ 待立卡-E1E2升级点定案.md
 ```
 
 ---
 
-## 2. 当前基线（截至 2026-11-10）
+## 2. 当前基线（截至 2026-11-11）
 
-- **开发阶段**：3 周排期全部完成 + 十九轮增强升级（E1~E19）全量交付，仿真标书 **11/11 验收收官**，前后端体验与 F4 并发提速闭环完成
-- **Git 最新功能 Commit**：`b8f3403`（含后续 F4 降级暴露补强；远端同步状态以 `git log origin/main..HEAD` 实数为准）
-- **测试基线**：**161 项 pytest 全绿（零回归）** + `vue-tsc --noEmit` 零错误 —— 第一验收线已从 60 项演进至 161 项
-- **模型网关基线**：`config/models.yaml` 默认 `default_env: demo`（智谱 `glm-5.3-flash` 直连，`reasoning_effort: low`，`embedding: embedding-3` 已激活 L2 混合检索）；预留 `prod` 内网私有网关（`http://10.0.2.81:3000/v1`，无向量模型自动无感降级 Level 1）
-- **运行环境**：本机开发用项目自带 `.venv`（依赖已全量钉死）；生产走 Docker 四容器（`docker compose up -d --build`，层缓存全热时秒级）
+- **开发阶段**：3 周排期全部完成 + 二十一轮增强升级（E1~E21）全量交付，仿真标书 **11/11 验收收官**，前后端体验、Docker 端口双开共存与 F7 多轮流式问答闭环完成
+- **Git 最新功能 Commit**：`69ad261`（含 E20 `df9f74a`、E21 `69ad261`；远端同步状态以 `git log origin/main..HEAD` 实数为准）
+- **测试基线**：**166 项 pytest 全绿（零回归）** + `vue-tsc --noEmit` 零错误 + `vite build` 成功 —— 第一验收线已演进至 **166 项**
+- **模型网关基线**：`config/models.yaml` 默认 `default_env: demo`（智谱 `glm-5.3-flash` 直连，F7 三挡映射到智谱合法值 `low`/`high`/`max`，`embedding: embedding-3` 已激活 L2 混合检索）；预留 `prod` 内网私有网关（`http://10.0.2.81:3000/v1`，无向量模型自动无感降级 Level 1）
+- **运行环境**：本机开发用项目自带 `.venv`（依赖已全量钉死）；生产走 Docker 四容器（`docker compose up -d --build`，默认宿主机 `APP_PORT=8000` + `POSTGRES_PORT=15432`，与老项目 `8080` + `5432` 并行共存不冲突）
 - **快速验收命令**：
 
 ```powershell
@@ -100,7 +100,7 @@ BidGuard-Agent/
 | 12 | `core/response_checker.py` | **F4 双书勾稽** | ★/▲ 逐条响应核验 + 大模型判定 + 自洽扫描；E6 接入 docx 双轨页码；E5 类名符号动态化；E19 升级“阶段 A 按序预定位 + 阶段 B 仅 `client.chat` 并发”双阶段引擎 | **已验收**（E19 `BIDGUARD_F4_CONCURRENCY` 默认 4，与串行逐字节一致） |
 | 13 | `core/deviation_exporter.py` | **F5 偏离表** | 《技术与商务偏离表.docx》一键生成；E6 位置列升级为"第X页(印刷页Y·估算)"带 @charN 诚实回退 | **已验收** |
 | 14 | `core/rigging_radar.py` | **F6 控标雷达** | 排他性/倾向性控标参数识别（确定性正则 + 大模型④，标注"疑似"）；E18 接入统一双轨页码 | **已验收**（E3R 修复 import；E18 打通 docx 页码） |
-| 15 | `core/bid_react_agent.py` | **F7 专家追问** | 多轮 ReAct 追问；E4 挂载 `cite_regulation` 第 6 工具；E18 兼容双轨页码与 `list \| dict` 传参；E19 支持三挡 `reasoning_effort`（low/medium/high）透传 | **已验收** |
+| 15 | `core/bid_react_agent.py` | **F7 专家追问** | 多轮 ReAct 追问；E4 挂载 `cite_regulation` 第 6 工具；E18 兼容双轨页码与 `list \| dict` 传参；E19 支持三挡 `reasoning_effort`；E21 注入多轮 `history`（最近 6 轮截断+0-Token 逆序回溯）、智谱合法挡位映射（`low/medium/high → low(3轮)/high(4轮)/max(6轮)`）与 `ask_bid_expert_stream` 流式事件引擎 | **已验收**（E21 实测全绿） |
 | 16 | `core/redline.py` | 批注回写 | Word OOXML 批注气泡 + PDF 坐标高亮；**E5 升级**：五级降级定位链（L3 标点归一/L4 逐字符 bbox 归一/L5 置信护栏≥60%且≥8字）、总览页（A4 插入 PDF 首部，全部发现编号 N01.. + LINK_GOTO 点击跳转） | **已验收**（E5 卡，111→115 项含 6 新测试） |
 | 17 | `core/hybrid_retriever.py` | **E2 混合检索** | BM25 三级门控（词面精确/同义词扩展 45 组/语义兜底）+ MISSING_EVIDENCE 探针；E12 正式激活 L2 向量嵌入重排（带 `.emb.npy` 维度校验失效重算） | **已验收**（E2 + E12 卡） |
 | 18 | `core/regulation_library.py` | **E4 法规库** | 8 部法律条文库：三态核验（exact_match/fuzzy_hint/unverifiable，**LLM 对真伪零裁决权**）、中文/阿拉伯条号归一、张冠李戴降级 fuzzy_hint、四格式导入（json/txt/docx/pdf，content_hash 幂等） | **已验收**（E4 卡，含 crawl 集成测试外网隔离） |
@@ -173,14 +173,16 @@ BidGuard-Agent/
 | E15 | F3/自定义红线双轨页码 + F2 三级防重名锚定页码 + 开标日期自动回填（消 2026-11-05 硬编码） | `f1c77ec` | 155 项 |
 | E16 | 交付中心四大件独立下载 + signoff 端点 + 批量打包内容自选（含 TS 强类型修复 `e08c42b`） | `bdb36f7`→`e08c42b` | 155 项 |
 | E18 | F1/F6/F7 三处 PDF 硬编码统一接入双轨页码上下文（docx 页码从恒 None 到全非空，F7 形参 list\|dict 兼容） | `87bde93` | 157 项 |
-| E19 | 六子项合并单卡三 Commit：F1 本地时区/多文件拖拽/局部 loading/超时放宽 + 在途秒表（UTC 补 `Z`）+ F7 三挡推理深度 + SSE 断线轮询对齐 + F4 两阶段并发提速（默认 4 路；含 `worker` 对单条 `error_fallback` 暴露 `LLM_FALLBACK` 提示级发现） | `85f0ddd` / `f64b3b6` / `b8f3403` 后续 | 161 项 + `vue-tsc` |
+| E19 | 六子项合并单卡三 Commit：F1 本地时区/多文件拖拽/局部 loading/超时放宽 + 在途秒表（UTC 补 `Z`）+ F7 三挡推理深度 + SSE 断线轮询对齐 + F4 两阶段并发提速（默认 4 路；含 `worker` 对单条 `error_fallback` 暴露 `LLM_FALLBACK` 提示级发现） | `85f0ddd` / `f64b3b6` / `b8f3403` / `b468c35` | 161 项 + `vue-tsc` |
+| E20 | F5 偏离表五维分类筛选与统计卡片联动、F6 去旧文本框+多文件拖拽批量+本地时区、F1 历史单行横向滚动/搜索下拉+5MB `localStorage` LRU 淘汰、`docker-compose.yml` Postgres 宿主机端口变量化（`${POSTGRES_PORT:-15432}:5432` 与老项目双开共存） | `df9f74a` | 166 项 + `vue-tsc` |
+| E21 | F7 多轮会话 `history` 注入与 0-Token 历史回溯、智谱 `glm-5.3-flash` 合法三挡映射（`low/high/max` 联动 3/4/6 轮）、`ask_bid_expert_stream` + `POST /api/qa/sessions/{id}/ask/stream` ReAct 思考轨迹 SSE 直播与流式打字（含 `getStoredToken` 鉴权/`get_session_factory` 写库/0-Token 回溯 3 项验收修补） | `69ad261` | 166 项 + `vue-tsc` + `vite build` |
 | chore | requirements 全量钉死（`59e6b64`）、基础镜像 digest 钉死、弹窗会话记忆 | `90a1947` | — |
 
 ---
 
 ## 7. 协作纪律与工程红线（完整版见 `AGENTS.md`）
 
-1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线 **161 项**。
+1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线 **166 项**。
 2. **凡能算的绝不进大模型（0 Token 优先）**；金额全程 `Decimal` 禁 `float`（ROUND_HALF_UP 量化 0.01）。
 3. **LLM 只吃局部窗口 + 强制 `quote_verifier` 溯源**；严禁整本标书直塞。
 4. **宁缺毋滥显式降级**：无法对齐必返回 NEED_MANUAL；找不到位置绝不乱锚（E5 五级定位链 + 置信护栏）；页码诚实回退字符偏移并标"不一定准确"。
@@ -201,7 +203,7 @@ BidGuard-Agent/
 | `INTERFACE.md` | core↔backend 契约锁死 | 涉签名改动时同步 |
 | `FRONTEND.md` | 前端架构说明 | 前端结构变化时同步 |
 | `docs/DEPLOY.md` | 本机直跑 + Linux Docker/离线/裸机部署手册 | 部署变化时同步 |
-| `docs/cards/` | 任务卡归档（B1~E19） | 每立卡/收卡时归档 |
+| `docs/cards/` | 任务卡归档（B1~E21） | 每立卡/收卡时归档 |
 | `.workbuddy/memory/`（不入库） | 架构侧 AI 工作日志 | 每日实质工作后追加 |
 
 **冷启动口令**（新会话开场）：「先读取 AGENTS.md 和 HANDOVER.md，然后读 docs/cards/ 里最新一张卡，汇报理解后等我派活。」
@@ -210,7 +212,7 @@ BidGuard-Agent/
 
 ## 9. 本文档信息来源
 
-1. `docs/cards/` B1~E19 全部任务卡与验收记录；`派发归档/` 各阶段派发包全文
-2. Git 提交链（`git log --oneline`，功能代码至 E19）；161 项 pytest + `vue-tsc` 实测回执
+1. `docs/cards/` B1~E21 全部任务卡与验收记录；`派发归档/` 各阶段派发包全文
+2. Git 提交链（`git log --oneline`，功能代码至 E21 `69ad261`）；166 项 pytest + `vue-tsc` + `vite build` 实测回执
 3. `data/corpus/m0_samples/` 三本账 + `语料清单.md`、`data/corpus/sim_bids/_README.md`；`data/corpus/regulations/` 法规种子
 4. `E:\agent\Contract-Review-Agent\HANDOVER_V2.md`（文档骨架参照）

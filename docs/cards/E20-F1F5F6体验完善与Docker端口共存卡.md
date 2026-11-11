@@ -1,6 +1,6 @@
 # E20 · F1/F5/F6 页面体验完善与 Docker 双项目端口共存卡
 
-> 状态：待派发（建议 Gemini）｜ 立卡：2026-11-10 ｜ 基线：commit `b468c35`（161 项全绿）
+> 状态：**已验收**（2026-11-11，commit `df9f74a`）｜ 立卡：2026-11-10 ｜ 基线：commit `b468c35`（161 项全绿） → 验收：**166 项全绿** + `vue-tsc` / `vite build` 零错误
 > 来源：用户新一轮交互实测反馈（F5 偏离表缺种类筛选 / F6 旧名称文本框误导+批量上传+UTC时区 / F1 历史列表防撑破+5MB LRU 防丢 / 与老项目 Docker 5432 端口冲突无法双开）
 > 拆分说明：本卡文件集与 E21（F7 多轮上下文 + 流式思考过程）**完全零交集**，可独立派发与独立验收
 
@@ -57,3 +57,9 @@
 - 文件白名单：`frontend/src/views/DeviationView.vue`、`frontend/src/views/RadarView.vue`、`frontend/src/views/ExtractView.vue`、`docker-compose.yml`、`deploy/.env.docker.example`、`docs/DEPLOY.md`。
 - 严禁碰 F7（`QaChatView.vue`、`QaMessageList.vue`、`ReActSteps.vue`、`core/bid_react_agent.py`、`backend/routers/qa.py`）和后端核心算法引擎（`core/`）。
 - 跨平台文件行尾统一 LF（`\n`），严禁 `](http` 等贴入污染。
+
+## 4. 验收实测回执（2026-11-11）
+
+1. **前端构建与类型校验**：`npx vue-tsc --noEmit` 退出码 `0`；`npm --prefix frontend run build`（`vite build`）构建通过。
+2. **新增单测（`tests/test_e20_docker_and_ui_contracts.py`）**：`2 passed`（Docker Compose `POSTGRES_PORT:-15432` YAML 契约 + F1/F5/F6 源码契约），同步纳入全量 166 项测试全绿入库。
+3. **文件清单**：`frontend/src/views/DeviationView.vue`、`frontend/src/views/RadarView.vue`、`frontend/src/views/ExtractView.vue`、`docker-compose.yml`、`deploy/.env.docker.example`、`docs/DEPLOY.md`、`tests/test_e20_docker_and_ui_contracts.py`（均已统一 LF 换行）。
