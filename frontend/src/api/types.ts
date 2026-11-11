@@ -368,6 +368,7 @@ export interface QaMessageItem {
   quotes?: QaQuoteOut[]
   steps?: ReActStepTraceItem[]
   loading?: boolean
+  streaming?: boolean
 }
 
 export interface QaSessionCreatePayload {
@@ -407,6 +408,13 @@ export interface QaAskResponseOut {
   steps: ReActStepTraceItem[]
   rounds_used: number
   terminated_by_max_rounds: boolean
+}
+
+export interface QaStreamHandlers {
+  onStep?: (step: ReActStepTraceItem) => void
+  onDelta?: (deltaText: string) => void
+  onDone?: (finalRes: QaAskResponseOut) => void
+  onError?: (errMsg: string) => void
 }
 
 // ── 8. 废标规则与企业证照台账 (/api/rules) ───────────────────────────────

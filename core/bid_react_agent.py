@@ -1,21 +1,24 @@
-﻿# -*- coding: utf-8 -*-
-"""F7 标书专家 ReAct 追问引擎（★大模型③）—— 跨双书工具检索与溯源问答（E2 混合检索 + E4 第6工具 cite_regulation + E18 双轨页码统一）。
+# -*- coding: utf-8 -*-
+"""F7 标书专家 ReAct 追问引擎（★大模型③）—— 跨双书工具检索与溯源问答（E2 混合检索 + E4 第6工具 cite_regulation + E18 双轨页码统一 + E21 多轮上下文与流式思考过程）。
 
-模块定位（对应 PRD-02 §7 F7、E2 任务卡 §2.4、E4 任务卡 §1 与 E18 双轨页码大一统）：
+模块定位（对应 PRD-02 §7 F7、E2 任务卡 §2.4、E4 任务卡 §1、E18 双轨页码大一统与 E21 多轮流式卡）：
 1. 工具层（共 6 组确定性/混合检索工具函数，既有 5 工具签名一字不变）：
    - search_tender(keyword, ...) / search_bid(keyword, ...)：双书检索；
    - locate_chapter(text, chapter_title)：章节定位；
    - recalc_price(items, ...)：调用 PriceSandbox 复算报价；
    - check_cert_expiry(cert_text, open_date, ...)：调用 F3 scan_qualifications 核验效期；
    - cite_regulation(keyword, article_no, ...)：E4 新增第 6 工具，检索法规库返回条文原文+法律名+条号（库空时诚实报"法规库为空"）。
-2. ReAct 循环：最多 max_rounds=6 轮；final 输出 quotes 强制走 verify_quote 溯源。
+2. ReAct 循环与流式输出（E21）：
+   - 支持注入会话多轮上下文 history（自动过滤空消息、保留最近 N 轮并截断超长单条文本）；
+   - 智谱 glm-5.3-flash 三挡推理深度实测合法值映射：low->'low'(3轮) / medium->'high'(4轮) / high->'max'(6轮)，严禁向网关直接透传 'medium' 触发 400-1210 拒绝；
+   - ask_bid_expert_stream 实时产出 step -> answer_delta -> done 事件帧，final 输出 quotes 100% 强制走 verify_quote 溯源。
 """
 from __future__ import annotations
 
 import json
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from core.hybrid_retriever import expand_query_synonyms, hybrid_retrieve_windows
 from core.parser import parse_document
@@ -45,6 +48,20 @@ _QUESTION_STOPWORDS = (
     '要求', '响应', '在哪里', '在哪', '哪一页', '哪页', '是多少', '多少', '什么',
     '几年', '几个月', '是否', '有没有', '如何', '怎么', '的', '了', '吗', '呢',
 )
+
+# E21 §2.1：指代与承接上文特征词（供 0-Token 离线降级结合上一轮用户问题补充关键词）
+_FOLLOWUP_PRONOUN_KEYS = (
+    '刚才', '刚刚', '上一轮', '上轮', '上面', '前面', '之前', '这两个', '那两个',
+    '它们', '这些', '那些', '这个', '那个', '怎么规定', '为什么', '怎么不', '还有呢', '问了什么', '它',
+)
+
+# E21 §1.3 & §2.1：前端 UI 三挡（low/medium/high）映射为智谱 glm-5.3-flash 实测合法上游值（low/high/max）与轮次上限
+_EFFORT_UPSTREAM_MAP: dict[str, tuple[str, int]] = {
+    'low': ('low', 3),
+    'medium': ('high', 4),
+    'high': ('max', 6),
+    'max': ('max', 6),
+}
 
 _REACT_SYSTEM_PROMPT = """你是招投标双书合规审查专家（ReAct Agent）。你可以调用以下 6 个确定性工具来回答用户关于《招标文件》、《投标文件》与招投标法律法规的问题：
 
@@ -101,6 +118,69 @@ def _resolve_page_adaptive(
     if isinstance(ctx_or_spans, dict):
         return resolve_unified_page(offset, ctx_or_spans)[0]
     return _offset_to_page(offset, ctx_or_spans or [])
+
+
+def _format_history_messages(
+    history: Optional[list[dict[str, Any]]],
+    max_turns: int = 6,
+    max_chars_per_msg: int = 800,
+) -> list[dict[str, str]]:
+    """E21 §2.1：从会话历史提取 role in ('user','assistant') 的有效消息，
+    过滤空内容与 loading 占位，按时间正序保留最近 max_turns*2 条，单条超出 max_chars_per_msg 截断加 '…'。
+    """
+    if not history or not isinstance(history, list):
+        return []
+
+    cleaned: list[dict[str, str]] = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        if item.get('loading'):
+            continue
+        role = str(item.get('role') or '').strip().lower()
+        if role not in ('user', 'assistant'):
+            continue
+        content = str(item.get('content') or '').strip()
+        if not content:
+            continue
+        if len(content) > max_chars_per_msg:
+            content = content[:max_chars_per_msg] + '…'
+        cleaned.append({'role': role, 'content': content})
+
+    max_msgs = max(2, int(max_turns) * 2)
+    return cleaned[-max_msgs:]
+
+
+def _resolve_effort_and_rounds(
+    reasoning_effort: Optional[str],
+    max_rounds: int,
+) -> tuple[Optional[str], int]:
+    """E21 §2.1：将前端三挡（low/medium/high）映射为智谱实测合法上游值（low/high/max）并联动轮次上限。"""
+    base_limit = max(1, int(max_rounds or 6))
+    raw_key = str(reasoning_effort or '').strip().lower()
+    if raw_key in _EFFORT_UPSTREAM_MAP:
+        mapped_effort, gear_round_cap = _EFFORT_UPSTREAM_MAP[raw_key]
+        return mapped_effort, min(base_limit, gear_round_cap)
+    return None, base_limit
+
+
+def _iter_answer_chunks(answer_text: str, chunk_size: int = 24) -> Iterator[str]:
+    """将最终答案按自然语义块切分为流式 delta 片段，供前端呈现平滑打字机效果。"""
+    if not answer_text:
+        return
+    step = max(8, int(chunk_size))
+    for i in range(0, len(answer_text), step):
+        yield answer_text[i:i + step]
+
+
+def _extract_domain_tokens(text: str) -> list[str]:
+    """从文本中剥离指代承接词与停用词，提取真实业务关键词（不回退默认值）。"""
+    cleaned = re.sub(r'[？?！!，,。；;：:“”"\'（）()\s]+', ' ', text or '').strip()
+    for pk in _FOLLOWUP_PRONOUN_KEYS:
+        cleaned = cleaned.replace(pk, ' ')
+    for sw in _QUESTION_STOPWORDS:
+        cleaned = cleaned.replace(sw, ' ')
+    return [t.strip() for t in cleaned.split() if len(t.strip()) >= 2]
 
 
 def _extract_keywords_from_question(question: str) -> list[str]:
@@ -347,15 +427,16 @@ def _verify_and_locate_quotes(
     return verified_list
 
 
-def ask_bid_expert(
+def ask_bid_expert_stream(
     tender_path: str | Path,
     bid_path: str | Path,
     question: str,
     client=None,
     max_rounds: int = 6,
     reasoning_effort: Optional[str] = None,
-) -> dict[str, Any]:
-    """F7 标书专家 ReAct 追问主入口（公共签名保持一字不变）。"""
+    history: Optional[list[dict[str, Any]]] = None,
+) -> Iterator[dict[str, Any]]:
+    """E21 §2.1：F7 标书专家流式生成器主入口（依次 yield step -> answer_delta -> done 事件帧）。"""
     tender_doc = parse_document(str(tender_path))
     bid_doc = parse_document(str(bid_path))
     tender_text = tender_doc.text or ''
@@ -363,9 +444,37 @@ def ask_bid_expert(
 
     tender_ctx = build_unified_page_context(tender_path)
     bid_ctx = build_unified_page_context(bid_path)
+    formatted_history = _format_history_messages(history)
 
+    # ── 0-Token 离线降级分支（支持结合历史多轮提问补充上下文关键词）──
     if client is None:
-        keywords = _extract_keywords_from_question(question)
+        has_pronoun = any(pk in (question or '') for pk in _FOLLOWUP_PRONOUN_KEYS)
+        domain_tokens = _extract_domain_tokens(question)
+        keywords = list(domain_tokens) if has_pronoun else _extract_keywords_from_question(question)
+
+        prior_user_msgs = [
+            hm['content'] for hm in reversed(formatted_history) if hm['role'] == 'user'
+        ]
+        last_user_question = prior_user_msgs[0] if prior_user_msgs else ''
+        context_user_question = ''
+
+        if prior_user_msgs and (has_pronoun or len((question or '').strip()) <= 12 or keywords == ['质保']):
+            for prev_q in prior_user_msgs:
+                prev_domain = _extract_domain_tokens(prev_q)
+                if prev_domain:
+                    if not context_user_question:
+                        context_user_question = prev_q
+                    for pk in prev_domain:
+                        if pk not in keywords:
+                            keywords.append(pk)
+            if not keywords:
+                for prev_q in prior_user_msgs:
+                    for pk in _extract_keywords_from_question(prev_q):
+                        if pk not in keywords:
+                            keywords.append(pk)
+        if not keywords:
+            keywords = _extract_keywords_from_question(question)
+
         t_hits: list[dict[str, Any]] = []
         b_hits: list[dict[str, Any]] = []
         for kw in keywords:
@@ -388,41 +497,53 @@ def ask_bid_expert(
             })
 
         summary_parts = []
+        ctx_ref_q = context_user_question or last_user_question
+        if ctx_ref_q and has_pronoun:
+            summary_parts.append(f"【结合上一轮提问「{ctx_ref_q[:40]}」上下文】")
         if t_hits:
             summary_parts.append(f"【招标文件命中】{t_hits[0]['quote']}（@字符{t_hits[0]['offset']}）")
         if b_hits:
             summary_parts.append(f"【投标文件命中】{b_hits[0]['quote']}（@字符{b_hits[0]['offset']}）")
-        answer = '\n'.join(summary_parts) if summary_parts else '未在招标文件或投标文件中检索到对应关键词内容。'
+        if not t_hits and not b_hits:
+            summary_parts.append('未在招标文件或投标文件中检索到对应关键词内容。')
+        answer = '\n'.join(summary_parts)
 
-        return {
-            'mode': 'keyword_fallback',
-            'question': question,
-            'answer': answer,
-            'quotes': quotes,
-            'steps': [{
-                'round': 1,
-                'thought': '0 Token 关键词与混合同义词检索降级模式',
-                'action': 'keyword_search',
-                'action_input': keywords,
-                'observation': {'tender_hits': len(t_hits), 'bid_hits': len(b_hits)},
-            }],
-            'rounds_used': 1,
-            'terminated_by_max_rounds': False,
+        fallback_step = {
+            'round': 1,
+            'thought': '0 Token 关键词与混合同义词检索降级模式',
+            'action': 'keyword_search',
+            'action_input': keywords,
+            'observation': {'tender_hits': len(t_hits), 'bid_hits': len(b_hits)},
         }
+        yield {'type': 'step', 'data': fallback_step}
+        for piece in _iter_answer_chunks(answer):
+            yield {'type': 'answer_delta', 'data': {'text': piece}}
 
-    messages = [
+        yield {
+            'type': 'done',
+            'data': {
+                'mode': 'keyword_fallback',
+                'question': question,
+                'answer': answer,
+                'quotes': quotes,
+                'steps': [fallback_step],
+                'rounds_used': 1,
+                'terminated_by_max_rounds': False,
+            },
+        }
+        return
+
+    # ── 在线 ReAct 多步工具调用分支（注入历史上下文 + 挡位映射）──
+    messages: list[dict[str, str]] = [
         {'role': 'system', 'content': _REACT_SYSTEM_PROMPT},
+        *formatted_history,
         {'role': 'user', 'content': f"用户问题：{question}"},
     ]
     steps: list[dict[str, Any]] = []
     collected_tool_quotes: list[dict[str, Any]] = []
 
-    norm_effort = (
-        str(reasoning_effort).strip().lower()
-        if str(reasoning_effort or '').strip().lower() in ('low', 'medium', 'high')
-        else None
-    )
-    limit = max(1, int(max_rounds))
+    norm_effort, limit = _resolve_effort_and_rounds(reasoning_effort, max_rounds)
+
     for r_idx in range(1, limit + 1):
         if norm_effort is not None:
             try:
@@ -435,22 +556,31 @@ def ask_bid_expert(
         parsed = _parse_llm_json(raw_content)
 
         if not parsed:
-            steps.append({
+            end_step = {
                 'round': r_idx,
                 'thought': '模型未返回有效 JSON，直接结束',
                 'action': 'final',
                 'action_input': {},
                 'observation': None,
-            })
-            return {
-                'mode': 'react',
-                'question': question,
-                'answer': raw_content.strip() or '未能生成有效回答。',
-                'quotes': collected_tool_quotes,
-                'steps': steps,
-                'rounds_used': r_idx,
-                'terminated_by_max_rounds': False,
             }
+            steps.append(end_step)
+            yield {'type': 'step', 'data': end_step}
+            ans_fallback = raw_content.strip() or '未能生成有效回答。'
+            for piece in _iter_answer_chunks(ans_fallback):
+                yield {'type': 'answer_delta', 'data': {'text': piece}}
+            yield {
+                'type': 'done',
+                'data': {
+                    'mode': 'react',
+                    'question': question,
+                    'answer': ans_fallback,
+                    'quotes': collected_tool_quotes,
+                    'steps': steps,
+                    'rounds_used': r_idx,
+                    'terminated_by_max_rounds': False,
+                },
+            }
+            return
 
         thought = str(parsed.get('thought') or '').strip()
         action = str(parsed.get('action') or 'final').strip()
@@ -483,22 +613,31 @@ def ask_bid_expert(
             if valid_locs and '字符' not in ans_text and '页' not in ans_text:
                 ans_text = f"{ans_text}（出处定位：{'；'.join(valid_locs)}）"
 
-            steps.append({
+            final_step = {
                 'round': r_idx,
                 'thought': thought,
                 'action': 'final',
                 'action_input': final_payload,
                 'observation': None,
-            })
-            return {
-                'mode': 'react',
-                'question': question,
-                'answer': ans_text,
-                'quotes': verified_quotes,
-                'steps': steps,
-                'rounds_used': r_idx,
-                'terminated_by_max_rounds': False,
             }
+            steps.append(final_step)
+            yield {'type': 'step', 'data': final_step}
+            for piece in _iter_answer_chunks(ans_text):
+                yield {'type': 'answer_delta', 'data': {'text': piece}}
+
+            yield {
+                'type': 'done',
+                'data': {
+                    'mode': 'react',
+                    'question': question,
+                    'answer': ans_text,
+                    'quotes': verified_quotes,
+                    'steps': steps,
+                    'rounds_used': r_idx,
+                    'terminated_by_max_rounds': False,
+                },
+            }
+            return
 
         observation: Any = None
         if action == 'search_tender':
@@ -564,13 +703,15 @@ def ask_bid_expert(
         else:
             observation = {'error': f"未知工具: {action}"}
 
-        steps.append({
+        step_item = {
             'round': r_idx,
             'thought': thought,
             'action': action,
             'action_input': action_input,
             'observation': observation,
-        })
+        }
+        steps.append(step_item)
+        yield {'type': 'step', 'data': step_item}
 
         messages.append({'role': 'assistant', 'content': raw_content})
         messages.append({
@@ -578,13 +719,53 @@ def ask_bid_expert(
             'content': f"工具 {action} 返回结果：{json.dumps(observation, ensure_ascii=False)}\n请继续下一步或输出 action='final'。",
         })
 
-    fallback_ans = '已达到最大工具检索轮数上限（6轮），以下为已检索到的原文证据汇总。'
+    fallback_ans = f'已达到最大工具检索轮数上限（{limit}轮），以下为已检索到的原文证据汇总。'
+    for piece in _iter_answer_chunks(fallback_ans):
+        yield {'type': 'answer_delta', 'data': {'text': piece}}
+    yield {
+        'type': 'done',
+        'data': {
+            'mode': 'react',
+            'question': question,
+            'answer': fallback_ans,
+            'quotes': collected_tool_quotes,
+            'steps': steps,
+            'rounds_used': limit,
+            'terminated_by_max_rounds': True,
+        },
+    }
+
+
+def ask_bid_expert(
+    tender_path: str | Path,
+    bid_path: str | Path,
+    question: str,
+    client=None,
+    max_rounds: int = 6,
+    reasoning_effort: Optional[str] = None,
+    history: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """F7 标书专家 ReAct 追问同步主入口（消费 ask_bid_expert_stream 的 done 帧，公共签名与返回结构保持一字不变）。"""
+    final_data: Optional[dict[str, Any]] = None
+    for event in ask_bid_expert_stream(
+        tender_path=tender_path,
+        bid_path=bid_path,
+        question=question,
+        client=client,
+        max_rounds=max_rounds,
+        reasoning_effort=reasoning_effort,
+        history=history,
+    ):
+        if event.get('type') == 'done':
+            final_data = event.get('data')
+    if final_data is not None:
+        return final_data
     return {
-        'mode': 'react',
+        'mode': 'keyword_fallback',
         'question': question,
-        'answer': fallback_ans,
-        'quotes': collected_tool_quotes,
-        'steps': steps,
-        'rounds_used': limit,
-        'terminated_by_max_rounds': True,
+        'answer': '未能生成有效回答。',
+        'quotes': [],
+        'steps': [],
+        'rounds_used': 1,
+        'terminated_by_max_rounds': False,
     }

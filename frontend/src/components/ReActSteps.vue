@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import type { ReActStepTraceItem } from '@/api/types'
 
 const props = withDefaults(
@@ -15,12 +15,24 @@ const props = withDefaults(
 const isOpen = ref<boolean>(props.defaultOpen)
 const expandedObs = ref<Record<number, boolean>>({})
 
+// E21 §2.3：当 defaultOpen 为 true 且流式新步骤陆续到达时，确保自动展开并保持展开
+watch(
+  () => [props.defaultOpen, props.steps?.length],
+  ([defOpen]) => {
+    if (defOpen) {
+      isOpen.value = true
+    }
+  },
+  { immediate: true },
+)
+
 const TOOL_LABELS: Record<string, string> = {
   search_tender: '检索招标文件 (search_tender)',
   search_bid: '检索我方投标书 (search_bid)',
   locate_chapter: '定位标书章节 (locate_chapter)',
   recalc_price: 'F2 报价算术沙盒复算 (recalc_price)',
   check_cert_expiry: 'F3 证照效期与串名核验 (check_cert_expiry)',
+  cite_regulation: '检索招投标法规库原文 (cite_regulation)',
   keyword_search: '0-Token 离线双书关键词检索 (keyword_search)',
   final: '汇总原文证据并输出结论 (final)',
 }

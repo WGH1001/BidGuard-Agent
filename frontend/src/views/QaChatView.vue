@@ -13,8 +13,17 @@ const cachedActiveSessionId = ref<number | null>(null)
 const cachedMessages = ref<QaMessageItem[]>([])
 const cachedAsking = ref<boolean>(false)
 let initializedOnce = false
+let cancelActiveStreamFn: (() => void) | null = null
+
+function stopActiveQaStream(): void {
+  if (cancelActiveStreamFn) {
+    cancelActiveStreamFn()
+    cancelActiveStreamFn = null
+  }
+}
 
 function resetQaModuleCache(): void {
+  stopActiveQaStream()
   cachedOwnerUsername.value = ''
   cachedTasks.value = []
   cachedSessions.value = []
@@ -42,6 +51,7 @@ const appStore = useAppStore()
 const authStore = useAuthStore()
 const loadingInit = localRef(false)
 const creatingSession = localRef(false)
+const msgListRef = localRef<InstanceType<typeof QaMessageList> | null>(null)
 
 const tasks = cachedTasks
 const sessions = cachedSessions
@@ -58,8 +68,9 @@ const PRESET_QUESTIONS = [
 ]
 
 const EFFORT_STORAGE_KEY = 'bidguard_qa_reasoning_effort_v1'
+const savedEffort = localStorage.getItem(EFFORT_STORAGE_KEY)
 const reasoningEffort = localRef<ReasoningEffortLevel>(
-  (localStorage.getItem(EFFORT_STORAGE_KEY) as ReasoningEffortLevel) || 'medium',
+  savedEffort === 'low' || savedEffort === 'medium' || savedEffort === 'high' ? savedEffort : 'medium',
 )
 
 function setReasoningEffort(level: ReasoningEffortLevel): void {
@@ -211,37 +222,81 @@ async function handleSendQuestion(question: string): Promise<void> {
   messages.value.push({
     role: 'assistant',
     content: '',
+    steps: [],
+    quotes: [],
     loading: true,
+    streaming: true,
   })
+  const assistantMsgIdx = messages.value.length - 1
 
   asking.value = true
-  try {
-    const res = await qaApi.ask(targetSessionId, {
-      question,
-      max_rounds: 6,
-      reasoning_effort: reasoningEffort.value,
-    })
-    const lastIdx = messages.value.length - 1
-    if (lastIdx >= 0 && messages.value[lastIdx].role === 'assistant') {
-      messages.value[lastIdx] = {
-        role: 'assistant',
-        content: res.answer,
-        mode: res.mode,
-        quotes: res.quotes || [],
-        steps: res.steps || [],
-        loading: false,
-      }
-    }
-    const updatedList = await qaApi.listSessions(selectedTaskId.value ?? undefined)
-    sessions.value = updatedList || []
-  } catch {
-    const lastIdx = messages.value.length - 1
-    if (lastIdx >= 0 && messages.value[lastIdx].loading) {
-      messages.value.splice(lastIdx, 1)
-    }
-  } finally {
-    asking.value = false
+  stopActiveQaStream()
+
+  const payload = {
+    question,
+    max_rounds: 6,
+    reasoning_effort: reasoningEffort.value,
   }
+
+  cancelActiveStreamFn = qaApi.askStream(targetSessionId, payload, {
+    onStep(stepItem) {
+      const msg = messages.value[assistantMsgIdx]
+      if (!msg || msg.role !== 'assistant') return
+      msg.steps = [...(msg.steps || []), stepItem]
+      msgListRef.value?.scrollToBottom()
+    },
+    onDelta(deltaText) {
+      const msg = messages.value[assistantMsgIdx]
+      if (!msg || msg.role !== 'assistant') return
+      msg.content = (msg.content || '') + deltaText
+      msgListRef.value?.scrollToBottom()
+    },
+    async onDone(finalRes) {
+      cancelActiveStreamFn = null
+      const msg = messages.value[assistantMsgIdx]
+      if (msg && msg.role === 'assistant') {
+        messages.value[assistantMsgIdx] = {
+          role: 'assistant',
+          content: finalRes.answer,
+          mode: finalRes.mode,
+          quotes: finalRes.quotes || [],
+          steps: finalRes.steps || msg.steps || [],
+          loading: false,
+          streaming: false,
+        }
+      }
+      asking.value = false
+      msgListRef.value?.scrollToBottom()
+      const updatedList = await qaApi.listSessions(selectedTaskId.value ?? undefined)
+      sessions.value = updatedList || []
+    },
+    async onError() {
+      cancelActiveStreamFn = null
+      // 流式连接失败时优雅降级调用同步 qaApi.ask 兜底
+      try {
+        const res = await qaApi.ask(targetSessionId, payload)
+        if (messages.value[assistantMsgIdx]?.role === 'assistant') {
+          messages.value[assistantMsgIdx] = {
+            role: 'assistant',
+            content: res.answer,
+            mode: res.mode,
+            quotes: res.quotes || [],
+            steps: res.steps || [],
+            loading: false,
+            streaming: false,
+          }
+        }
+        const updatedList = await qaApi.listSessions(selectedTaskId.value ?? undefined)
+        sessions.value = updatedList || []
+      } catch {
+        if (messages.value[assistantMsgIdx]?.loading) {
+          messages.value.splice(assistantMsgIdx, 1)
+        }
+      } finally {
+        asking.value = false
+      }
+    },
+  })
 }
 
 onMounted(() => {
@@ -258,6 +313,7 @@ onActivated(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('bidguard-auth-changed', handleAuthChanged)
+  stopActiveQaStream()
 })
 </script>
 
@@ -339,13 +395,13 @@ onBeforeUnmount(() => {
             </span>
           </h2>
           <p>
-            支持跨《招标文件》与《我方投标书》调用检索、章节定位、F2 报价沙盒与 F3 证照效期工具；
+            支持跨《招标文件》与《我方投标书》调用检索、章节定位、F2 报价沙盒、F3 证照效期与 E4 法规库工具；
             所有原文摘录强制通过 verify_quote 校验。
           </p>
         </div>
 
-        <!-- E19：三挡思考深度切换器（极速=low / 均衡=medium / 深度=high，显式传参拉开推理深度） -->
-        <div class="effort-switch" title="切换大模型 ReAct 推理思考深度">
+        <!-- E19/E21：三挡思考深度切换器（极速=low(3轮) / 均衡=high(4轮) / 深度=max(6轮)） -->
+        <div class="effort-switch" title="切换大模型 ReAct 推理思考深度与检索轮次">
           <span class="es-lbl">推理深度：</span>
           <button
             type="button"
@@ -376,6 +432,7 @@ onBeforeUnmount(() => {
 
       <div class="qst-body">
         <QaMessageList
+          ref="msgListRef"
           :messages="messages"
           :sending="asking"
           :preset-questions="PRESET_QUESTIONS"

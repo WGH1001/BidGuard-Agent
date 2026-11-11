@@ -102,15 +102,32 @@ defineExpose({
             </span>
           </div>
 
-          <div v-if="msg.loading" class="a-loading-box">
-            <span class="spin-dot"></span>
-            <span>
-              正在跨《招标文件》与《我方投标书》检索条款并校验原文溯源（复杂追问约需 10~90 秒，请勿重复提交）…
-            </span>
+          <!-- E21 §2.3：思考与调工具阶段（尚未收到 answer_delta 前）动态展示步骤数并默认展开 ReActSteps -->
+          <div v-if="msg.loading && !msg.content" class="a-thinking-stage">
+            <div class="a-loading-box">
+              <span class="spin-dot"></span>
+              <span>
+                {{
+                  msg.steps && msg.steps.length > 0
+                    ? `AI 专家已完成 ${msg.steps.length} 步工具检索，正在继续推演与核对原文溯源…`
+                    : 'AI 专家正在分析问题并调起双书检索工具…'
+                }}
+              </span>
+            </div>
+
+            <ReActSteps
+              v-if="msg.steps && msg.steps.length > 0"
+              :steps="msg.steps"
+              :default-open="true"
+            />
           </div>
 
+          <!-- 收到 answer_delta 流式吐字或最终完成态 -->
           <template v-else>
-            <div class="a-answer-text">{{ msg.content }}</div>
+            <div class="a-answer-text">
+              <span>{{ msg.content }}</span>
+              <span v-if="msg.streaming || msg.loading" class="stream-cursor">▋</span>
+            </div>
 
             <!-- Quotes 原文溯源卡片列表（严格执行附件一 RiskCard 三分支溯源徽标语义） -->
             <div v-if="visibleQuotes(msg.quotes).length > 0" class="quotes-grid">
@@ -138,11 +155,11 @@ defineExpose({
               </div>
             </div>
 
-            <!-- ReAct 轨迹折叠面板（默认折叠） -->
+            <!-- ReAct 轨迹面板（流式期保持展开，历史已完成消息可自由折叠/展开） -->
             <ReActSteps
               v-if="msg.steps && msg.steps.length > 0"
               :steps="msg.steps"
-              :default-open="false"
+              :default-open="Boolean(msg.streaming)"
             />
           </template>
         </div>
@@ -177,7 +194,7 @@ defineExpose({
           type="textarea"
           :rows="2"
           :disabled="props.sending"
-          placeholder="输入标书追问（如：招标要求的免费质保期是多久？我方投标书在哪里响应的？）按 Enter 发送…"
+          placeholder="输入标书追问（支持多轮上下文追问，如：刚刚提到的条款在投标书哪一页？）按 Enter 发送…"
           @keydown="handleKeydown"
         />
         <el-button
@@ -275,6 +292,12 @@ defineExpose({
   color: var(--txt-strong);
 }
 
+.a-thinking-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .a-loading-box {
   display: flex;
   align-items: center;
@@ -315,6 +338,24 @@ defineExpose({
   line-height: 1.68;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.stream-cursor {
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--brand);
+  font-weight: 900;
+  animation: blinkCursor 0.8s infinite;
+}
+
+@keyframes blinkCursor {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
 }
 
 .quotes-grid {

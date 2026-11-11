@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
-"""B2 · 第 7 组路由：/api/qa（会话 CRUD + POST /{session_id}/ask 调 ask_bid_expert 持久化对话）。"""
+"""B2 / E21 · 第 7 组路由：/api/qa（会话 CRUD + 同步 POST /{session_id}/ask + 流式 POST /{session_id}/ask/stream，均注入多轮会话 history）。"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
+import json
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from backend.auth import AuthUser, get_current_user, record_audit
+import backend.database as db_mod
 from backend.database import get_db
 from backend.models import BidCheckTask, QaSession
 from backend.schemas import (
@@ -20,7 +23,7 @@ from backend.schemas import (
     QaSessionOut,
 )
 from backend.worker import resolve_effective_llm_client, resolve_project_path
-from core.bid_react_agent import ask_bid_expert
+from core.bid_react_agent import ask_bid_expert, ask_bid_expert_stream
 
 router = APIRouter(prefix='/api/qa', tags=['qa'])
 
@@ -52,6 +55,13 @@ def _get_tenant_session_or_404(db: Session, session_id: int, tenant_id: int) -> 
             detail={'code': 'QA_SESSION_NOT_FOUND', 'message': '问答会话不存在或无权访问'},
         )
     return row
+
+
+def _extract_session_history(messages_json: Any) -> list[dict[str, Any]]:
+    """E21 §2.2：提取会话已存的历史问答列表供 ask_bid_expert / ask_bid_expert_stream 注入上下文。"""
+    if not messages_json or not isinstance(messages_json, list):
+        return []
+    return [dict(m) for m in messages_json if isinstance(m, dict)]
 
 
 @router.post('/sessions', response_model=QaSessionOut)
@@ -146,9 +156,7 @@ def ask_in_session(
     current_user: AuthUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> QaAskResponseOut:
-    """在指定会话中调用 F7 ask_bid_expert 提问，并将整轮 Q&A（含 quotes/steps）追加进 messages_json。
-    docx 页码为 null 时严格保留 null 不编造。
-    """
+    """在指定会话中调用 F7 ask_bid_expert 提问（自动带入会话多轮历史），并将整轮 Q&A 追加进 messages_json。"""
     tenant_id = int(current_user.tenant_id)
     qa_sess = _get_tenant_session_or_404(db, session_id, tenant_id)
 
@@ -168,6 +176,7 @@ def ask_in_session(
             detail={'code': 'QA_FILES_MISSING', 'message': '会话关联的招投标双书文件不存在'},
         )
 
+    prior_history = _extract_session_history(qa_sess.messages_json)
     client, _ = resolve_effective_llm_client(db, current_user.get('id'))
     raw_effort = (body.reasoning_effort or '').strip().lower()
     valid_effort = raw_effort if raw_effort in ('low', 'medium', 'high') else None
@@ -179,6 +188,7 @@ def ask_in_session(
             client=client,
             max_rounds=body.max_rounds,
             reasoning_effort=valid_effort,
+            history=prior_history,
         )
     except Exception:
         res = ask_bid_expert(
@@ -188,6 +198,7 @@ def ask_in_session(
             client=None,
             max_rounds=body.max_rounds,
             reasoning_effort=valid_effort,
+            history=prior_history,
         )
 
     quotes_out = [
@@ -195,7 +206,7 @@ def ask_in_session(
             source=str(q.get('source') or 'tender'),
             quote=str(q.get('quote') or ''),
             offset=q.get('offset'),
-            page=q.get('page'),  # docx 恒为 None，序列化为 null
+            page=q.get('page'),
             quote_verified=bool(q.get('quote_verified', True)),
             note=q.get('note'),
         )
@@ -235,4 +246,130 @@ def ask_in_session(
         steps=list(res.get('steps') or []),
         rounds_used=int(res.get('rounds_used') or 1),
         terminated_by_max_rounds=bool(res.get('terminated_by_max_rounds', False)),
+    )
+
+
+@router.post('/{session_id}/ask/stream')
+@router.post('/sessions/{session_id}/ask/stream', include_in_schema=False)
+def ask_in_session_stream(
+    session_id: int,
+    body: QaAskRequest,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """E21 §2.2：SSE 流式问答端点（推送 event: step / answer_delta / done / error，在 done 帧原子落库更新会话）。"""
+    tenant_id = int(current_user.tenant_id)
+    user_id = current_user.get('id')
+    qa_sess = _get_tenant_session_or_404(db, session_id, tenant_id)
+
+    tender_rel = qa_sess.tender_path
+    bid_rel = qa_sess.bid_path
+    if (not tender_rel or not bid_rel) and qa_sess.task_id is not None:
+        task = db.query(BidCheckTask).filter_by(id=qa_sess.task_id, tenant_id=tenant_id).first()
+        if task is not None:
+            tender_rel = tender_rel or task.tender_path
+            bid_rel = bid_rel or task.bid_path
+
+    tender_abs = resolve_project_path(tender_rel)
+    bid_abs = resolve_project_path(bid_rel)
+    if not tender_abs.is_file() or not bid_abs.is_file():
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'QA_FILES_MISSING', 'message': '会话关联的招投标双书文件不存在'},
+        )
+
+    prior_history = _extract_session_history(qa_sess.messages_json)
+    client, _ = resolve_effective_llm_client(db, user_id)
+    raw_effort = (body.reasoning_effort or '').strip().lower()
+    valid_effort = raw_effort if raw_effort in ('low', 'medium', 'high') else None
+    clean_question = body.question.strip()
+    max_rounds = body.max_rounds
+    # 绑定当前请求所属 Engine 工厂（防止 create_app 替换 db_mod.SessionLocal 后模块顶层旧绑定失效）
+    db_bind = db.get_bind()
+    write_session_factory = (
+        db_mod.get_session_factory(db_bind) if db_bind is not None else db_mod.SessionLocal
+    )
+
+    def _sse_stream_gen():
+        try:
+            stream_iter = ask_bid_expert_stream(
+                tender_path=tender_abs,
+                bid_path=bid_abs,
+                question=clean_question,
+                client=client,
+                max_rounds=max_rounds,
+                reasoning_effort=valid_effort,
+                history=prior_history,
+            )
+            for ev in stream_iter:
+                ev_type = str(ev.get('type') or 'step')
+                ev_data = ev.get('data') or {}
+
+                if ev_type == 'done':
+                    quotes_out = [
+                        QaQuoteOut(
+                            source=str(q.get('source') or 'tender'),
+                            quote=str(q.get('quote') or ''),
+                            offset=q.get('offset'),
+                            page=q.get('page'),
+                            quote_verified=bool(q.get('quote_verified', True)),
+                            note=q.get('note'),
+                        )
+                        for q in (ev_data.get('quotes') or [])
+                    ]
+                    done_payload = {
+                        'session_id': session_id,
+                        'mode': str(ev_data.get('mode') or 'keyword_fallback'),
+                        'question': clean_question,
+                        'answer': str(ev_data.get('answer') or ''),
+                        'quotes': [q.model_dump() for q in quotes_out],
+                        'steps': list(ev_data.get('steps') or []),
+                        'rounds_used': int(ev_data.get('rounds_used') or 1),
+                        'terminated_by_max_rounds': bool(ev_data.get('terminated_by_max_rounds', False)),
+                    }
+
+                    write_sess = write_session_factory()
+                    try:
+                        row = write_sess.query(QaSession).filter_by(id=session_id, tenant_id=tenant_id).first()
+                        if row is not None:
+                            new_hist = list(row.messages_json or [])
+                            new_hist.append({'role': 'user', 'content': clean_question, 'quotes': [], 'steps': []})
+                            new_hist.append({
+                                'role': 'assistant',
+                                'content': done_payload['answer'],
+                                'mode': done_payload['mode'],
+                                'quotes': done_payload['quotes'],
+                                'steps': done_payload['steps'],
+                            })
+                            row.messages_json = new_hist
+                            if row.title in ('新对话', '标书专家追问会话'):
+                                row.title = clean_question[:30]
+                            row.updated_at = _utc_now()
+                            write_sess.commit()
+                        record_audit(
+                            write_sess,
+                            action='qa_ask',
+                            tenant_id=tenant_id,
+                            user_id=user_id,
+                            target=f"qa_session:{session_id}",
+                            detail_json={'mode': done_payload['mode'], 'quotes_count': len(quotes_out), 'stream': True},
+                        )
+                    finally:
+                        write_sess.close()
+
+                    yield f"event: done\ndata: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
+                else:
+                    yield f"event: {ev_type}\ndata: {json.dumps(ev_data, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            err_payload = {'detail': f"{type(exc).__name__}: {exc}"}
+            yield f"event: error\ndata: {json.dumps(err_payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        _sse_stream_gen(),
+        media_type='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+        },
     )

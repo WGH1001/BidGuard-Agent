@@ -161,7 +161,7 @@ def test_e19_f7_three_tier_reasoning_effort_and_gateway_guard(tmp_path):
     stub = _QaStubClient()
     for level in ('low', 'medium', 'high'):
         ask_bid_expert(t_path, b_path, '质保期多久？', client=stub, reasoning_effort=level)
-    assert seen_efforts == ['low', 'medium', 'high']
+    assert seen_efforts == ['low', 'high', 'max']
     assert len(set(seen_efforts)) == 3
 
     # 验证 LLMClient 在 supports_reasoning_effort=True vs False 时的透传与跳过保护

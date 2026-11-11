@@ -1,4 +1,4 @@
-import { del, get, post, put } from './http'
+import { del, get, getStoredToken, post, put } from './http'
 import { downloadFromApi } from './download'
 import type {
   AuditLogListOut,
@@ -39,6 +39,8 @@ import type {
   RunTaskTriggerOut,
   UserProfileOut,
   VerifyArticleOut,
+  QaStreamHandlers,
+  ReActStepTraceItem
 } from './types'
 
 export const ALLOWED_DOC_EXTS = ['.docx', '.pdf', '.txt'] as const
@@ -220,6 +222,90 @@ export const qaApi = {
   },
   ask(sessionId: number, payload: QaAskRequest): Promise<QaAskResponseOut> {
     return post<QaAskResponseOut>(`/qa/sessions/${sessionId}/ask`, payload)
+  },
+  askStream(
+    sessionId: number,
+    payload: QaAskRequest,
+    handlers: QaStreamHandlers,
+  ): () => void {
+    const controller = new AbortController()
+    const token = getStoredToken()
+    let terminalEmitted = false
+
+    const processSseBlock = (rawBlock: string): void => {
+      if (!rawBlock.trim()) return
+      let evName = 'message'
+      const dataLines: string[] = []
+      for (const line of rawBlock.split(/\r?\n/)) {
+        if (line.startsWith('event:')) {
+          evName = line.slice(6).trim()
+        } else if (line.startsWith('data:')) {
+          dataLines.push(line.slice(5).trim())
+        }
+      }
+      if (dataLines.length === 0) return
+      const parsed = JSON.parse(dataLines.join('\n'))
+      if (evName === 'step') {
+        handlers.onStep?.(parsed as ReActStepTraceItem)
+      } else if (evName === 'answer_delta') {
+        handlers.onDelta?.(String((parsed as { text?: string }).text || ''))
+      } else if (evName === 'done') {
+        terminalEmitted = true
+        handlers.onDone?.(parsed as QaAskResponseOut)
+      } else if (evName === 'error') {
+        terminalEmitted = true
+        handlers.onError?.(String((parsed as { detail?: string }).detail || '流式问答异常'))
+      }
+    }
+
+    void (async () => {
+      try {
+        const resp = await fetch(`/api/qa/sessions/${sessionId}/ask/stream`, {
+          method: 'POST',
+          headers: {
+            Accept: 'text/event-stream',
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        })
+
+        if (!resp.ok || !resp.body) {
+          throw new Error(`HTTP ${resp.status}`)
+        }
+
+        const reader = resp.body.getReader()
+        const decoder = new TextDecoder('utf-8')
+        let buffer = ''
+
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const blocks = buffer.split(/\r?\n\r?\n/)
+          buffer = blocks.pop() || ''
+
+          for (const rawBlock of blocks) {
+            processSseBlock(rawBlock)
+          }
+        }
+        buffer += decoder.decode()
+        if (buffer.trim()) {
+          processSseBlock(buffer)
+        }
+        if (!terminalEmitted && !controller.signal.aborted) {
+          handlers.onError?.('流式响应未正常结束')
+        }
+      } catch (err: unknown) {
+        if ((err as { name?: string })?.name === 'AbortError') return
+        handlers.onError?.(err instanceof Error ? err.message : '流式连接中断')
+      }
+    })()
+
+    return () => {
+      controller.abort()
+    }
   },
 }
 
