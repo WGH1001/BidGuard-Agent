@@ -10,7 +10,7 @@
    - cite_regulation(keyword, article_no, ...)：E4 新增第 6 工具，检索法规库返回条文原文+法律名+条号（库空时诚实报"法规库为空"）。
 2. ReAct 循环与流式输出（E21）：
    - 支持注入会话多轮上下文 history（自动过滤空消息、保留最近 N 轮并截断超长单条文本）；
-   - 智谱 glm-5.3-flash 三挡推理深度实测合法值映射：low->'low'(3轮) / medium->'high'(4轮) / high->'max'(6轮)，严禁向网关直接透传 'medium' 触发 400-1210 拒绝；
+   - 智谱 glm-5.3-flash 三挡推理深度实测合法值映射：low->'low' / medium->'high' / high->'max'（均开放至 max_rounds=7 轮：最多调用全部 6 个工具 + 第 7 轮 final 总结），严禁向网关直接透传 'medium' 触发 400-1210 拒绝；
    - ask_bid_expert_stream 实时产出 step -> answer_delta -> done 事件帧，final 输出 quotes 100% 强制走 verify_quote 溯源。
 """
 from __future__ import annotations
@@ -55,12 +55,13 @@ _FOLLOWUP_PRONOUN_KEYS = (
     '它们', '这些', '那些', '这个', '那个', '怎么规定', '为什么', '怎么不', '还有呢', '问了什么', '它',
 )
 
-# E21 §1.3 & §2.1：前端 UI 三挡（low/medium/high）映射为智谱 glm-5.3-flash 实测合法上游值（low/high/max）与轮次上限
+# E21 / 三挡解耦：前端 UI 三挡（low/medium/high）映射为智谱 glm-5.3-flash 实测合法上游推理深度（low/high/max）；
+# 三挡均放开至 7 轮（最多调用全部 6 个工具 + 第 7 轮 final 总结），仅调整模型推理思考深度而不卡工具轮次
 _EFFORT_UPSTREAM_MAP: dict[str, tuple[str, int]] = {
-    'low': ('low', 3),
-    'medium': ('high', 4),
-    'high': ('max', 6),
-    'max': ('max', 6),
+    'low': ('low', 7),
+    'medium': ('high', 7),
+    'high': ('max', 7),
+    'max': ('max', 7),
 }
 
 _REACT_SYSTEM_PROMPT = """你是招投标双书合规审查专家（ReAct Agent）。你可以调用以下 6 个确定性工具来回答用户关于《招标文件》、《投标文件》与招投标法律法规的问题：
@@ -155,8 +156,8 @@ def _resolve_effort_and_rounds(
     reasoning_effort: Optional[str],
     max_rounds: int,
 ) -> tuple[Optional[str], int]:
-    """E21 §2.1：将前端三挡（low/medium/high）映射为智谱实测合法上游值（low/high/max）并联动轮次上限。"""
-    base_limit = max(1, int(max_rounds or 6))
+    """将前端三挡（low/medium/high）映射为上游合法推理深度（low/high/max），三挡均允许跑满 max_rounds（默认 7 轮：6 工具 + 1 final）。"""
+    base_limit = max(1, int(max_rounds or 7))
     raw_key = str(reasoning_effort or '').strip().lower()
     if raw_key in _EFFORT_UPSTREAM_MAP:
         mapped_effort, gear_round_cap = _EFFORT_UPSTREAM_MAP[raw_key]
@@ -432,7 +433,7 @@ def ask_bid_expert_stream(
     bid_path: str | Path,
     question: str,
     client=None,
-    max_rounds: int = 6,
+    max_rounds: int = 7,
     reasoning_effort: Optional[str] = None,
     history: Optional[list[dict[str, Any]]] = None,
 ) -> Iterator[dict[str, Any]]:
@@ -741,7 +742,7 @@ def ask_bid_expert(
     bid_path: str | Path,
     question: str,
     client=None,
-    max_rounds: int = 6,
+    max_rounds: int = 7,
     reasoning_effort: Optional[str] = None,
     history: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:

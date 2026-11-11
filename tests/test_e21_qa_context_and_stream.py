@@ -14,8 +14,9 @@
    - 事件帧严格按 step -> answer_delta -> done 顺序吐出；
    - 终帧 quotes 强制通过 verify_quote 校验，虚假编造摘录被清空（quote='' 且 quote_verified=False）；
    - 流式结束后 GET /api/qa/sessions/{sid} 可查到已持久化落库的完整问答与 steps；
-4. 三挡推理深度与轮次联动：
-   - low -> ('low', 3轮)、medium -> ('high', 4轮)、high -> ('max', 6轮)，绝不向网关透传非法的 'medium'。
+4. 三挡推理深度映射与 7 轮上限（6 工具 + 1 final 收口）：
+   - low -> ('low', 7)、medium -> ('high', 7)、high -> ('max', 7)，绝不向网关透传非法的 'medium'；
+   - 即使在极速挡（low），也可顺序调用全部 6 个工具并在第 7 轮完成 final 收口。
 """
 from __future__ import annotations
 
@@ -133,11 +134,74 @@ def test_e21_history_truncation_and_three_tier_mapping():
     assert '第14轮提问' in formatted[0]['content']
     assert '第19轮回答' in formatted[-1]['content']
 
-    # 验证三挡映射：绝不透传 'medium'，且轮次上限随挡位拉开
-    assert _resolve_effort_and_rounds('low', 6) == ('low', 3)
-    assert _resolve_effort_and_rounds('medium', 6) == ('high', 4)
-    assert _resolve_effort_and_rounds('high', 6) == ('max', 6)
-    assert _resolve_effort_and_rounds('invalid', 6) == (None, 6)
+    # 验证三挡映射：绝不透传 'medium'，且三挡均开放至 7 轮（仅调模型思考深度，同时尊重显式更小 max_rounds）
+    assert _resolve_effort_and_rounds('low', 7) == ('low', 7)
+    assert _resolve_effort_and_rounds('medium', 7) == ('high', 7)
+    assert _resolve_effort_and_rounds('high', 7) == ('max', 7)
+    assert _resolve_effort_and_rounds('low', 3) == ('low', 3)
+    assert _resolve_effort_and_rounds('invalid', 7) == (None, 7)
+
+
+def test_e21_low_tier_allows_all_six_tools_in_seven_rounds(tmp_path):
+    """验证默认 7 轮（6 工具 + 1 final 收口）下，即使极速挡（low）也能完整调用全部 6 个工具并正常收口。"""
+    from core.bid_react_agent import ALLOWED_REACT_TOOLS, ask_bid_expert
+
+    t_path = tmp_path / 't6.docx'
+    b_path = tmp_path / 'b6.docx'
+    t_path.write_bytes(_make_docx_bytes(['第一章 评标办法', '★1. 质保期不少于36个月。']))
+    b_path.write_bytes(_make_docx_bytes(['第一章 投标响应', '★1. 质保期36个月。营业执照有效期至2028-12-31。']))
+
+    class _SixToolMockClient:
+        def __init__(self):
+            self.turn = 0
+            self.efforts: list[str | None] = []
+
+        def chat(self, messages, model_tier='flash', reasoning_effort=None):
+            self.efforts.append(reasoning_effort)
+            self.turn += 1
+            if self.turn == 1:
+                payload = {'thought': '1.查招标', 'action': 'search_tender', 'action_input': '质保期'}
+            elif self.turn == 2:
+                payload = {'thought': '2.查投标', 'action': 'search_bid', 'action_input': '质保期'}
+            elif self.turn == 3:
+                payload = {'thought': '3.定章节', 'action': 'locate_chapter', 'action_input': '评标办法'}
+            elif self.turn == 4:
+                payload = {
+                    'thought': '4.算报价',
+                    'action': 'recalc_price',
+                    'action_input': {'items': [{'name': '设备', 'qty': '1', 'unit_price': '100', 'amount': '100'}], 'bid_total': '100'},
+                }
+            elif self.turn == 5:
+                payload = {
+                    'thought': '5.核证照',
+                    'action': 'check_cert_expiry',
+                    'action_input': {'cert_text': '有效期至2028-12-31', 'open_date': '2026-11-11'},
+                }
+            elif self.turn == 6:
+                payload = {'thought': '6.查法规', 'action': 'cite_regulation', 'action_input': {'keyword': '招标'}}
+            else:
+                payload = {
+                    'thought': '7.汇总收口',
+                    'action': 'final',
+                    'action_input': {
+                        'answer': '全部6工具核验完成，质保期不少于36个月。',
+                        'quotes': ['★1. 质保期不少于36个月。'],
+                    },
+                }
+            return SimpleNamespace(content=json.dumps(payload, ensure_ascii=False))
+
+    mock_client = _SixToolMockClient()
+    res = ask_bid_expert(
+        tender_path=t_path,
+        bid_path=b_path,
+        question='请用全部工具全面核验',
+        client=mock_client,
+        reasoning_effort='low',
+    )
+    assert res['rounds_used'] == 7
+    assert res['terminated_by_max_rounds'] is False
+    assert [s['action'] for s in res['steps']] == [*ALLOWED_REACT_TOOLS, 'final']
+    assert mock_client.efforts == ['low'] * 7
 
 
 # ── 3. ask_bid_expert_stream 与 POST /api/qa/sessions/{sid}/ask/stream 验证 ──

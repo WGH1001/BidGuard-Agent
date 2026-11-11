@@ -234,7 +234,7 @@ async function handleSendQuestion(question: string): Promise<void> {
 
   const payload = {
     question,
-    max_rounds: 6,
+    max_rounds: 7,
     reasoning_effort: reasoningEffort.value,
   }
 
@@ -400,8 +400,8 @@ onBeforeUnmount(() => {
           </p>
         </div>
 
-        <!-- E19/E21：三挡思考深度切换器（极速=low(3轮) / 均衡=high(4轮) / 深度=max(6轮)） -->
-        <div class="effort-switch" title="切换大模型 ReAct 推理思考深度与检索轮次">
+        <!-- E19/E21：三挡思考深度切换器（极速=low / 均衡=high / 深度=max，均开放最多7轮=6工具+1收口） -->
+        <div class="effort-switch" title="切换大模型推理思考深度（三挡均可调用全部 6 个工具，最多 7 轮）">
           <span class="es-lbl">推理深度：</span>
           <button
             type="button"
