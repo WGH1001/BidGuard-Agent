@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""T5 / T60 / E12 模型网关 [Gemini-Flash] —— 业务代码与模型/部署形态之间的唯一隔断层
+"""T5 / T60 / E12 / E22 模型网关 [Gemini-Flash] —— 业务代码与模型/部署形态之间的唯一隔断层
 
 实现规格（签名不得修改）：
     get_llm_client(env=None) -> LLMClient
@@ -19,6 +19,39 @@ import yaml
 from core.interfaces import LLMResponse
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config' / 'models.yaml'
+
+# E22 §2.1：思考相关参数键集合与内部非透传配置键集合
+_THINKING_PARAM_KEYS = (
+    'reasoning_effort',
+    'thinking',
+    'thinking_budget',
+    'enable_thinking',
+)
+_INTERNAL_CHAT_OPTION_KEYS = (
+    'max_tokens',
+    'reasoning_effort_map',
+)
+
+# E22 §2.1：组合条件识别上游对思考参数的 400 拒绝（思考参数关键词 AND 拒绝语义词）
+_THINKING_KEYWORDS_CF = (
+    'reasoning_effort',
+    'enable_thinking',
+    'thinking_budget',
+    'thinking',
+)
+_REJECT_SEMANTIC_WORDS_CF = (
+    'invalid',
+    'unsupported',
+    'unknown',
+    'not support',
+    'unrecognized',
+    'unexpected keyword',
+    'extra fields',
+    '非法',
+    '无效',
+    '不支持',
+    '未知参数',
+)
 
 
 def get_llm_client(env=None) -> 'LLMClient':
@@ -92,13 +125,37 @@ def build_client_from_user_config(
 
 
 def _is_thinking_reject(e: Exception) -> bool:
-    """识别上游对 thinking 参数的 400 拒绝（错误码 1210 / 文案含 thinking）。
+    """识别上游对 thinking / reasoning_effort 等思考参数的 400 拒绝。
+
+    E22 §2.1 升级规则：
+    1. '1210'（智谱参数错误码）保留为独立捷径，单独命中即返回 True；
+    2. 其余情况必须同时满足：(含思考参数关键词) AND (含拒绝/非法语义词)，
+       严禁裸匹配 'unsupported' 误伤 'unsupported image type' / 'unsupported model'。
 
     典型场景：私有化端点不支持某种 thinking 参数形状——此时网关自动去参
     重试，保证「换部署形态只改配置」的承诺不被附加参数卡死。
     """
-    msg = str(e)
-    return '1210' in msg or 'thinking' in msg.lower()
+    msg = str(e or '')
+    if not msg:
+        return False
+    msg_cf = msg.casefold()
+    if '1210' in msg_cf:
+        return True
+    has_thinking_key = any(k in msg_cf for k in _THINKING_KEYWORDS_CF)
+    if not has_thinking_key:
+        return False
+    has_reject_word = any(w in msg_cf for w in _REJECT_SEMANTIC_WORDS_CF)
+    return has_reject_word
+
+
+def _strip_thinking_params(extra_body: dict) -> dict:
+    """E22 §2.1：返回剥除了全部思考相关参数后的新字典副本（严禁原地修改 self.chat_options）。"""
+    if not extra_body:
+        return {}
+    return {
+        k: v for k, v in extra_body.items()
+        if k not in _THINKING_PARAM_KEYS
+    }
 
 
 class LLMClient:
@@ -127,6 +184,28 @@ class LLMClient:
             self.client = requests
             self.use_openai = False
 
+    def _mark_effort_unsupported(self) -> None:
+        """E22 §2.1：单实例内记录上游已拒绝思考参数（熔断记忆仅存活于当前实例内存）。"""
+        self.supports_reasoning_effort = False
+
+    def translate_reasoning_effort(self, value: str) -> Optional[str]:
+        """E22 §2.1.6：读取 chat_options.reasoning_effort_map 做 UI 挡位值 -> 上游值翻译。
+
+        当 chat_options 未配置 reasoning_effort_map 或 value 不在映射表中时，
+        严格返回 None（交由调用方安全回退至内置 _EFFORT_UPSTREAM_MAP，严禁原样返回 'medium'）。
+        """
+        if not value or not str(value).strip():
+            return None
+        raw_map = self.chat_options.get('reasoning_effort_map')
+        if not isinstance(raw_map, dict) or not raw_map:
+            return None
+        norm_key = str(value).strip().lower()
+        for k, v in raw_map.items():
+            if str(k).strip().lower() == norm_key and v is not None:
+                mapped = str(v).strip().lower()
+                return mapped if mapped else None
+        return None
+
     def _resolve_max_tokens(self, max_tokens: Optional[int]) -> Optional[int]:
         """解析生效的 max_tokens（显式传参优先，其次读 chat_options.max_tokens，均无返 None）。"""
         if max_tokens is not None:
@@ -137,7 +216,7 @@ class LLMClient:
         return None
 
     def _build_extra_body(self) -> dict:
-        """构建请求附加参数：chat_options 通用透传（max_tokens 除外）。
+        """构建请求附加参数：chat_options 通用透传（max_tokens 与 reasoning_effort_map 除外）。
 
         v2.0.4：glm-5.3-flash 为强制思考型模型且思考量不可控——
         thinking.budget / thinking.effort 均被上游静默忽略，思考可烧穿
@@ -146,15 +225,24 @@ class LLMClient:
         chat_options.reasoning_effort: low 即生效。本方法把 chat_options
         中除 max_tokens（由 _resolve_max_tokens 消费）外的键全部透传，
         历史兼容：thinking_budget 旧键映射为 thinking dict。
+
+        E22 加固：
+        - 无条件剔除内部配置键 reasoning_effort_map，绝不透传给上游 HTTP 请求；
+        - 当 getattr(self, 'supports_reasoning_effort', True) 为 False（含熔断后）时，
+          同步跳过 reasoning_effort / enable_thinking / thinking / thinking_budget。
         """
+        effort_supported = getattr(self, 'supports_reasoning_effort', True)
         extra_body = {}
         for key, value in self.chat_options.items():
-            if key == 'max_tokens':
+            if key in _INTERNAL_CHAT_OPTION_KEYS:
+                continue
+            if not effort_supported and key in _THINKING_PARAM_KEYS:
                 continue
             extra_body[key] = value
         if 'thinking_budget' in extra_body:
             budget = extra_body.pop('thinking_budget')
-            extra_body['thinking'] = {'type': 'enabled', 'budget': int(budget)}
+            if effort_supported:
+                extra_body['thinking'] = {'type': 'enabled', 'budget': int(budget)}
         return extra_body
 
     def _calc_and_record_usage(self, model_name: str, prompt_tokens: int, completion_tokens: int) -> float:
@@ -250,10 +338,10 @@ class LLMClient:
                 if attempt == max_retries:
                     raise RuntimeError(f"API 请求失败重试耗尽: {e}")
                 # thinking/reasoning_effort 参数被上游拒绝（如私有化端点不支持
-                # 或档位值非法）→ 去掉相关参数重试，业务不因附加参数被卡死
+                # 或档位值非法）→ 剥除全部思考参数并标记实例熔断后重试，后续轮次全程无参直发
                 if _is_thinking_reject(e):
-                    extra_body.pop('thinking', None)
-                    extra_body.pop('reasoning_effort', None)
+                    extra_body = _strip_thinking_params(extra_body)
+                    self._mark_effort_unsupported()
                 time.sleep(1)
 
         raise RuntimeError("不可达状态")
@@ -281,35 +369,56 @@ class LLMClient:
         temperature = 0.2
 
         if not self.use_openai:
-            sync_resp = self.chat(messages, model_tier=model_tier, max_tokens=resolved_max_tokens)
+            # 降级：若无 OpenAI SDK，退回同步请求后包装为单次 delta + final（E22：补传 reasoning_effort）
+            sync_resp = self.chat(
+                messages,
+                model_tier=model_tier,
+                max_tokens=resolved_max_tokens,
+                reasoning_effort=reasoning_effort,
+            )
             if sync_resp.content:
                 yield {'type': 'delta', 'text': sync_resp.content}
             yield {'type': 'final', 'response': sync_resp}
             return
 
-        base_kwargs = {
-            'model': model_name,
-            'messages': messages,
-            'temperature': temperature,
-            'extra_body': extra_body,
-            'stream': True,
-        }
-        if resolved_max_tokens is not None:
-            base_kwargs['max_tokens'] = resolved_max_tokens
+        def _build_stream_kwargs(cur_extra: dict) -> dict:
+            kw = {
+                'model': model_name,
+                'messages': messages,
+                'temperature': temperature,
+                'extra_body': cur_extra,
+                'stream': True,
+            }
+            if resolved_max_tokens is not None:
+                kw['max_tokens'] = resolved_max_tokens
+            return kw
 
-        # 优先附带 stream_options={'include_usage': True}，若上游不支持则降级不带该参数
+        include_usage_supported = True
+
+        def _create_stream(cur_extra: dict):
+            nonlocal include_usage_supported
+            kw = _build_stream_kwargs(cur_extra)
+            if include_usage_supported:
+                try:
+                    return self.client.chat.completions.create(
+                        **kw,
+                        stream_options={'include_usage': True},
+                    )
+                except TypeError:
+                    include_usage_supported = False
+            return self.client.chat.completions.create(**kw)
+
+        # 优先尝试带思考参数发起流；若遇思考参数 400 拒绝（即便先经历了 stream_options TypeError 降级），
+        # 立即剥除全部思考参数 + 标记实例熔断后重试一次；非思考参数异常（如 500/网络断连）直接上抛
         try:
-            stream_iter = self.client.chat.completions.create(
-                **base_kwargs,
-                stream_options={'include_usage': True},
-            )
-        except TypeError:
-            stream_iter = self.client.chat.completions.create(**base_kwargs)
+            stream_iter = _create_stream(extra_body)
         except Exception as e:
-            # thinking 参数被上游拒绝 → 去掉 thinking 参数重试（保底直连）
-            if _is_thinking_reject(e) and base_kwargs.get('extra_body', {}).get('thinking'):
-                base_kwargs = {k: v for k, v in base_kwargs.items() if k != 'extra_body'}
-            stream_iter = self.client.chat.completions.create(**base_kwargs)
+            if _is_thinking_reject(e):
+                extra_body = _strip_thinking_params(extra_body)
+                self._mark_effort_unsupported()
+                stream_iter = _create_stream(extra_body)
+            else:
+                raise
 
         collected_chunks: list[str] = []
         prompt_tokens: Optional[int] = None

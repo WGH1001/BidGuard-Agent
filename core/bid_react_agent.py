@@ -155,12 +155,21 @@ def _format_history_messages(
 def _resolve_effort_and_rounds(
     reasoning_effort: Optional[str],
     max_rounds: int,
+    client: Any = None,
 ) -> tuple[Optional[str], int]:
-    """将前端三挡（low/medium/high）映射为上游合法推理深度（low/high/max），三挡均允许跑满 max_rounds（默认 7 轮：6 工具 + 1 final）。"""
+    """将前端三挡（low/medium/high）映射为上游合法推理深度（优先读 client.translate_reasoning_effort，
+    未配置时回退 _EFFORT_UPSTREAM_MAP 的 low/high/max），三挡均允许跑满 max_rounds（默认 7 轮：6 工具 + 1 final）。
+    """
     base_limit = max(1, int(max_rounds or 7))
     raw_key = str(reasoning_effort or '').strip().lower()
     if raw_key in _EFFORT_UPSTREAM_MAP:
-        mapped_effort, gear_round_cap = _EFFORT_UPSTREAM_MAP[raw_key]
+        default_effort, gear_round_cap = _EFFORT_UPSTREAM_MAP[raw_key]
+        mapped_effort = default_effort
+        translate_fn = getattr(client, 'translate_reasoning_effort', None) if client is not None else None
+        if callable(translate_fn):
+            custom_val = translate_fn(raw_key)
+            if isinstance(custom_val, str) and custom_val.strip():
+                mapped_effort = custom_val.strip()
         return mapped_effort, min(base_limit, gear_round_cap)
     return None, base_limit
 
@@ -543,7 +552,7 @@ def ask_bid_expert_stream(
     steps: list[dict[str, Any]] = []
     collected_tool_quotes: list[dict[str, Any]] = []
 
-    norm_effort, limit = _resolve_effort_and_rounds(reasoning_effort, max_rounds)
+    norm_effort, limit = _resolve_effort_and_rounds(reasoning_effort, max_rounds, client=client)
 
     for r_idx in range(1, limit + 1):
         if norm_effort is not None:

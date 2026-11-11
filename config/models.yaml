@@ -32,6 +32,8 @@ envs:
       flash: GLM-5.3-Flash
     chat_options:
       reasoning_effort: low
+      # E22：内网网关用 scripts/probe_reasoning_efforts.py --env prod 摸底后，可按实测支持的枚举值开启映射：
+      # reasoning_effort_map: {low: low, medium: high, high: max}
     pricing:                           # 计价单位：网关积分 D（非人民币）——输入 0.8 D / 输出 2.8 D 每百万
       currency: D                       # 仅口径标注，引擎按模型名取价忽略此键
       GLM-5.3-Flash:  {prompt: 0.0008, completion: 0.0028}
