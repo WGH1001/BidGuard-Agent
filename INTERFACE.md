@@ -115,12 +115,12 @@ scan_rigging_radar(tender_path: str | Path, client=None) -> dict[str, Any]
 ```python
 # core/bid_react_agent.py
 ask_bid_expert(tender_path: str | Path, bid_path: str | Path, question: str,
-               client=None, max_rounds: int = 6,
+               client=None, max_rounds: int = 7,
                reasoning_effort: Optional[str] = None,
                history: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]
 
 ask_bid_expert_stream(tender_path: str | Path, bid_path: str | Path, question: str,
-                      client=None, max_rounds: int = 6,
+                      client=None, max_rounds: int = 7,
                       reasoning_effort: Optional[str] = None,
                       history: Optional[list[dict[str, Any]]] = None) -> Iterator[dict[str, Any]]
 # 流式事件帧：{'type': 'step'|'answer_delta'|'done'|'error', 'data': ...}；ask_bid_expert 消费其 done 帧保持兼容
@@ -129,8 +129,8 @@ ask_bid_expert_stream(tender_path: str | Path, bid_path: str | Path, question: s
 #         'quotes': [{'source','quote','offset','page','footer_page','is_docx_page','quote_verified'}, ...],
 #         'steps': [...], 'rounds_used': int, 'terminated_by_max_rounds': bool}
 # E18 起：quotes/检索工具通过统一双轨页码上下文适配 PDF 与 docx；无法计算页码时诚实为 None 并展示字符偏移
-# E19/E21 起：UI reasoning_effort 支持 'low' | 'medium' | 'high'，网关侧映射智谱合法值与轮次上限
-#           （low->'low'/3轮, medium->'high'/4轮, high->'max'/6轮；非法值忽略走默认）
+# E19/E21 起：UI reasoning_effort 支持 'low' | 'medium' | 'high'，网关侧映射智谱合法值
+#           （low->'low', medium->'high', high->'max'；三挡均开放至 7 轮=6 工具+1 final，仅调推理深度；非法值忽略走默认）
 # E21 起：history 注入多轮对话（最近 6 轮 / 单条 ≤800 字截断），0-Token 降级同步回溯历史提问关键词；
 #         backend 新增 SSE 端点 POST /api/qa/sessions/{session_id}/ask/stream（done 帧原子落库）
 # 已挂载 6 工具：search_tender / search_bid / locate_chapter / recalc_price / check_cert_expiry / cite_regulation
@@ -226,4 +226,4 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 | 2026-11-10 | E16 交付中心升级：`/api/reports` 新增 `GET /api/reports/{task_id}/signoff`（终核签字单下载）与 `POST /api/reports/batch-zip`（多任务内容自选批量打包） | 实现侧 + 验收 |
 | 2026-11-10 | E19 UX 体验修复与 F4 并发提速：`core/response_checker.py` 升级两阶段并发（受 `BIDGUARD_F4_CONCURRENCY` 环境变量控制，默认 4）；`ask_bid_expert` 与 `QaAskRequest`（`POST /api/qa/sessions/{id}/ask`）新增可选参数 `reasoning_effort`（`'low'\|'medium'\|'high'`） | 实现侧 + 交叉复查 |
 | 2026-11-11 | E20 F1/F5/F6 体验与 Docker 端口共存：仅前端视图与 `docker-compose.yml`（`POSTGRES_PORT:-15432`）调整，core↔backend 签名零改动 | 实现侧 + 验收 |
-| 2026-11-11 | E21 F7 多轮上下文与流式直播：`core/bid_react_agent.py` 新增 `history` 参数与流式入口 `ask_bid_expert_stream`，三挡推理映射智谱合法值 `low(3轮)/high(4轮)/max(6轮)`；`backend/routers/qa.py` 同步与流式端点注入 `messages_json` 历史并新增 `POST /api/qa/sessions/{id}/ask/stream` | 实现侧 + 验收修复 |
+| 2026-11-11 | E21 F7 多轮上下文与流式直播：`core/bid_react_agent.py` 新增 `history` 参数与流式入口 `ask_bid_expert_stream`，三挡推理映射智谱合法值 `low/high/max`（`max_rounds` 默认放开至 `7` 轮以支持 6 工具+1 `final`，仅调深度）；`backend/routers/qa.py` 同步与流式端点注入 `messages_json` 历史并新增 `POST /api/qa/sessions/{id}/ask/stream`（`QaAskRequest.max_rounds` 放宽至 `1..8` 默认 `7`） | 实现侧 + 验收修复 |
