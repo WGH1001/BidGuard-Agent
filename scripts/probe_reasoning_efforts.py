@@ -20,7 +20,11 @@ import time
 from typing import Any
 import yaml
 
+from dotenv import load_dotenv
+
 ROOT = Path(__file__).resolve().parents[1]
+# 与后端一致从项目根 .env 读取 PRIVATE_API_KEY / ZHIPU_API_KEY 等密钥（.env 优先级低于已有进程环境变量）
+load_dotenv(ROOT / '.env')
 CONFIG_PATH = ROOT / 'config' / 'models.yaml'
 CANDIDATE_EFFORTS = ('low', 'medium', 'high', 'max')
 
@@ -72,7 +76,7 @@ def _probe_single_payload(base_url: str, api_key: str, model_name: str, extra_bo
         'model': model_name,
         'messages': [{'role': 'user', 'content': '请只回复数字1'}],
         'temperature': 0.1,
-        'max_tokens': 16,
+        'max_tokens': 256,
         **extra_body,
     }
     t0 = time.perf_counter()
