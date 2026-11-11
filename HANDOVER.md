@@ -54,23 +54,23 @@ BidGuard-Agent/
 ├── core/                                # 19 个模块（F1~F7 + 混合检索 + 法规库，逐项状态见 §3）
 ├── backend/                             # main + models(11表) + schemas + 11 组路由
 ├── frontend/                            # Vue3 + TS：12 个视图全部落地
-├── tests/                               # 26 个测试文件（test_*.py）167 项全绿
-├── scripts/                             # build_f1_baseline.py / eval_f1_llm.py
+├── tests/                               # 27 个测试文件（test_*.py）184 项全绿
+├── scripts/                             # build_f1_baseline.py / eval_f1_llm.py / probe_reasoning_efforts.py
 ├── data/
 │   ├── corpus/m0_samples/               # 11 份语料 + baseline / ground_truth / llm_eval 三本账（§4）
 │   ├── corpus/regulations/              # E4：4 部法律 JSON 种子 + originals/ 原文（含 87 号令扫描 PDF）
 │   └── rules/law_source/                # 4 部法规官方文本
 ├── deploy/nginx/nginx.conf              # 静态直发 + /api/ 反代 SSE 防缓冲三件套
-└── docs/                                # DEPLOY.md / cards/（任务卡归档 B1~E21，共 28 份）/ 待立卡-E1E2升级点定案.md
+└── docs/                                # DEPLOY.md / cards/（任务卡归档 B1~E22，共 29 份）/ 待立卡-E1E2升级点定案.md
 ```
 
 ---
 
 ## 2. 当前基线（截至 2026-11-11）
 
-- **开发阶段**：3 周排期全部完成 + 二十一轮增强升级（E1~E21）全量交付，仿真标书 **11/11 验收收官**，前后端体验、Docker 端口双开共存与 F7 多轮流式问答闭环完成
-- **Git 最新功能 Commit**：`4f52878`（含 E20 `df9f74a`、E21 `69ad261` / `4f52878`；远端同步状态以 `git log origin/main..HEAD` 实数为准）
-- **测试基线**：**167 项 pytest 全绿（零回归）** + `vue-tsc --noEmit` 零错误 + `vite build` 成功 —— 第一验收线已演进至 **167 项**
+- **开发阶段**：3 周排期全部完成 + 二十二轮增强升级（E1~E22）全量交付，仿真标书 **11/11 验收收官**，前后端体验、Docker 端口双开共存、F7 多轮流式问答与网关思考参数防御加固完成
+- **Git 最新功能 Commit**：`a8ab61f`（含 E20 `df9f74a`、E21 `69ad261` / `4f52878`、E22 `a8ab61f`；远端同步状态以 `git log origin/main..HEAD` 实数为准）
+- **测试基线**：**184 项 pytest 全绿（零回归）** + `vue-tsc --noEmit` 零错误 + `vite build` 成功 —— 第一验收线已演进至 **184 项**
 - **模型网关基线**：`config/models.yaml` 默认 `default_env: demo`（智谱 `glm-5.3-flash` 直连，F7 三挡映射到智谱合法值 `low`/`high`/`max`，`embedding: embedding-3` 已激活 L2 混合检索）；预留 `prod` 内网私有网关（`http://10.0.2.81:3000/v1`，无向量模型自动无感降级 Level 1）
 - **运行环境**：本机开发用项目自带 `.venv`（依赖已全量钉死）；生产走 Docker 四容器（`docker compose up -d --build`，默认宿主机 `APP_PORT=8000` + `POSTGRES_PORT=15432`，与老项目 `8080` + `5432` 并行共存不冲突）
 - **快速验收命令**：
@@ -90,7 +90,7 @@ BidGuard-Agent/
 | 2 | `core/parser.py` | 文档解析 | Word/PDF/TXT 解析、vMerge 去重、RapidOCR 离线缓存；E5 新增 `build_pdf_page_spans/offset_to_page`；E6 新增 `build_docx_page_spans/offset_to_docx_page`（双轨页码：印刷页 > 物理页估算 > 字符偏移诚实回退）。**E6 验收时偏移权威源已从 lxml 重建改为 python-docx 部件序列（7/7 真语料零漂移）** | 已验收（11 份真语料解析零虚增） |
 | 3 | `core/splitter.py` | 条款切分 | 条款编号与段落切分，保留精确 `start/end` 偏移 | 已验收 |
 | 4 | `core/quote_verifier.py` | 溯源锁账 | `normalize_zh` 中文归一 + `verify_quote` 连续原文子串核验 | 已验收（F1/F4 防幻觉守门员） |
-| 5 | `core/llm_gateway.py` | 模型网关 | OpenAI 兼容多环境调用、线程安全用量累加（`self._lock`）、`embed()` 向量接入、原生 `reasoning_effort` 透传与拒参自动重试 | 已验收（E12 激活 `embed()`；F1 实测 178 次调用 0.231 元） |
+| 5 | `core/llm_gateway.py` | 模型网关 | OpenAI 兼容多环境调用、线程安全用量累加（`self._lock`）、`embed()` 向量接入、原生 `reasoning_effort` 透传；**E22 加固**：组合条件拒绝识别（屏蔽无关 400 误判）、单实例内存熔断记忆（不改 `self.chat_options`）、`chat_stream()` 组合去参重试、`reasoning_effort_map` 配置翻译与内部键隔离 | 已验收（E12 / E22 实测全绿） |
 | 6 | `core/tender_extractor.py` | **F1 确定性层** | ★/▲ 分型合并、无标记模式 A/B、资格/符合/评标章定位、表格型评分细则解析（0 Token）；E18 接入统一双轨页码上下文 | **已验收**（11 份语料逐字符守恒，docx 页码全非空） |
 | 7 | `core/tender_llm.py` | **F1 LLM 层** | 候选段扩窗吸附、逐段结构化、强制溯源、段落型评分细则抽取 | **已验收**（召回率/溯源率 100%） |
 | 8 | `core/price_sandbox.py` | **F2 算术沙盒** | 0 Token 报价核验（全程 Decimal 禁 float）、大写转换、限价比较 | **已验收**（差 1 分钱必报警） |
@@ -176,13 +176,14 @@ BidGuard-Agent/
 | E19 | 六子项合并单卡三 Commit：F1 本地时区/多文件拖拽/局部 loading/超时放宽 + 在途秒表（UTC 补 `Z`）+ F7 三挡推理深度 + SSE 断线轮询对齐 + F4 两阶段并发提速（默认 4 路；含 `worker` 对单条 `error_fallback` 暴露 `LLM_FALLBACK` 提示级发现） | `85f0ddd` / `f64b3b6` / `b8f3403` / `b468c35` | 161 项 + `vue-tsc` |
 | E20 | F5 偏离表五维分类筛选与统计卡片联动、F6 去旧文本框+多文件拖拽批量+本地时区、F1 历史单行横向滚动/搜索下拉+5MB `localStorage` LRU 淘汰、`docker-compose.yml` Postgres 宿主机端口变量化（`${POSTGRES_PORT:-15432}:5432` 与老项目双开共存） | `df9f74a` | 166 项 + `vue-tsc` |
 | E21 | F7 多轮会话 `history` 注入与 0-Token 历史回溯、智谱 `glm-5.3-flash` 合法三挡映射（`low/high/max` 仅调思考深度，三挡均开放 `max_rounds=7` 支持 6 工具+1 收口）、`ask_bid_expert_stream` + `POST /api/qa/sessions/{id}/ask/stream` ReAct 思考轨迹 SSE 直播与流式打字（含 `getStoredToken` 鉴权/`get_session_factory` 写库/0-Token 回溯 3 项验收修补） | `69ad261` / `4f52878` | 167 项 + `vue-tsc` + `vite build` |
+| E22 | LLM 网关思考参数防御加固：`_is_thinking_reject` 组合识别（防 `unsupported image type` 误判）、`chat`/`chat_stream` 共用单实例内存熔断与流式 `stream_options` 组合重试补漏、`chat_options.reasoning_effort_map` 配置映射与内部键隔离、内网手动实弹探针 `scripts/probe_reasoning_efforts.py` | `a8ab61f` | 184 项 |
 | chore | requirements 全量钉死（`59e6b64`）、基础镜像 digest 钉死、弹窗会话记忆 | `90a1947` | — |
 
 ---
 
 ## 7. 协作纪律与工程红线（完整版见 `AGENTS.md`）
 
-1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线 **167 项**。
+1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线 **184 项**。
 2. **凡能算的绝不进大模型（0 Token 优先）**；金额全程 `Decimal` 禁 `float`（ROUND_HALF_UP 量化 0.01）。
 3. **LLM 只吃局部窗口 + 强制 `quote_verifier` 溯源**；严禁整本标书直塞。
 4. **宁缺毋滥显式降级**：无法对齐必返回 NEED_MANUAL；找不到位置绝不乱锚（E5 五级定位链 + 置信护栏）；页码诚实回退字符偏移并标"不一定准确"。
@@ -203,7 +204,7 @@ BidGuard-Agent/
 | `INTERFACE.md` | core↔backend 契约锁死 | 涉签名改动时同步 |
 | `FRONTEND.md` | 前端架构说明 | 前端结构变化时同步 |
 | `docs/DEPLOY.md` | 本机直跑 + Linux Docker/离线/裸机部署手册 | 部署变化时同步 |
-| `docs/cards/` | 任务卡归档（B1~E21） | 每立卡/收卡时归档 |
+| `docs/cards/` | 任务卡归档（B1~E22） | 每立卡/收卡时归档 |
 | `.workbuddy/memory/`（不入库） | 架构侧 AI 工作日志 | 每日实质工作后追加 |
 
 **冷启动口令**（新会话开场）：「先读取 AGENTS.md 和 HANDOVER.md，然后读 docs/cards/ 里最新一张卡，汇报理解后等我派活。」
@@ -212,7 +213,7 @@ BidGuard-Agent/
 
 ## 9. 本文档信息来源
 
-1. `docs/cards/` B1~E21 全部任务卡与验收记录；`派发归档/` 各阶段派发包全文
-2. Git 提交链（`git log --oneline`，功能代码至 E21 `4f52878`）；167 项 pytest + `vue-tsc` + `vite build` 实测回执
+1. `docs/cards/` B1~E22 全部任务卡与验收记录；`派发归档/` 各阶段派发包全文
+2. Git 提交链（`git log --oneline`，功能代码至 E22 `a8ab61f`）；184 项 pytest + `vue-tsc` + `vite build` 实测回执
 3. `data/corpus/m0_samples/` 三本账 + `语料清单.md`、`data/corpus/sim_bids/_README.md`；`data/corpus/regulations/` 法规种子
 4. `E:\agent\Contract-Review-Agent\HANDOVER_V2.md`（文档骨架参照）

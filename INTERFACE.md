@@ -131,6 +131,8 @@ ask_bid_expert_stream(tender_path: str | Path, bid_path: str | Path, question: s
 # E18 起：quotes/检索工具通过统一双轨页码上下文适配 PDF 与 docx；无法计算页码时诚实为 None 并展示字符偏移
 # E19/E21 起：UI reasoning_effort 支持 'low' | 'medium' | 'high'，网关侧映射智谱合法值
 #           （low->'low', medium->'high', high->'max'；三挡均开放至 7 轮=6 工具+1 final，仅调推理深度；非法值忽略走默认）
+# E22 起：优先调用 client.translate_reasoning_effort() 读取 models.yaml chat_options.reasoning_effort_map 覆盖映射，
+#         返回 None 时安全回退上述内置映射
 # E21 起：history 注入多轮对话（最近 6 轮 / 单条 ≤800 字截断），0-Token 降级同步回溯历史提问关键词；
 #         backend 新增 SSE 端点 POST /api/qa/sessions/{session_id}/ask/stream（done 帧原子落库）
 # 已挂载 6 工具：search_tender / search_bid / locate_chapter / recalc_price / check_cert_expiry / cite_regulation
@@ -163,6 +165,10 @@ build_client_from_user_config(base_url: str, api_key: str, model_flash: str,
                               model_flagship: Optional[str] = None,
                               supports_reasoning_effort: bool = False,
                               model_embedding: Optional[str] = None) -> LLMClient
+# LLMClient E22 新增方法与防御机制：
+#   client.translate_reasoning_effort(value: str) -> Optional[str]  # 读 chat_options.reasoning_effort_map，未配置返 None
+#   单实例内存熔断：chat() / chat_stream() 遇思考参数 400 拒绝时自动剥参重试并置 supports_reasoning_effort=False；
+#   _build_extra_body() 无条件剔除 max_tokens 与 reasoning_effort_map 绝不透传上游
 ```
 
 ### 1.10 E4 招投标法规库与法条三态真伪核验（RulesAndCertsView / `/api/regulations`）
@@ -227,3 +233,4 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 | 2026-11-10 | E19 UX 体验修复与 F4 并发提速：`core/response_checker.py` 升级两阶段并发（受 `BIDGUARD_F4_CONCURRENCY` 环境变量控制，默认 4）；`ask_bid_expert` 与 `QaAskRequest`（`POST /api/qa/sessions/{id}/ask`）新增可选参数 `reasoning_effort`（`'low'\|'medium'\|'high'`） | 实现侧 + 交叉复查 |
 | 2026-11-11 | E20 F1/F5/F6 体验与 Docker 端口共存：仅前端视图与 `docker-compose.yml`（`POSTGRES_PORT:-15432`）调整，core↔backend 签名零改动 | 实现侧 + 验收 |
 | 2026-11-11 | E21 F7 多轮上下文与流式直播：`core/bid_react_agent.py` 新增 `history` 参数与流式入口 `ask_bid_expert_stream`，三挡推理映射智谱合法值 `low/high/max`（`max_rounds` 默认放开至 `7` 轮以支持 6 工具+1 `final`，仅调深度）；`backend/routers/qa.py` 同步与流式端点注入 `messages_json` 历史并新增 `POST /api/qa/sessions/{id}/ask/stream`（`QaAskRequest.max_rounds` 放宽至 `1..8` 默认 `7`） | 实现侧 + 验收修复 |
+| 2026-11-11 | E22 LLM 网关思考参数防御加固：`LLMClient` 新增 `translate_reasoning_effort(value)`，`_is_thinking_reject` 升级为组合条件识别，`_build_extra_body()` 强制隔离 `reasoning_effort_map`，`chat()` 与 `chat_stream()` 共用剥参重试与单实例内存熔断（`_mark_effort_unsupported`）；`bid_react_agent._resolve_effort_and_rounds(..., client=None)` 向后兼容新增可选 `client` 形参 | 实现侧 + 验收 |
