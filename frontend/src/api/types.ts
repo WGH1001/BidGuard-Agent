@@ -358,13 +358,33 @@ export interface ReActStepTraceItem {
   observation?: unknown
 }
 
+export interface QaAttachmentOut {
+  attachment_id: string
+  filename: string
+  ext: string
+  size_bytes: number
+  is_image: boolean
+  ocr_chars: number
+  has_text: boolean
+  uploaded_at?: string | null
+}
+
+export interface QaAttachmentSummary {
+  attachment_id: string
+  filename: string
+  is_image?: boolean
+  ocr_chars?: number
+}
+
 export interface QaQuoteOut {
-  source: 'tender' | 'bid' | string
+  source: 'tender' | 'bid' | 'attachment' | string
   quote: string
   offset?: number | null
   page?: number | null
   quote_verified: boolean
   note?: string | null
+  attachment_id?: string | null
+  attachment_name?: string | null
 }
 
 export interface QaMessageItem {
@@ -373,6 +393,8 @@ export interface QaMessageItem {
   mode?: 'react' | 'keyword_fallback' | string
   quotes?: QaQuoteOut[]
   steps?: ReActStepTraceItem[]
+  attachment_ids?: string[]
+  attachments?: QaAttachmentSummary[]
   loading?: boolean
   streaming?: boolean
 }
@@ -393,6 +415,7 @@ export interface QaSessionOut {
   tender_path?: string | null
   bid_path?: string | null
   messages_json: QaMessageItem[]
+  attachments?: QaAttachmentOut[]
   created_at?: string | null
   updated_at?: string | null
 }
@@ -403,6 +426,7 @@ export interface QaAskRequest {
   question: string
   max_rounds?: number
   reasoning_effort?: ReasoningEffortLevel | null
+  attachment_ids?: string[]
 }
 
 export interface QaAskResponseOut {
@@ -520,6 +544,7 @@ export interface ModelConfigUpsertRequest {
   model_flash: string
   model_flagship?: string
   supports_reasoning_effort: boolean
+  supports_vision?: boolean
 }
 
 export interface ModelConfigOut {
@@ -530,6 +555,7 @@ export interface ModelConfigOut {
   model_flash: string
   model_flagship: string
   supports_reasoning_effort: boolean
+  supports_vision?: boolean
   updated_at?: string | null
 }
 

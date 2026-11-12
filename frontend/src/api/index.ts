@@ -39,6 +39,7 @@ import type {
   RunTaskTriggerOut,
   UserProfileOut,
   VerifyArticleOut,
+  QaAttachmentOut,
   QaStreamHandlers,
   ReActStepTraceItem
 } from './types'
@@ -64,6 +65,36 @@ export function validateUploadFile(file: File): { valid: boolean; message: strin
   }
   if (file.size > MAX_UPLOAD_SIZE_BYTES) {
     return { valid: false, message: `文件「${name}」超过 100MB 大小上限` }
+  }
+  return { valid: true, message: '' }
+}
+
+export const ALLOWED_QA_ATTACHMENT_EXTS = [
+  '.docx',
+  '.pdf',
+  '.txt',
+  '.md',
+  '.png',
+  '.jpg',
+  '.jpeg',
+] as const
+export const MAX_QA_ATTACHMENT_BYTES = 20 * 1024 * 1024 // 20MB
+
+export function validateQaAttachmentFile(file: File): { valid: boolean; message: string } {
+  const name = (file.name || '').trim()
+  const dotIdx = name.lastIndexOf('.')
+  const ext = dotIdx >= 0 ? name.slice(dotIdx).toLowerCase() : ''
+  if (!ALLOWED_QA_ATTACHMENT_EXTS.includes(ext as (typeof ALLOWED_QA_ATTACHMENT_EXTS)[number])) {
+    return {
+      valid: false,
+      message: `不支持的附件格式「${ext || '未知'}」，仅支持 .docx/.pdf/.txt/.md/.png/.jpg/.jpeg`,
+    }
+  }
+  if (file.size <= 0) {
+    return { valid: false, message: `附件「${name}」内容为空` }
+  }
+  if (file.size > MAX_QA_ATTACHMENT_BYTES) {
+    return { valid: false, message: `附件「${name}」超过 20MB 单文件上限` }
   }
   return { valid: true, message: '' }
 }
@@ -206,6 +237,16 @@ export const radarApi = {
 }
 
 export const qaApi = {
+  uploadAttachment(sessionId: number, file: File): Promise<QaAttachmentOut> {
+    const fd = new FormData()
+    fd.append('file', file, file.name)
+    return post<QaAttachmentOut>(`/qa/sessions/${sessionId}/attachments`, fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
+  deleteAttachment(sessionId: number, attachmentId: string): Promise<OkResponse> {
+    return del<OkResponse>(`/qa/sessions/${sessionId}/attachments/${attachmentId}`)
+  },
   createSession(payload: QaSessionCreatePayload): Promise<QaSessionOut> {
     return post<QaSessionOut>('/qa/sessions', payload)
   },

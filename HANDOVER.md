@@ -54,23 +54,23 @@ BidGuard-Agent/
 ├── core/                                # 19 个模块（F1~F7 + 混合检索 + 法规库，逐项状态见 §3）
 ├── backend/                             # main + models(11表) + schemas + 11 组路由
 ├── frontend/                            # Vue3 + TS：12 个视图全部落地
-├── tests/                               # 28 个测试文件（test_*.py）211 项全绿
+├── tests/                               # 29 个测试文件（test_*.py）217 项全绿
 ├── scripts/                             # build_f1_baseline.py / eval_f1_llm.py / probe_reasoning_efforts.py
 ├── data/
 │   ├── corpus/m0_samples/               # 11 份语料 + baseline / ground_truth / llm_eval 三本账（§4）
 │   ├── corpus/regulations/              # E4：4 部法律 JSON 种子 + originals/ 原文（含 87 号令扫描 PDF）
 │   └── rules/law_source/                # 4 部法规官方文本
 ├── deploy/nginx/nginx.conf              # 静态直发 + /api/ 反代 SSE 防缓冲三件套
-└── docs/                                # DEPLOY.md / cards/（任务卡归档含 B1~E23 及 E24 规划稿，共 31 份）/ 待立卡-E1E2升级点定案.md
+└── docs/                                # DEPLOY.md / cards/（任务卡归档含 B1~E24，共 31 份）/ 待立卡-E1E2升级点定案.md
 ```
 
 ---
 
 ## 2. 当前基线（截至 2026-11-12）
 
-- **开发阶段**：3 周排期全部完成 + 二十三轮增强升级（E1~E23）全量交付（E23 全卡与 `AGENTS.md` §3.2 修订一并入库；`E24` 起草稿留工作区待定稿），仿真标书 **11/11 验收收官**，开标日期全链路 11/11 精准提取、正则未命中局部窗 LLM 兜底、来源可观测性（`open_date_source`）与双向冲突预警、大盘/F5/F7 工作区扩屏与 F7 工具解包修复完成
-- **Git 最新功能 Commit**：本轮随 E23 验收入库（前序主线：E22 `a8ab61f`、E23 卡定稿 `76b4071`；远端同步状态以 `git log origin/main..HEAD` 实数为准）
-- **测试基线**：**211 项 pytest 全绿（零回归）** + `vue-tsc --noEmit` 零错误 + `vite build` 成功 —— 第一验收线已演进至 **211 项**
+- **开发阶段**：3 周排期全部完成 + 二十四轮增强升级（E1~E24）全量实现与验收验证就绪（待确认 commit：F7 多文件与图片附件双轨问答、RapidOCR 低门槛入口、VLM 内存缩图与拒图单实例熔断、`supports_vision` 全链开关、ReAct JSON 容错/禁吐/`after_offset` 续检；前序基线 E23 已随 `59b410e` 入库）
+- **Git 最新功能 Commit**：本轮 E24 实现与文档留在工作区待确认 commit（前序主线：`4a207a4` E24 卡定稿与 AGENTS 纪律入库、`59b410e` E23 全链路验收入库；远端同步状态以 `git log origin/main..HEAD` 实数为准）
+- **测试基线**：**217 项 pytest 全绿（零回归）** + `vue-tsc --noEmit` 零错误 + `vite build` 成功 —— 第一验收线已演进至 **217 项**
 - **模型网关基线**：`config/models.yaml` 默认 `default_env: demo`（智谱 `glm-5.3-flash` 直连，F7 三挡映射到智谱合法值 `low`/`high`/`max`，`embedding: embedding-3` 已激活 L2 混合检索）；预留 `prod` 内网私有网关（`http://10.0.2.81:3000/v1`，无向量模型自动无感降级 Level 1）
 - **运行环境**：本机开发用项目自带 `.venv`（依赖已全量钉死）；生产走 Docker 四容器（`docker compose up -d --build`，默认宿主机 `APP_PORT=8000` + `POSTGRES_PORT=15432`，与老项目 `8080` + `5432` 并行共存不冲突）
 - **快速验收命令**：
@@ -87,10 +87,10 @@ BidGuard-Agent/
 | 序号 | 文件路径 | 所属模块 | 一句话职责说明 | 当前状态与实测验收数据 |
 |---|---|---|---|---|
 | 1 | `core/interfaces.py` | 基础契约 | `ParsedDoc`、`Clause`、`LLMResponse` 等核心数据类 | 已验收（全模块共用契约） |
-| 2 | `core/parser.py` | 文档解析 | Word/PDF/TXT 解析、vMerge 去重、RapidOCR 离线缓存；E5 新增 `build_pdf_page_spans/offset_to_page`；E6 新增 `build_docx_page_spans/offset_to_docx_page`（双轨页码：印刷页 > 物理页估算 > 字符偏移诚实回退）。**E6 验收时偏移权威源已从 lxml 重建改为 python-docx 部件序列（7/7 真语料零漂移）** | 已验收（11 份真语料解析零虚增） |
+| 2 | `core/parser.py` | 文档解析 | Word/PDF/TXT 解析、vMerge 去重、RapidOCR 离线缓存；E5 新增 `build_pdf_page_spans/offset_to_page`；E6 新增 `build_docx_page_spans/offset_to_docx_page`（双轨页码：印刷页 > 物理页估算 > 字符偏移诚实回退）。**E6 验收时偏移权威源已从 lxml 重建改为 python-docx 部件序列（7/7 真语料零漂移）**；**E24 新增** `parse_qa_attachment` 附件低门槛解析（取消 `OCR_MIN_CHARS=100` 报错，复用 RapidOCR 与 `.ocr.txt` 缓存） | 已验收（11 份真语料解析零虚增） |
 | 3 | `core/splitter.py` | 条款切分 | 条款编号与段落切分，保留精确 `start/end` 偏移 | 已验收 |
 | 4 | `core/quote_verifier.py` | 溯源锁账 | `normalize_zh` 中文归一 + `verify_quote` 连续原文子串核验 | 已验收（F1/F4 防幻觉守门员） |
-| 5 | `core/llm_gateway.py` | 模型网关 | OpenAI 兼容多环境调用、线程安全用量累加（`self._lock`）、`embed()` 向量接入、原生 `reasoning_effort` 透传；**E22 加固**：组合条件拒绝识别（屏蔽无关 400 误判）、单实例内存熔断记忆（不改 `self.chat_options`）、`chat_stream()` 组合去参重试、`reasoning_effort_map` 配置翻译与内部键隔离 | 已验收（E12 / E22 实测全绿） |
+| 5 | `core/llm_gateway.py` | 模型网关 | OpenAI 兼容多环境调用、线程安全用量累加（`self._lock`）、`embed()` 向量接入、原生 `reasoning_effort` 透传；**E22 加固**：组合条件拒绝识别（屏蔽无关 400 误判）、单实例内存熔断记忆（不改 `self.chat_options`）、`chat_stream()` 组合去参重试、`reasoning_effort_map` 配置翻译与内部键隔离；**E24 新增**：PyMuPDF `Pixmap` 真实像素内存缩图 `encode_image_for_vlm`、`supports_vision` 透传/图像 token 占位估算与 `_is_vision_reject`/`_mark_vision_unsupported` 拒图熔断剥图重试 | 已验收（E12 / E22 / E24 实测全绿） |
 | 6 | `core/tender_extractor.py` | **F1 确定性层** | ★/▲ 分型合并、无标记模式 A/B、资格/符合/评标章定位、表格型评分细则解析（0 Token）；E18 接入统一双轨页码上下文；**E23 新增** `extract_open_date_from_tender_text` / `extract_open_date_with_evidence`（通用锚点词族+跨行/序号/页码/中文大写日期+防误抓护栏） | **已验收**（11 份语料逐字符守恒、开标日 **11/11 全命中**） |
 | 7 | `core/tender_llm.py` | **F1 LLM 层** | 候选段扩窗吸附、逐段结构化、强制溯源、段落型评分细则抽取；**E23 新增** `extract_open_date_fallback_with_llm`（局部窗开标日兜底 + `verify_quote` 与日期一致性双锁） | **已验收**（召回率/溯源率 100%） |
 | 8 | `core/price_sandbox.py` | **F2 算术沙盒** | 0 Token 报价核验（全程 Decimal 禁 float）、大写转换、限价比较 | **已验收**（差 1 分钱必报警） |
@@ -100,7 +100,7 @@ BidGuard-Agent/
 | 12 | `core/response_checker.py` | **F4 双书勾稽** | ★/▲ 逐条响应核验 + 大模型判定 + 自洽扫描；E6 接入 docx 双轨页码；E5 类名符号动态化；E19 升级“阶段 A 按序预定位 + 阶段 B 仅 `client.chat` 并发”双阶段引擎 | **已验收**（E19 `BIDGUARD_F4_CONCURRENCY` 默认 4，与串行逐字节一致） |
 | 13 | `core/deviation_exporter.py` | **F5 偏离表** | 《技术与商务偏离表.docx》一键生成；E6 位置列升级为"第X页(印刷页Y·估算)"带 @charN 诚实回退 | **已验收** |
 | 14 | `core/rigging_radar.py` | **F6 控标雷达** | 排他性/倾向性控标参数识别（确定性正则 + 大模型④，标注"疑似"）；E18 接入统一双轨页码 | **已验收**（E3R 修复 import；E18 打通 docx 页码） |
-| 15 | `core/bid_react_agent.py` | **F7 专家追问** | 多轮 ReAct 追问；E4 挂载 `cite_regulation` 第 6 工具；E18 兼容双轨页码与 `list \| dict` 传参；E19 支持三挡 `reasoning_effort`；E21 注入多轮 `history`（最近 6 轮截断+0-Token 逆序回溯）、智谱合法挡位映射与 `ask_bid_expert_stream` 流式事件引擎；**E23 新增** `_coerce_action_input` 自动解包字符串化 JSON 与 `recalc_price` 缺失 `total_price` 明确拦截 | **已验收**（E21 / E23 实测全绿） |
+| 15 | `core/bid_react_agent.py` | **F7 专家追问** | 多轮 ReAct 追问；E4 挂载 `cite_regulation` 第 6 工具；E18 兼容双轨页码与 `list \| dict` 传参；E19 支持三挡 `reasoning_effort`；E21 注入多轮 `history`（最近 6 轮截断+0-Token 逆序回溯）、智谱合法挡位映射与 `ask_bid_expert_stream` 流式事件引擎；E23 新增 `_coerce_action_input` 自动解包字符串化 JSON 与 `recalc_price` 缺失 `total_price` 明确拦截；**E24 扩至 7 工具**（新增 `search_attachment`）、仅当轮按选附 `image_url`、附件逐字 `verify_quote` 强制溯源与纯图视觉降级、`_parse_llm_json(strict=False)` 容错、禁吐残缺工具 JSON 与 `after_offset` 续检 | **已验收**（E21 / E23 / E24 实测全绿） |
 | 16 | `core/redline.py` | 批注回写 | Word OOXML 批注气泡 + PDF 坐标高亮；**E5 升级**：五级降级定位链（L3 标点归一/L4 逐字符 bbox 归一/L5 置信护栏≥60%且≥8字）、总览页（A4 插入 PDF 首部，全部发现编号 N01.. + LINK_GOTO 点击跳转） | **已验收**（E5 卡，111→115 项含 6 新测试） |
 | 17 | `core/hybrid_retriever.py` | **E2 混合检索** | BM25 三级门控（词面精确/同义词扩展 45 组/语义兜底）+ MISSING_EVIDENCE 探针；E12 正式激活 L2 向量嵌入重排（带 `.emb.npy` 维度校验失效重算） | **已验收**（E2 + E12 卡） |
 | 18 | `core/regulation_library.py` | **E4 法规库** | 8 部法律条文库：三态核验（exact_match/fuzzy_hint/unverifiable，**LLM 对真伪零裁决权**）、中文/阿拉伯条号归一、张冠李戴降级 fuzzy_hint、四格式导入（json/txt/docx/pdf，content_hash 幂等） | **已验收**（E4 卡，含 crawl 集成测试外网隔离） |
@@ -177,14 +177,15 @@ BidGuard-Agent/
 | E20 | F5 偏离表五维分类筛选与统计卡片联动、F6 去旧文本框+多文件拖拽批量+本地时区、F1 历史单行横向滚动/搜索下拉+5MB `localStorage` LRU 淘汰、`docker-compose.yml` Postgres 宿主机端口变量化（`${POSTGRES_PORT:-15432}:5432` 与老项目双开共存） | `df9f74a` | 166 项 + `vue-tsc` |
 | E21 | F7 多轮会话 `history` 注入与 0-Token 历史回溯、智谱 `glm-5.3-flash` 合法三挡映射（`low/high/max` 仅调思考深度，三挡均开放 `max_rounds=7` 支持 6 工具+1 收口）、`ask_bid_expert_stream` + `POST /api/qa/sessions/{id}/ask/stream` ReAct 思考轨迹 SSE 直播与流式打字（含 `getStoredToken` 鉴权/`get_session_factory` 写库/0-Token 回溯 3 项验收修补） | `69ad261` / `4f52878` | 167 项 + `vue-tsc` + `vite build` |
 | E22 | LLM 网关思考参数防御加固：`_is_thinking_reject` 组合识别（防 `unsupported image type` 误判）、`chat`/`chat_stream` 共用单实例内存熔断与流式 `stream_options` 组合重试补漏、`chat_options.reasoning_effort_map` 配置映射与内部键隔离、内网手动实弹探针 `scripts/probe_reasoning_efforts.py` | `a8ab61f` | 184 项 |
-| E23 | 开标日期全链路 11/11 精准提取（含通用锚点同义词、中文大写日期、正则未命中局部窗 LLM 兜底 + `verify_quote` 双锁、手填强校验 `INVALID_OPEN_DATE`、双向 `OPEN_DATE_MISMATCH` 预警及 `open_date_source` 前后端全链路来源可观测）、F1/F6 开标日透出、大盘倒计时优先有日期项+类型徽标、F5 去全白遮罩、顶栏 44px 瘦身+F7 高屏占比与发送旁深度选择器、`_coerce_action_input` 工具 JSON 解包与 `total_price` 校验 | **已验收**（随 E23 验收 commit 入库） | 211 项 + `vue-tsc` + `vite build` |
+| E23 | 开标日期全链路 11/11 精准提取（含通用锚点同义词、中文大写日期、正则未命中局部窗 LLM 兜底 + `verify_quote` 双锁、手填强校验 `INVALID_OPEN_DATE`、双向 `OPEN_DATE_MISMATCH` 预警及 `open_date_source` 前后端全链路来源可观测）、F1/F6 开标日透出、大盘倒计时优先有日期项+类型徽标、F5 去全白遮罩、顶栏 44px 瘦身+F7 高屏占比与发送旁深度选择器、`_coerce_action_input` 工具 JSON 解包与 `total_price` 校验 | **已验收**（`59b410e`） | 211 项 + `vue-tsc` + `vite build` |
+| E24 | F7 标书专家多文件与图片附件问答双轨落地（`parse_qa_attachment` 取消 100 字门禁、`.ocr.txt` 缓存、20MB/10 个/100MB 配额与 `DELETE` 级联清盘、老库双表自动加列、`supports_vision` 三处设置与网关 PyMuPDF 真实像素缩图/拒图单实例熔断、`search_attachment` 第 7 工具 + `INVALID_ATTACHMENT_ID` 拒收 + `verify_quote` 反幻觉与纯图降级、`_parse_llm_json(strict=False)` 容错/禁吐工具 JSON/`after_offset` 续检、前端上传勾选与视觉参考标记） | **验收就绪（工作区待确认 commit；卡定稿 `4a207a4`）** | 217 项 + `vue-tsc` + `vite build` |
 | chore | requirements 全量钉死（`59e6b64`）、基础镜像 digest 钉死、弹窗会话记忆 | `90a1947` | — |
 
 ---
 
 ## 7. 协作纪律与工程红线（完整版见 `AGENTS.md`）
 
-1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线 **211 项**。
+1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线 **217 项**。
 2. **凡能算的绝不进大模型（0 Token 优先）**；金额全程 `Decimal` 禁 `float`（ROUND_HALF_UP 量化 0.01）。
 3. **LLM 只吃局部窗口 + 强制 `quote_verifier` 溯源**；严禁整本标书直塞。
 4. **宁缺毋滥显式降级**：无法对齐必返回 NEED_MANUAL；找不到位置绝不乱锚（E5 五级定位链 + 置信护栏）；页码诚实回退字符偏移并标"不一定准确"。
@@ -205,7 +206,7 @@ BidGuard-Agent/
 | `INTERFACE.md` | core↔backend 契约锁死 | 涉签名改动时同步 |
 | `FRONTEND.md` | 前端架构说明 | 前端结构变化时同步 |
 | `docs/DEPLOY.md` | 本机直跑 + Linux Docker/离线/裸机部署手册 | 部署变化时同步 |
-| `docs/cards/` | 任务卡归档（B1~E23 及 E24 规划稿） | 每立卡/收卡时归档 |
+| `docs/cards/` | 任务卡归档（B1~E24） | 每立卡/收卡时归档 |
 | `.workbuddy/memory/`（不入库） | 架构侧 AI 工作日志 | 每日实质工作后追加 |
 
 **冷启动口令**（新会话开场）：「先读取 AGENTS.md 和 HANDOVER.md，然后读 docs/cards/ 里最新一张卡，汇报理解后等我派活。」
@@ -214,7 +215,7 @@ BidGuard-Agent/
 
 ## 9. 本文档信息来源
 
-1. `docs/cards/` B1~E23 全部任务卡与验收记录；`派发归档/` 各阶段派发包全文
-2. Git 提交链（`git log --oneline`，代码与文档已演进至 E23 已验收基线）；211 项 pytest + `vue-tsc` + `vite build` 实测回执
+1. `docs/cards/` B1~E24 全部任务卡与验收记录；`派发归档/` 各阶段派发包全文
+2. Git 提交链（`git log --oneline`，代码与文档已演进至 `4a207a4` E24 卡定稿基线 + 工作区 E24 验收实现待确认 commit）；217 项 pytest + `vue-tsc` + `vite build` 实测回执
 3. `data/corpus/m0_samples/` 三本账 + `语料清单.md`、`data/corpus/sim_bids/_README.md`；`data/corpus/regulations/` 法规种子
 4. `E:\agent\Contract-Review-Agent\HANDOVER_V2.md`（文档骨架参照）

@@ -1,6 +1,12 @@
 <script lang="ts">
 import { ref } from 'vue'
-import type { BidTaskOut, QaMessageItem, QaSessionOut } from '@/api/types'
+import type {
+  BidTaskOut,
+  QaAttachmentOut,
+  QaAttachmentSummary,
+  QaMessageItem,
+  QaSessionOut,
+} from '@/api/types'
 
 /**
  * 模块级响应式缓存（绑定 cachedOwnerUsername，切换账号或登出时立即清零）
@@ -11,6 +17,8 @@ const cachedSessions = ref<QaSessionOut[]>([])
 const cachedSelectedTaskId = ref<number | null>(null)
 const cachedActiveSessionId = ref<number | null>(null)
 const cachedMessages = ref<QaMessageItem[]>([])
+const cachedAttachments = ref<QaAttachmentOut[]>([])
+const cachedSelectedAttachmentIds = ref<string[]>([])
 const cachedAsking = ref<boolean>(false)
 let initializedOnce = false
 let cancelActiveStreamFn: (() => void) | null = null
@@ -30,6 +38,8 @@ function resetQaModuleCache(): void {
   cachedSelectedTaskId.value = null
   cachedActiveSessionId.value = null
   cachedMessages.value = []
+  cachedAttachments.value = []
+  cachedSelectedAttachmentIds.value = []
   cachedAsking.value = false
   initializedOnce = false
 }
@@ -51,6 +61,7 @@ const appStore = useAppStore()
 const authStore = useAuthStore()
 const loadingInit = localRef(false)
 const creatingSession = localRef(false)
+const uploadingAttachment = localRef(false)
 const msgListRef = localRef<InstanceType<typeof QaMessageList> | null>(null)
 
 const tasks = cachedTasks
@@ -58,6 +69,8 @@ const sessions = cachedSessions
 const selectedTaskId = cachedSelectedTaskId
 const activeSessionId = cachedActiveSessionId
 const messages = cachedMessages
+const attachments = cachedAttachments
+const selectedAttachmentIds = cachedSelectedAttachmentIds
 const asking = cachedAsking
 
 const PRESET_QUESTIONS = [
@@ -133,6 +146,8 @@ async function refreshSessionsList(): Promise<void> {
   } else if (!asking.value) {
     activeSessionId.value = null
     messages.value = []
+    attachments.value = []
+    selectedAttachmentIds.value = []
   }
 }
 
@@ -141,6 +156,8 @@ async function selectSession(sess: QaSessionOut): Promise<void> {
   activeSessionId.value = sess.id
   const detail = await qaApi.getSession(sess.id)
   messages.value = [...(detail.messages_json || [])]
+  attachments.value = [...(detail.attachments || [])]
+  selectedAttachmentIds.value = attachments.value.map((a) => a.attachment_id)
 }
 
 async function handleCreateSession(): Promise<void> {
@@ -157,6 +174,8 @@ async function handleCreateSession(): Promise<void> {
     sessions.value = [created, ...sessions.value]
     activeSessionId.value = created.id
     messages.value = []
+    attachments.value = []
+    selectedAttachmentIds.value = []
     ElMessage.success(`已新建问答会话 #${created.id}`)
   } finally {
     creatingSession.value = false
@@ -167,7 +186,7 @@ async function handleDeleteSession(sess: QaSessionOut): Promise<void> {
   if (asking.value) return
   try {
     await ElMessageBox.confirm(
-      `确认删除专家问答会话「#${sess.id} ${sess.title}」及其全部对话记录吗？删除后不可恢复。`,
+      `确认删除专家问答会话「#${sess.id} ${sess.title}」及其全部对话记录与会话附件吗？删除后不可恢复。`,
       '确认删除问答会话',
       {
         type: 'warning',
@@ -186,9 +205,54 @@ async function handleDeleteSession(sess: QaSessionOut): Promise<void> {
     } else {
       activeSessionId.value = null
       messages.value = []
+      attachments.value = []
+      selectedAttachmentIds.value = []
     }
   }
   ElMessage.success('问答会话已删除')
+}
+
+async function handleUploadAttachment(file: File): Promise<void> {
+  if (asking.value || uploadingAttachment.value) return
+  if (!activeSessionId.value) {
+    if (!selectedTaskId.value) {
+      ElMessage.warning('请先选择关联的投标体检任务后再上传附件')
+      return
+    }
+    const created = await qaApi.createSession({ task_id: selectedTaskId.value })
+    sessions.value = [created, ...sessions.value]
+    activeSessionId.value = created.id
+    messages.value = []
+    attachments.value = []
+    selectedAttachmentIds.value = []
+  }
+  const sid = activeSessionId.value
+  if (!sid) return
+
+  uploadingAttachment.value = true
+  try {
+    const uploaded = await qaApi.uploadAttachment(sid, file)
+    attachments.value = [...attachments.value, uploaded]
+    if (!selectedAttachmentIds.value.includes(uploaded.attachment_id)) {
+      selectedAttachmentIds.value = [...selectedAttachmentIds.value, uploaded.attachment_id]
+    }
+    const desc = uploaded.is_image
+      ? uploaded.has_text
+        ? `OCR 识别 ${uploaded.ocr_chars} 字`
+        : '纯图片（无文字）'
+      : '文档解析就绪'
+    ElMessage.success(`已上传附件「${uploaded.filename}」（${desc}）`)
+  } finally {
+    uploadingAttachment.value = false
+  }
+}
+
+async function handleDeleteAttachment(att: QaAttachmentOut): Promise<void> {
+  if (!activeSessionId.value || asking.value) return
+  await qaApi.deleteAttachment(activeSessionId.value, att.attachment_id)
+  attachments.value = attachments.value.filter((a) => a.attachment_id !== att.attachment_id)
+  selectedAttachmentIds.value = selectedAttachmentIds.value.filter((id) => id !== att.attachment_id)
+  ElMessage.success(`已移除附件「${att.filename}」`)
 }
 
 async function handleTaskChange(): Promise<void> {
@@ -196,9 +260,30 @@ async function handleTaskChange(): Promise<void> {
   await refreshSessionsList()
 }
 
-async function handleSendQuestion(question: string): Promise<void> {
+async function handleSendQuestion(question: string, attachmentIds: string[] = []): Promise<void> {
   if (asking.value) {
     ElMessage.warning('当前有一条追问正在检索核验中，请等待返回后再提交')
+    return
+  }
+
+  const pickedSummaries: QaAttachmentSummary[] = []
+  const validIds: string[] = []
+  let imgCount = 0
+  for (const id of attachmentIds || []) {
+    const matched = attachments.value.find((a) => a.attachment_id === id)
+    if (matched) {
+      validIds.push(matched.attachment_id)
+      if (matched.is_image) imgCount += 1
+      pickedSummaries.push({
+        attachment_id: matched.attachment_id,
+        filename: matched.filename,
+        is_image: matched.is_image,
+        ocr_chars: matched.ocr_chars,
+      })
+    }
+  }
+  if (imgCount > 4) {
+    ElMessage.warning(`单轮追问最多允许勾选 4 张图片附件（当前选择了 ${imgCount} 张）`)
     return
   }
 
@@ -210,6 +295,8 @@ async function handleSendQuestion(question: string): Promise<void> {
     const created = await qaApi.createSession({ task_id: selectedTaskId.value })
     sessions.value = [created, ...sessions.value]
     activeSessionId.value = created.id
+    attachments.value = []
+    selectedAttachmentIds.value = []
   }
 
   const targetSessionId = activeSessionId.value
@@ -218,6 +305,8 @@ async function handleSendQuestion(question: string): Promise<void> {
   messages.value.push({
     role: 'user',
     content: question,
+    attachment_ids: validIds,
+    attachments: pickedSummaries,
   })
   messages.value.push({
     role: 'assistant',
@@ -236,6 +325,7 @@ async function handleSendQuestion(question: string): Promise<void> {
     question,
     max_rounds: 7,
     reasoning_effort: reasoningEffort.value,
+    attachment_ids: validIds,
   }
 
   cancelActiveStreamFn = qaApi.askStream(targetSessionId, payload, {
@@ -395,14 +485,27 @@ onBeforeUnmount(() => {
         </div>
         <span
           class="qst-hint-pill"
-          title="支持跨《招标文件》与《我方投标书》调用检索、章节定位、F2 报价沙盒、F3 证照效期与 E4 法规库 6 大工具；所有原文摘录强制通过 verify_quote 逐字校验"
+          title="支持跨《招标文件》《我方投标书》及会话补充附件/图片调用检索、章节定位、F2 报价沙盒、F3 证照效期、E4 法规库与 search_attachment 7 大工具；所有原文摘录强制通过 verify_quote 逐字校验"
         >
-          ⓘ 6 工具联动 · 原文溯源校验
+          ⓘ 7 工具联动 · 多文件/图片溯源
         </span>
       </div>
 
       <div class="qst-body">
-        <QaMessageList :messages="messages" :preset-questions="PRESET_QUESTIONS" :reasoning-effort="reasoningEffort" :sending="asking" @send="handleSendQuestion" @update:reasoning-effort="setReasoningEffort" ref="msgListRef"/>
+        <QaMessageList
+          ref="msgListRef"
+          :messages="messages"
+          :sending="asking"
+          :uploading-attachment="uploadingAttachment"
+          :attachments="attachments"
+          v-model:selected-attachment-ids="selectedAttachmentIds"
+          :preset-questions="PRESET_QUESTIONS"
+          :reasoning-effort="reasoningEffort"
+          @send="handleSendQuestion"
+          @upload-attachment="handleUploadAttachment"
+          @delete-attachment="handleDeleteAttachment"
+          @update:reasoning-effort="setReasoningEffort"
+        />
       </div>
     </section>
   </div>

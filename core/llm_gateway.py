@@ -1,19 +1,21 @@
 # -*- coding: utf-8 -*-
-"""T5 / T60 / E12 / E22 模型网关 [Gemini-Flash] —— 业务代码与模型/部署形态之间的唯一隔断层
+"""T5 / T60 / E12 / E22 / E24 模型网关 [Gemini-Flash] —— 业务代码与模型/部署形态之间的唯一隔断层
 
 实现规格（签名不得修改）：
     get_llm_client(env=None) -> LLMClient
-    build_client_from_user_config(base_url, api_key, model_flash, model_flagship=None, supports_reasoning_effort=False, model_embedding=None) -> LLMClient
+    build_client_from_user_config(base_url, api_key, model_flash, model_flagship=None, supports_reasoning_effort=False, model_embedding=None, supports_vision=False) -> LLMClient
+    encode_image_for_vlm(file_path, max_edge=2048, target_bytes=2*1024*1024) -> dict
     LLMClient.chat(messages, model_tier='flagship', max_tokens=None) -> LLMResponse
     LLMClient.chat_stream(messages, model_tier='flagship', max_tokens=None) -> Iterator[dict]
     LLMClient.embed(texts) -> list[list[float]]
     LLMClient.total_usage() -> dict   # 累计用量
 """
+import base64
 import os
 from pathlib import Path
 import threading
 import time
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 import yaml
 
 from core.interfaces import LLMResponse
@@ -53,6 +55,107 @@ _REJECT_SEMANTIC_WORDS_CF = (
     '未知参数',
 )
 
+# E24 §2.4：组合条件识别上游对 VLM 视觉输入（image_url）的拒绝
+_VISION_KEYWORDS_CF = (
+    'image_url',
+    'vision',
+    'multimodal',
+    'image input',
+    'image_input',
+    'image type',
+    'image content',
+    '图片',
+    '图像',
+    '视觉',
+    '多模态',
+)
+
+
+def encode_image_for_vlm(
+    file_path: str | Path,
+    max_edge: int = 2048,
+    target_bytes: int = 2 * 1024 * 1024,
+) -> dict[str, Any]:
+    """E24 §2.1.3：内存级 VLM 图片等比缩放与 Base64 编码辅助函数（置于网关层，磁盘原图零改动）。
+
+    利用已安装的 PyMuPDF (import pymupdf)，不引入 Pillow 依赖：
+    - 当原图长边 <= max_edge 且文件体积 <= target_bytes 时，直接按原始字节流编码；
+    - 当长边 > max_edge 或体积 > target_bytes 时，在内存中按比例缩小并重编码为 JPEG (quality=85)，
+      防止 10~20MB 大图经 Base64 膨胀后触发上游网关 HTTP 413 或超时。
+    """
+    import pymupdf
+
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"图片文件不存在: {file_path}")
+
+    raw_bytes = path.read_bytes()
+    if not raw_bytes:
+        raise ValueError("图片文件内容为空")
+
+    ext = path.suffix.lower()
+    orig_mime = 'image/png' if ext == '.png' else 'image/jpeg'
+
+    src_pix = pymupdf.Pixmap(raw_bytes)
+    orig_w = max(1, int(src_pix.width))
+    orig_h = max(1, int(src_pix.height))
+    src_pix = None
+
+    longest = max(orig_w, orig_h)
+    needs_resize = (longest > max_edge) or (len(raw_bytes) > target_bytes)
+
+    if not needs_resize:
+        b64_str = base64.b64encode(raw_bytes).decode('ascii')
+        return {
+            'data_url': f"data:{orig_mime};base64,{b64_str}",
+            'mime_type': orig_mime,
+            'width': orig_w,
+            'height': orig_h,
+            'original_width': orig_w,
+            'original_height': orig_h,
+            'original_bytes': len(raw_bytes),
+            'encoded_bytes': len(raw_bytes),
+            'resized': False,
+        }
+
+    scale = min(1.0, float(max_edge) / float(longest))
+    if scale >= 1.0 and len(raw_bytes) > target_bytes:
+        scale = 0.75
+    target_w = max(1, int(round(orig_w * scale)))
+    target_h = max(1, int(round(orig_h * scale)))
+
+    with pymupdf.open(stream=raw_bytes, filetype=ext.lstrip('.') or 'png') as doc:
+        if doc.page_count < 1:
+            raise ValueError("无法解析图片尺寸")
+        page = doc[0]
+        rect_w = max(1.0, float(page.rect.width))
+        rect_h = max(1.0, float(page.rect.height))
+        mat = pymupdf.Matrix(float(target_w) / rect_w, float(target_h) / rect_h)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        if pix.n not in (1, 3):
+            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+
+        final_w, final_h = int(pix.width), int(pix.height)
+        out_bytes = pix.tobytes(output='jpeg', jpg_quality=85)
+
+        for q in (70, 55):
+            if len(out_bytes) <= target_bytes:
+                break
+            out_bytes = pix.tobytes(output='jpeg', jpg_quality=q)
+
+        b64_str = base64.b64encode(out_bytes).decode('ascii')
+        return {
+            'data_url': f"data:image/jpeg;base64,{b64_str}",
+            'mime_type': 'image/jpeg',
+            'width': final_w,
+            'height': final_h,
+            'original_width': orig_w,
+            'original_height': orig_h,
+            'original_bytes': len(raw_bytes),
+            'encoded_bytes': len(out_bytes),
+            'resized': True,
+        }
+
 
 def get_llm_client(env=None) -> 'LLMClient':
     """按环境名构造客户端；env=None 时取 default_env。"""
@@ -82,8 +185,9 @@ def build_client_from_user_config(
     model_flagship: Optional[str] = None,
     supports_reasoning_effort: bool = False,
     model_embedding: Optional[str] = None,
+    supports_vision: bool = False,
 ) -> 'LLMClient':
-    """T60 / E12 根据用户级自定义配置构造 LLMClient 实例（不改既有 get_llm_client 签名）。
+    """T60 / E12 / E24 根据用户级自定义配置构造 LLMClient 实例（不改既有 get_llm_client 签名）。
 
     Args:
         base_url: OpenAI 兼容接口地址（如 https://api.deepseek.com/v1）。
@@ -93,6 +197,7 @@ def build_client_from_user_config(
         supports_reasoning_effort: 是否支持 reasoning_effort 参数透传。
         model_embedding: 可选向量模型名（E12：配置后激活 L2 混合检索 Rerank；
             缺省 None = 不配置向量模型，检索自动停留 Level 1）。
+        supports_vision: E24 是否支持 OpenAI 多模态 image_url 视觉输入（缺省 False）。
     """
     if not base_url or not str(base_url).strip():
         raise ValueError("base_url 不能为空")
@@ -105,9 +210,10 @@ def build_client_from_user_config(
     flagship_clean = str(model_flagship or flash_clean).strip() or flash_clean
     chat_options = {'reasoning_effort': 'low'} if supports_reasoning_effort else {}
 
-    models_cfg = {
+    models_cfg: dict[str, Any] = {
         'flash': flash_clean,
         'flagship': flagship_clean,
+        'supports_vision': bool(supports_vision),
     }
     if model_embedding and str(model_embedding).strip():
         models_cfg['embedding'] = str(model_embedding).strip()
@@ -117,10 +223,12 @@ def build_client_from_user_config(
         'base_url': str(base_url).strip().rstrip('/'),
         'models': models_cfg,
         'chat_options': chat_options,
+        'supports_vision': bool(supports_vision),
         'pricing': {},
     }
     client = LLMClient(env_config, str(api_key).strip())
     client.supports_reasoning_effort = bool(supports_reasoning_effort)
+    client.supports_vision = bool(supports_vision)
     return client
 
 
@@ -139,13 +247,108 @@ def _is_thinking_reject(e: Exception) -> bool:
     if not msg:
         return False
     msg_cf = msg.casefold()
-    if '1210' in msg_cf:
+    if '1210' in msg_cf and not any(vk in msg_cf for vk in ('image_url', 'vision', 'multimodal')):
         return True
     has_thinking_key = any(k in msg_cf for k in _THINKING_KEYWORDS_CF)
     if not has_thinking_key:
         return False
     has_reject_word = any(w in msg_cf for w in _REJECT_SEMANTIC_WORDS_CF)
     return has_reject_word
+
+
+def _is_vision_reject(e: Exception) -> bool:
+    """E24 §2.4：精准识别上游网关对多模态视觉输入（image_url）的 400 拒绝。
+
+    严禁误伤 401/403/429/500/502/503 与 _is_thinking_reject。
+    """
+    status_code = getattr(e, 'status_code', None)
+    if status_code is None and getattr(e, 'response', None) is not None:
+        status_code = getattr(e.response, 'status_code', None)
+    if status_code in (401, 403, 429, 500, 502, 503, 504):
+        return False
+
+    msg = str(e or '')
+    if not msg:
+        return False
+    msg_cf = msg.casefold()
+
+    if any(code in msg_cf for code in ('401 ', '403 ', '429 ', '500 ', '502 ', '503 ', 'rate limit', 'unauthorized')):
+        if not any(vk in msg_cf for vk in ('image_url', 'multimodal')):
+            return False
+
+    has_vision_key = any(vk in msg_cf for vk in _VISION_KEYWORDS_CF)
+    if not has_vision_key:
+        return False
+
+    has_reject_word = any(rw in msg_cf for rw in _REJECT_SEMANTIC_WORDS_CF) or (
+        'expect' in msg_cf and 'string' in msg_cf
+    )
+    return has_reject_word
+
+
+def _messages_have_image_blocks(messages: list) -> bool:
+    """判断 messages 列表中是否包含多模态 image_url 内容块。"""
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        content = m.get('content')
+        if isinstance(content, list):
+            for blk in content:
+                if isinstance(blk, dict) and blk.get('type') == 'image_url':
+                    return True
+    return False
+
+
+def _strip_image_blocks(messages: list) -> list[dict[str, Any]]:
+    """E24 §2.4：从 messages 副本中剥离所有 image_url 块并折叠为纯文本消息（附带降级说明），不修改原列表。"""
+    cleaned_msgs: list[dict[str, Any]] = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        content = m.get('content')
+        if not isinstance(content, list):
+            cleaned_msgs.append(dict(m))
+            continue
+
+        text_parts: list[str] = []
+        removed_images = 0
+        for blk in content:
+            if isinstance(blk, dict):
+                if blk.get('type') == 'image_url':
+                    removed_images += 1
+                elif blk.get('type') == 'text' and blk.get('text'):
+                    text_parts.append(str(blk['text']))
+            elif isinstance(blk, str):
+                text_parts.append(blk)
+
+        if removed_images > 0:
+            text_parts.append(
+                f"\n[系统注：当前模型端点不支持直接传入图像（已剥离 {removed_images} 张图片），请依据已提供的文本与 OCR 内容作答]"
+            )
+        cleaned_msgs.append({
+            **m,
+            'content': '\n'.join(p for p in text_parts if p).strip(),
+        })
+    return cleaned_msgs
+
+
+def _estimate_messages_prompt_chars(messages: list) -> int:
+    """E24 §2.4：安全估算多模态 messages 的字符数（对 image_url 按固定 512 字符折算，严禁将 Base64 长度 // 2 当 token）。"""
+    total_chars = 0
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        content = m.get('content')
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            for blk in content:
+                if isinstance(blk, dict):
+                    if blk.get('type') == 'image_url':
+                        total_chars += 512
+                    elif blk.get('text'):
+                        total_chars += len(str(blk['text']))
+    return total_chars
 
 
 def _strip_thinking_params(extra_body: dict) -> dict:
@@ -166,6 +369,10 @@ class LLMClient:
         self.models = env_config.get('models', {})
         self.pricing = env_config.get('pricing', {})
         self.chat_options = env_config.get('chat_options', {}) or {}
+        self.supports_vision = bool(
+            env_config.get('supports_vision', False)
+            or (self.models.get('supports_vision', False) if isinstance(self.models, dict) else False)
+        )
         self._lock = threading.Lock()  # 并发批次下的用量累加保护
 
         self._usage = {
@@ -187,6 +394,10 @@ class LLMClient:
     def _mark_effort_unsupported(self) -> None:
         """E22 §2.1：单实例内记录上游已拒绝思考参数（熔断记忆仅存活于当前实例内存）。"""
         self.supports_reasoning_effort = False
+
+    def _mark_vision_unsupported(self) -> None:
+        """E24 §2.4：单实例内记录上游已拒绝视觉多模态输入（熔断记忆仅存活于当前实例内存）。"""
+        self.supports_vision = False
 
     def translate_reasoning_effort(self, value: str) -> Optional[str]:
         """E22 §2.1.6：读取 chat_options.reasoning_effort_map 做 UI 挡位值 -> 上游值翻译。
@@ -265,7 +476,7 @@ class LLMClient:
         """调用模型并返回 LLMResponse（含 token 与成本计量）。
 
         Args:
-            messages: OpenAI 格式消息列表。
+            messages: OpenAI 格式消息列表（E24 支持多模态 content 数组）。
             model_tier: 'flagship' | 'flash'。
             max_tokens: 可选生成 token 硬上限（None 时读取 chat_options.max_tokens）。
             reasoning_effort: 可选思考档位覆盖（v2.0.6，'low'|'medium'|'high'）——
@@ -274,6 +485,10 @@ class LLMClient:
         model_name = self.models.get(model_tier)
         if not model_name:
             raise ValueError(f"未找到 model_tier '{model_tier}' 对应的模型名")
+
+        active_messages = list(messages or [])
+        if _messages_have_image_blocks(active_messages) and not getattr(self, 'supports_vision', False):
+            active_messages = _strip_image_blocks(active_messages)
 
         extra_body = self._build_extra_body()
         if reasoning_effort and getattr(self, 'supports_reasoning_effort', True):
@@ -288,7 +503,7 @@ class LLMClient:
                 if self.use_openai:
                     req_kwargs = {
                         'model': model_name,
-                        'messages': messages,
+                        'messages': active_messages,
                         'temperature': temperature,
                         'extra_body': extra_body,
                     }
@@ -306,7 +521,7 @@ class LLMClient:
                     }
                     payload = {
                         "model": model_name,
-                        "messages": messages,
+                        "messages": active_messages,
                         "temperature": temperature,
                         **extra_body
                     }
@@ -337,9 +552,10 @@ class LLMClient:
             except Exception as e:
                 if attempt == max_retries:
                     raise RuntimeError(f"API 请求失败重试耗尽: {e}")
-                # thinking/reasoning_effort 参数被上游拒绝（如私有化端点不支持
-                # 或档位值非法）→ 剥除全部思考参数并标记实例熔断后重试，后续轮次全程无参直发
-                if _is_thinking_reject(e):
+                if _is_vision_reject(e) and _messages_have_image_blocks(active_messages):
+                    self._mark_vision_unsupported()
+                    active_messages = _strip_image_blocks(active_messages)
+                elif _is_thinking_reject(e):
                     extra_body = _strip_thinking_params(extra_body)
                     self._mark_effort_unsupported()
                 time.sleep(1)
@@ -362,6 +578,10 @@ class LLMClient:
         if not model_name:
             raise ValueError(f"未找到 model_tier '{model_tier}' 对应的模型名")
 
+        active_messages = list(messages or [])
+        if _messages_have_image_blocks(active_messages) and not getattr(self, 'supports_vision', False):
+            active_messages = _strip_image_blocks(active_messages)
+
         extra_body = self._build_extra_body()
         if reasoning_effort and getattr(self, 'supports_reasoning_effort', True):
             extra_body['reasoning_effort'] = reasoning_effort
@@ -369,9 +589,8 @@ class LLMClient:
         temperature = 0.2
 
         if not self.use_openai:
-            # 降级：若无 OpenAI SDK，退回同步请求后包装为单次 delta + final（E22：补传 reasoning_effort）
             sync_resp = self.chat(
-                messages,
+                active_messages,
                 model_tier=model_tier,
                 max_tokens=resolved_max_tokens,
                 reasoning_effort=reasoning_effort,
@@ -381,10 +600,10 @@ class LLMClient:
             yield {'type': 'final', 'response': sync_resp}
             return
 
-        def _build_stream_kwargs(cur_extra: dict) -> dict:
+        def _build_stream_kwargs(cur_msgs: list, cur_extra: dict) -> dict:
             kw = {
                 'model': model_name,
-                'messages': messages,
+                'messages': cur_msgs,
                 'temperature': temperature,
                 'extra_body': cur_extra,
                 'stream': True,
@@ -395,9 +614,9 @@ class LLMClient:
 
         include_usage_supported = True
 
-        def _create_stream(cur_extra: dict):
+        def _create_stream(cur_msgs: list, cur_extra: dict):
             nonlocal include_usage_supported
-            kw = _build_stream_kwargs(cur_extra)
+            kw = _build_stream_kwargs(cur_msgs, cur_extra)
             if include_usage_supported:
                 try:
                     return self.client.chat.completions.create(
@@ -408,15 +627,17 @@ class LLMClient:
                     include_usage_supported = False
             return self.client.chat.completions.create(**kw)
 
-        # 优先尝试带思考参数发起流；若遇思考参数 400 拒绝（即便先经历了 stream_options TypeError 降级），
-        # 立即剥除全部思考参数 + 标记实例熔断后重试一次；非思考参数异常（如 500/网络断连）直接上抛
         try:
-            stream_iter = _create_stream(extra_body)
+            stream_iter = _create_stream(active_messages, extra_body)
         except Exception as e:
-            if _is_thinking_reject(e):
+            if _is_vision_reject(e) and _messages_have_image_blocks(active_messages):
+                self._mark_vision_unsupported()
+                active_messages = _strip_image_blocks(active_messages)
+                stream_iter = _create_stream(active_messages, extra_body)
+            elif _is_thinking_reject(e):
                 extra_body = _strip_thinking_params(extra_body)
                 self._mark_effort_unsupported()
-                stream_iter = _create_stream(extra_body)
+                stream_iter = _create_stream(active_messages, extra_body)
             else:
                 raise
 
@@ -444,9 +665,9 @@ class LLMClient:
 
         full_text = "".join(collected_chunks)
 
-        # 若上游流未返回 usage，按 chars // 2 估算
+        # 若上游流未返回 usage，安全估算（对 image_url 按固定 512 字符计，严禁把 Base64 长度 // 2 当 token）
         if prompt_tokens is None:
-            total_prompt_chars = sum(len(str(m.get('content') or '')) for m in (messages or []))
+            total_prompt_chars = _estimate_messages_prompt_chars(active_messages)
             prompt_tokens = max(1, total_prompt_chars // 2)
         if completion_tokens is None:
             completion_tokens = max(1, len(full_text) // 2) if full_text else 0
@@ -466,18 +687,7 @@ class LLMClient:
         return self._usage.copy()
 
     def embed(self, texts) -> list:
-        """E12：调用向量模型返回浮点向量列表（OpenAI 兼容 /v1/embeddings 规范）。
-
-        Args:
-            texts: 单个字符串或字符串列表。
-
-        Returns:
-            list[list[float]]：与输入顺序一一对应的向量列表。
-
-        Raises:
-            ValueError: 未在 models.yaml / 用户配置中配置 models.embedding 向量模型名
-                （调用方 hybrid_retriever 捕获后静默降级 Level 1，不会中断业务）。
-        """
+        """E12：调用向量模型返回浮点向量列表（OpenAI 兼容 /v1/embeddings 规范）。"""
         model_name = self.models.get('embedding')
         if not model_name:
             raise ValueError("未配置 embedding 向量模型（models.yaml 或用户配置的 models.embedding），"
@@ -517,6 +727,5 @@ class LLMClient:
         if len(vecs) != len(texts_list):
             raise RuntimeError(f"embeddings 返回数量与输入不一致：{len(vecs)} != {len(texts_list)}")
 
-        # embedding 仅消耗输入 token（completion 计 0），计入用量账本
         self._calc_and_record_usage(model_name, prompt_tokens, 0)
         return vecs

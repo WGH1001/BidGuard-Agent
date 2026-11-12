@@ -234,9 +234,10 @@ def test_regulation_crawler_four_states(reg_session):
 # ── 5. 四格式导入（json/txt/docx/pdf）与 F7 六工具白名单及 cite_regulation 测试 ──
 
 def test_four_formats_import_and_f7_cite_regulation_tool(reg_session, tmp_path):
-    # 断言 F7 六工具白名单包含 cite_regulation
-    assert len(ALLOWED_REACT_TOOLS) == 6
+    # 断言 F7 七工具白名单（原 6 工具 + E24 新增 search_attachment）包含 cite_regulation
+    assert len(ALLOWED_REACT_TOOLS) == 7
     assert 'cite_regulation' in ALLOWED_REACT_TOOLS
+    assert 'search_attachment' in ALLOWED_REACT_TOOLS
 
     # 调用 cite_regulation 工具检索《招标投标法》第三十三条（低于成本报价/弄虚作假）
     cite_res = cite_regulation(keyword='低于成本', article_no='第三十三条', session=reg_session)

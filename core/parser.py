@@ -1072,3 +1072,166 @@ def parse_document(file_path: str) -> ParsedDoc:
         raise
     except Exception as e:
         raise RuntimeError(f"解析失败: {type(e).__name__}: {e}") from e
+
+
+def _ocr_image_text_low_threshold(img_path: Path) -> tuple[str, Optional[int], Optional[int]]:
+    """E24 §2.1：F7 问答图片附件专用低门槛 OCR（取消 OCR_MIN_CHARS=100 硬限制，0~99 字短截图或纯公章页亦正常返回并写缓存）。"""
+    raw_bytes = img_path.read_bytes()
+    dims = _get_image_dimensions(raw_bytes)
+    width = dims[0] if dims else None
+    height = dims[1] if dims else None
+
+    import pymupdf
+    try:
+        with pymupdf.open(str(img_path)) as check_doc:
+            if check_doc.page_count < 1:
+                raise ValueError('图片不包含有效页面')
+            if width is None or height is None:
+                rect = check_doc[0].rect
+                width = int(rect.width)
+                height = int(rect.height)
+    except Exception as exc:
+        raise ValueError(f"图片文件损坏或格式不受支持: {exc}") from exc
+
+    cache = _ocr_cache_path(img_path)
+    if cache.exists():
+        cached = cache.read_text(encoding='utf-8')
+        return cached, width, height
+
+    try:
+        engine = _get_ocr_engine()
+    except RuntimeError:
+        cache.write_text('', encoding='utf-8')
+        return '', width, height
+
+    ocr_parts: list[str] = []
+    with pymupdf.open(str(img_path)) as doc:
+        for page in doc:
+            img_bgr = _render_page_image(page)
+            result, _ = engine(img_bgr)
+            if result:
+                for line in result:
+                    if len(line) >= 2 and line[1]:
+                        txt = str(line[1]).strip()
+                        if txt:
+                            ocr_parts.append(txt)
+
+    text = '\n'.join(ocr_parts)
+    cache.write_text(text, encoding='utf-8')
+    return text, width, height
+
+
+def parse_qa_attachment(file_path: str | Path) -> dict:
+    """E24 §2.1：F7 会话附件专用解析入口（不改 parse_document 既有签名与双书 100 字红线）。
+
+    Returns:
+        {
+            'text': str,
+            'source_type': str,
+            'pages': int,
+            'is_image': bool,
+            'ocr_chars': int,
+            'has_text': bool,
+            'image_width': int | None,
+            'image_height': int | None,
+        }
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"附件文件不存在: {file_path}")
+
+    ext = path.suffix.lower()
+    if ext not in SUPPORTED:
+        raise ValueError(f"不支持的附件格式: {ext}")
+
+    if path.stat().st_size <= 0:
+        raise ValueError('上传的附件内容为空')
+
+    if ext in _IMAGE_EXTS:
+        text, w, h = _ocr_image_text_low_threshold(path)
+        clean_len = len(text.strip())
+        return {
+            'text': text,
+            'source_type': 'image',
+            'pages': 1,
+            'is_image': True,
+            'ocr_chars': clean_len,
+            'has_text': clean_len > 0,
+            'image_width': w,
+            'image_height': h,
+        }
+
+    if ext == '.pdf':
+        import pymupdf
+        try:
+            text_parts: list[str] = []
+            pages = 0
+            max_page_chars = 0
+            with pymupdf.open(str(path)) as doc:
+                pages = doc.page_count
+                for page in doc:
+                    pt = page.get_text()
+                    text_parts.append(pt)
+                    max_page_chars = max(max_page_chars, len(pt.strip()))
+            text = '\n'.join(text_parts)
+        except Exception as exc:
+            raise ValueError(f"PDF 附件损坏或无法打开: {exc}") from exc
+
+        ocr_chars = 0
+        if len(text.strip()) < OCR_MIN_CHARS and max_page_chars < 20:
+            cache = _ocr_cache_path(path)
+            if cache.exists():
+                text = cache.read_text(encoding='utf-8')
+            else:
+                try:
+                    engine = _get_ocr_engine()
+                    ocr_parts: list[str] = []
+                    with pymupdf.open(str(path)) as doc:
+                        for page in doc:
+                            img_bgr = _render_page_image(page)
+                            result, _ = engine(img_bgr)
+                            if result:
+                                for line in result:
+                                    if len(line) >= 2 and line[1]:
+                                        t_line = str(line[1]).strip()
+                                        if t_line:
+                                            ocr_parts.append(t_line)
+                    text = '\n'.join(ocr_parts)
+                    cache.write_text(text, encoding='utf-8')
+                except Exception:
+                    pass
+            ocr_chars = len(text.strip())
+
+        clean_len = len(text.strip())
+        if clean_len == 0:
+            raise ValueError('PDF 附件未提取出任何有效文字')
+        return {
+            'text': text,
+            'source_type': 'pdf',
+            'pages': max(1, pages),
+            'is_image': False,
+            'ocr_chars': ocr_chars,
+            'has_text': True,
+            'image_width': None,
+            'image_height': None,
+        }
+
+    try:
+        parsed = parse_document(str(path))
+    except Exception as exc:
+        raise ValueError(f"文档附件解析失败: {exc}") from exc
+
+    clean_len = len((parsed.text or '').strip())
+    if clean_len == 0:
+        raise ValueError('文档附件内容为空，未提取出有效文字')
+
+    return {
+        'text': parsed.text,
+        'source_type': parsed.source_type,
+        'pages': parsed.pages,
+        'is_image': False,
+        'ocr_chars': 0,
+        'has_text': True,
+        'image_width': None,
+        'image_height': None,
+    }

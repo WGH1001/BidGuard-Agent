@@ -200,7 +200,9 @@ def test_e21_low_tier_allows_all_six_tools_in_seven_rounds(tmp_path):
     )
     assert res['rounds_used'] == 7
     assert res['terminated_by_max_rounds'] is False
-    assert [s['action'] for s in res['steps']] == [*ALLOWED_REACT_TOOLS, 'final']
+    core_six_tools = [t for t in ALLOWED_REACT_TOOLS if t != 'search_attachment']
+    assert len(core_six_tools) == 6
+    assert [s['action'] for s in res['steps']] == [*core_six_tools, 'final']
     assert mock_client.efforts == ['low'] * 7
 
 

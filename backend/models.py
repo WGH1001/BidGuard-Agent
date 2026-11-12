@@ -230,6 +230,7 @@ class QaSession(Base):
     tender_path = Column(String(512), nullable=True)
     bid_path = Column(String(512), nullable=True)
     messages_json = Column(JSON, nullable=False, default=list)        # [{'role','content','quotes','steps'}]
+    attachments_json = Column(JSON, nullable=False, default=list)  # E24：会话级上传附件元数据列表
     created_at = Column(DateTime, nullable=False, default=_utc_now)
     updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
 
@@ -267,6 +268,7 @@ class UserModelConfig(Base):
     model_flash = Column(String(128), nullable=False)
     model_flagship = Column(String(128), nullable=True)
     supports_reasoning_effort = Column(Boolean, nullable=False, default=False)
+    supports_vision = Column(Boolean, nullable=False, default=False)  # E24：是否支持原生 VLM 视觉传图
     created_at = Column(DateTime, nullable=False, default=_utc_now)
     updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
 
@@ -373,11 +375,70 @@ def ensure_bid_check_tasks_columns(bind_or_conn: Any) -> list[str]:
         pass
     return added
 
+def _ensure_table_columns_generic(
+    bind_or_conn: Any,
+    table_name: str,
+    col_specs: tuple[tuple[str, str, str], ...],
+) -> list[str]:
+    """通用老库平滑加列辅助函数（兼容 PostgreSQL 与 SQLite）。"""
+    added: list[str] = []
+    if bind_or_conn is None:
+        return added
+    try:
+        insp = inspect(bind_or_conn)
+        if not insp.has_table(table_name):
+            return added
+        existing_cols = {c['name'] for c in insp.get_columns(table_name)}
+        dialect_name = getattr(getattr(bind_or_conn, 'dialect', None), 'name', 'sqlite')
+
+        missing_specs = [
+            (col_name, pg_ddl if dialect_name == 'postgresql' else sq_ddl)
+            for col_name, pg_ddl, sq_ddl in col_specs
+            if col_name not in existing_cols
+        ]
+        if not missing_specs:
+            return added
+
+        if hasattr(bind_or_conn, 'begin') and not hasattr(bind_or_conn, 'in_transaction'):
+            with bind_or_conn.begin() as conn:
+                for col_name, col_ddl in missing_specs:
+                    conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_ddl}"))
+                    added.append(col_name)
+        else:
+            for col_name, col_ddl in missing_specs:
+                bind_or_conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_ddl}"))
+                added.append(col_name)
+            if hasattr(bind_or_conn, 'commit') and getattr(bind_or_conn, 'in_transaction', lambda: False)():
+                bind_or_conn.commit()
+    except Exception:
+        pass
+    return added
+
+
+def ensure_qa_sessions_columns(bind_or_conn: Any) -> list[str]:
+    """E24 §2.2：探测老库 qa_sessions 表，若缺少 attachments_json 列则自动补齐（默认值 '[]'）。"""
+    return _ensure_table_columns_generic(
+        bind_or_conn,
+        'qa_sessions',
+        (("attachments_json", "JSON NOT NULL DEFAULT '[]'", "JSON NOT NULL DEFAULT '[]'"),),
+    )
+
+
+def ensure_user_model_configs_columns(bind_or_conn: Any) -> list[str]:
+    """E24 §2.2：探测老库 user_model_configs 表，若缺少 supports_vision 列则自动补齐（默认值 FALSE/0）。"""
+    return _ensure_table_columns_generic(
+        bind_or_conn,
+        'user_model_configs',
+        (('supports_vision', 'BOOLEAN NOT NULL DEFAULT FALSE', 'BOOLEAN NOT NULL DEFAULT 0'),),
+    )
+
 
 @event.listens_for(Base.metadata, 'after_create')
 def _auto_migrate_bid_check_tasks_after_create(target, connection, **kwargs):
-    """在 Base.metadata.create_all（含 init_db 启动时）完成后自动探测老库并补齐 E11 新列。"""
+    """在 Base.metadata.create_all（含 init_db 启动时）完成后自动探测老库并补齐 E11 / E24 新列。"""
     ensure_bid_check_tasks_columns(connection)
+    ensure_qa_sessions_columns(connection)
+    ensure_user_model_configs_columns(connection)
 
 
 def apply_sqlite_pragmas(engine: Any) -> None:
@@ -400,6 +461,16 @@ def apply_sqlite_pragmas(engine: Any) -> None:
                 for col_name, _pg_t, sq_t in _E11_TASK_NEW_COLS:
                     if col_name not in cols:
                         cursor.execute(f"ALTER TABLE bid_check_tasks ADD COLUMN {col_name} {sq_t}")
+            # E24：同步探测补齐 qa_sessions.attachments_json 与 user_model_configs.supports_vision
+            cursor.execute("PRAGMA table_info(qa_sessions)")
+            qa_cols = {row[1] for row in cursor.fetchall()}
+            if qa_cols and 'attachments_json' not in qa_cols:
+                cursor.execute("ALTER TABLE qa_sessions ADD COLUMN attachments_json JSON NOT NULL DEFAULT '[]'")
+            cursor.execute("PRAGMA table_info(user_model_configs)")
+            mc_cols = {row[1] for row in cursor.fetchall()}
+            if mc_cols and 'supports_vision' not in mc_cols:
+                cursor.execute("ALTER TABLE user_model_configs ADD COLUMN supports_vision BOOLEAN NOT NULL DEFAULT 0")
         except Exception:
             pass
         cursor.close()
+

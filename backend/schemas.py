@@ -257,10 +257,22 @@ class QaSessionCreateRequest(BaseModel):
     bid_path: Optional[str] = None
 
 
+class QaAttachmentOut(BaseModel):
+    attachment_id: str
+    filename: str
+    ext: str
+    size_bytes: int
+    is_image: bool = False
+    ocr_chars: int = 0
+    has_text: bool = False
+    uploaded_at: Optional[str] = None
+
+
 class QaAskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     max_rounds: int = Field(default=7, ge=1, le=8)
     reasoning_effort: Optional[str] = None
+    attachment_ids: list[str] = Field(default_factory=list)
 
 
 class QaQuoteOut(BaseModel):
@@ -270,6 +282,8 @@ class QaQuoteOut(BaseModel):
     page: Optional[int] = None
     quote_verified: bool = True
     note: Optional[str] = None
+    attachment_id: Optional[str] = None
+    attachment_name: Optional[str] = None
 
 
 class QaAskResponseOut(BaseModel):
@@ -292,6 +306,7 @@ class QaSessionOut(BaseModel):
     tender_path: Optional[str] = None
     bid_path: Optional[str] = None
     messages_json: list[dict[str, Any]] = Field(default_factory=list)
+    attachments: list[QaAttachmentOut] = Field(default_factory=list)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -376,6 +391,7 @@ class ModelConfigUpsertRequest(BaseModel):
     model_flash: str = Field(min_length=1, max_length=128)
     model_flagship: Optional[str] = Field(default=None, max_length=128)
     supports_reasoning_effort: bool = False
+    supports_vision: bool = False
 
 
 class ModelConfigOut(BaseModel):
@@ -386,6 +402,7 @@ class ModelConfigOut(BaseModel):
     model_flash: str = ''
     model_flagship: str = ''
     supports_reasoning_effort: bool = False
+    supports_vision: bool = False
     updated_at: Optional[str] = None
 
 

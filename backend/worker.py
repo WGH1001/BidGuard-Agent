@@ -35,6 +35,7 @@ from backend.models import (
     BidRuleConfig,
     UserModelConfig,
     ensure_bid_check_tasks_columns,
+    ensure_user_model_configs_columns,
 )
 from backend.utils.crypto import decrypt_api_key
 from core.llm_gateway import build_client_from_user_config, get_llm_client
@@ -270,6 +271,7 @@ def resolve_effective_llm_client(session: Session, user_id: Optional[int] = None
 
     if user_id is not None:
         try:
+            ensure_user_model_configs_columns(session.get_bind())
             cfg = session.query(UserModelConfig).filter_by(user_id=int(user_id)).first()
             if cfg is not None and cfg.base_url and cfg.api_key_encrypted and cfg.model_flash:
                 plain_key = decrypt_api_key(cfg.api_key_encrypted)
@@ -279,6 +281,7 @@ def resolve_effective_llm_client(session: Session, user_id: Optional[int] = None
                     model_flash=cfg.model_flash,
                     model_flagship=cfg.model_flagship or cfg.model_flash,
                     supports_reasoning_effort=bool(cfg.supports_reasoning_effort),
+                    supports_vision=bool(getattr(cfg, 'supports_vision', False)),
                 )
                 return client, 'done'
         except Exception:

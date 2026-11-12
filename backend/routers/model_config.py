@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from backend.auth import AuthUser, get_current_user, record_audit
 from backend.database import get_db
-from backend.models import UserModelConfig
+from backend.models import UserModelConfig, ensure_user_model_configs_columns
 from backend.schemas import (
     ModelConfigOut,
     ModelConfigTestOut,
@@ -74,6 +74,7 @@ def _row_to_out(row: Optional[UserModelConfig]) -> ModelConfigOut:
         model_flash=row.model_flash or '',
         model_flagship=row.model_flagship or row.model_flash or '',
         supports_reasoning_effort=bool(row.supports_reasoning_effort),
+        supports_vision=bool(getattr(row, 'supports_vision', False)),
         updated_at=row.updated_at.isoformat() if row.updated_at else None,
     )
 
@@ -175,6 +176,7 @@ def get_my_model_config(
     db: Session = Depends(get_db),
 ) -> ModelConfigOut:
     """获取当前登录用户的模型配置（仅回显 configured: true 与尾四位，绝不返回明文 Key）。"""
+    ensure_user_model_configs_columns(db.get_bind())
     uid = current_user.get('id')
     if uid is None:
         return ModelConfigOut(configured=False)
@@ -191,6 +193,7 @@ def save_my_model_config(
     db: Session = Depends(get_db),
 ) -> ModelConfigOut:
     """保存或更新当前用户的模型配置（经 backend/utils/crypto.py 加密落库）。"""
+    ensure_user_model_configs_columns(db.get_bind())
     uid = int(current_user.id)
     base_url = _validate_base_url(body.base_url)
     flash = body.model_flash.strip()
@@ -216,6 +219,7 @@ def save_my_model_config(
             model_flash=flash,
             model_flagship=flagship,
             supports_reasoning_effort=bool(body.supports_reasoning_effort),
+            supports_vision=bool(body.supports_vision),
         )
         db.add(row)
     else:
@@ -224,6 +228,7 @@ def save_my_model_config(
         row.model_flash = flash
         row.model_flagship = flagship
         row.supports_reasoning_effort = bool(body.supports_reasoning_effort)
+        row.supports_vision = bool(body.supports_vision)
 
     db.commit()
     db.refresh(row)
@@ -268,6 +273,7 @@ def test_model_config_connection(
     db: Session = Depends(get_db),
 ) -> ModelConfigTestOut:
     """两段式验证模型配置连通性并统计毫秒延迟（优先 GET /models 验鉴权与模型名；若 404/405 则回退最小 chat 请求）。"""
+    ensure_user_model_configs_columns(db.get_bind())
     uid = int(current_user.id)
     base_url = _validate_base_url(body.base_url)
     flash = body.model_flash.strip()
@@ -299,6 +305,7 @@ def test_model_config_connection(
             model_flash=flash,
             model_flagship=flagship,
             supports_reasoning_effort=bool(body.supports_reasoning_effort),
+            supports_vision=bool(body.supports_vision),
         )
         available_models = _fetch_available_models(client)
         if available_models is not None:

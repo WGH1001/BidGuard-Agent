@@ -22,6 +22,7 @@ const form = reactive({
   model_flash: 'GLM-5.3-Flash',
   model_flagship: 'GLM-5.3-Flash',
   supports_reasoning_effort: true,
+  supports_vision: false,
 })
 
 interface EndpointPreset {
@@ -34,6 +35,7 @@ interface EndpointPreset {
   model_flash: string
   model_flagship: string
   supports_reasoning_effort: boolean
+  supports_vision?: boolean
 }
 
 const PRESETS: EndpointPreset[] = [
@@ -107,6 +109,7 @@ function applyPreset(p: EndpointPreset): void {
   form.model_flash = p.model_flash
   form.model_flagship = p.model_flagship
   form.supports_reasoning_effort = p.supports_reasoning_effort
+  form.supports_vision = Boolean(p.supports_vision)
 }
 
 async function fetchConfig(): Promise<void> {
@@ -123,6 +126,7 @@ async function fetchConfig(): Promise<void> {
       form.model_flash = res.model_flash
       form.model_flagship = res.model_flagship || res.model_flash
       form.supports_reasoning_effort = res.supports_reasoning_effort
+      form.supports_vision = Boolean(res.supports_vision)
       const matched = PRESETS.find((p) => p.base_url === res.base_url)
       selectedKey.value = matched ? matched.key : 'custom'
     }
@@ -148,11 +152,13 @@ async function handleSave(): Promise<void> {
       model_flash: form.model_flash.trim(),
       model_flagship: form.model_flagship.trim() || form.model_flash.trim(),
       supports_reasoning_effort: form.supports_reasoning_effort,
+      supports_vision: Boolean(form.supports_vision),
     })
     meta.configured = res.configured
     meta.api_key_last4 = res.api_key_last4
     meta.api_key_masked = res.api_key_masked
     meta.updated_at = res.updated_at
+    form.supports_vision = Boolean(res.supports_vision)
     form.api_key = ''
     ElMessage.success(`模型配置已加密保存（当前密钥尾号：${res.api_key_last4}）`)
   } finally {
@@ -173,6 +179,7 @@ async function handleTest(): Promise<void> {
       model_flash: form.model_flash.trim(),
       model_flagship: form.model_flagship.trim() || form.model_flash.trim(),
       supports_reasoning_effort: form.supports_reasoning_effort,
+      supports_vision: Boolean(form.supports_vision),
     })
     if (res.ok) {
       ElMessage.success(res.message || `配置校验通过（${res.latency_ms ?? 0}ms）`)
@@ -287,6 +294,13 @@ onMounted(() => {
         <el-form-item label="推理预算参数支持 (supports_reasoning_effort)">
           <el-switch v-model="form.supports_reasoning_effort" />
           <span class="switch-tip">开启后向网关透传 reasoning_effort=low 加速结构化响应</span>
+        </el-form-item>
+
+        <el-form-item label="视觉多模态能力支持 (supports_vision · F7 原生识图)">
+          <el-switch v-model="form.supports_vision" />
+          <span class="switch-tip">
+            仅当所填模型为多模态视觉模型（如 GLM-4V / Qwen-VL / GPT-4o）时开启；未开启或上游不支持时自动降级为 RapidOCR 离线文字模式
+          </span>
         </el-form-item>
 
         <div class="ms-actions">

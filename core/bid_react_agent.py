@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
-"""F7 标书专家 ReAct 追问引擎（★大模型③）—— 跨双书工具检索与溯源问答（E2 混合检索 + E4 第6工具 cite_regulation + E18 双轨页码统一 + E21 多轮上下文与流式思考过程）。
+"""F7 标书专家 ReAct 追问引擎（★大模型③）—— 跨双书工具检索与溯源问答（E2 混合检索 + E4 第6工具 cite_regulation + E18 双轨页码 + E21 多轮流式 + E24 第7工具 search_attachment 与原生 VLM 双轨问答）。
 
-模块定位（对应 PRD-02 §7 F7、E2 任务卡 §2.4、E4 任务卡 §1、E18 双轨页码大一统与 E21 多轮流式卡）：
-1. 工具层（共 6 组确定性/混合检索工具函数，既有 5 工具签名一字不变）：
-   - search_tender(keyword, ...) / search_bid(keyword, ...)：双书检索；
-   - locate_chapter(text, chapter_title)：章节定位；
+模块定位（对应 PRD-02 §7 F7、E2/E4/E18/E21/E24 任务卡）：
+1. 工具层（共 7 组确定性/混合检索工具函数，既有 6 工具签名保持向后兼容）：
+   - search_tender(keyword, ..., after_offset=0) / search_bid(keyword, ..., after_offset=0)：双书检索（支持 after_offset 续检）；
+   - locate_chapter(text, chapter_title, after_offset=0)：章节定位；
    - recalc_price(items, ...)：调用 PriceSandbox 复算报价；
    - check_cert_expiry(cert_text, open_date, ...)：调用 F3 scan_qualifications 核验效期；
-   - cite_regulation(keyword, article_no, ...)：E4 新增第 6 工具，检索法规库返回条文原文+法律名+条号（库空时诚实报"法规库为空"）。
-2. ReAct 循环与流式输出（E21）：
-   - 支持注入会话多轮上下文 history（自动过滤空消息、保留最近 N 轮并截断超长单条文本）；
-   - 智谱 glm-5.3-flash 三挡推理深度实测合法值映射：low->'low' / medium->'high' / high->'max'（均开放至 max_rounds=7 轮：最多调用全部 6 个工具 + 第 7 轮 final 总结），严禁向网关直接透传 'medium' 触发 400-1210 拒绝；
-   - ask_bid_expert_stream 实时产出 step -> answer_delta -> done 事件帧，final 输出 quotes 100% 强制走 verify_quote 溯源。
+   - cite_regulation(keyword, article_no, ...)：E4 第 6 工具，检索法规库返回条文原文+法律名+条号；
+   - search_attachment(keyword, attachment_id='', ...)：E24 新增第 7 工具，检索会话补充文档与图片 OCR 文本池。
+2. ReAct 循环与多模态双轨（E21 / E24）：
+   - 支持注入会话多轮上下文 history（仅注入纯文本问答，严禁在历史消息重复发图）；
+   - 当本轮携带图片附件且 client.supports_vision=True 时，仅在当轮末尾 user 消息附带内存缩图后的 image_url；
+   - _parse_llm_json 支持 strict=False 容错未转义换行，且在解析失败时严禁将含 "action"/"thought" 的残缺工具 JSON 直接吐给用户；
+   - final 输出 quotes（含 source='attachment'）100% 强制走 verify_quote 溯源，纯视觉结论显式标 quote_verified=False。
 """
 from __future__ import annotations
 
@@ -21,7 +23,8 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from core.hybrid_retriever import expand_query_synonyms, hybrid_retrieve_windows
-from core.parser import parse_document
+from core.llm_gateway import encode_image_for_vlm
+from core.parser import parse_document, parse_qa_attachment
 from core.price_sandbox import PriceSandbox
 from core.qualification_scanner import scan_qualifications
 from core.quote_verifier import verify_quote
@@ -33,7 +36,7 @@ _SEARCH_WINDOW = 200
 _MAX_HITS_PER_SEARCH = 5
 _JSON_BLOCK_RE = re.compile(r'\{.*\}', re.DOTALL)
 
-# E4：F7 允许调用的 6 大工具名称白名单
+# E4 / E24：F7 允许调用的 7 大工具名称白名单
 ALLOWED_REACT_TOOLS = (
     'search_tender',
     'search_bid',
@@ -41,12 +44,14 @@ ALLOWED_REACT_TOOLS = (
     'recalc_price',
     'check_cert_expiry',
     'cite_regulation',
+    'search_attachment',
 )
 
 _QUESTION_STOPWORDS = (
     '请问', '招标文件', '招标书', '投标文件', '投标书', '我们', '我方', '甲方',
     '要求', '响应', '在哪里', '在哪', '哪一页', '哪页', '是多少', '多少', '什么',
     '几年', '几个月', '是否', '有没有', '如何', '怎么', '的', '了', '吗', '呢',
+    '附件', '图片', '截图', '补充文件', '补遗', '看看', '里', '中',
 )
 
 # E21 §2.1：指代与承接上文特征词（供 0-Token 离线降级结合上一轮用户问题补充关键词）
@@ -56,7 +61,7 @@ _FOLLOWUP_PRONOUN_KEYS = (
 )
 
 # E21 / 三挡解耦：前端 UI 三挡（low/medium/high）映射为智谱 glm-5.3-flash 实测合法上游推理深度（low/high/max）；
-# 三挡均放开至 7 轮（最多调用全部 6 个工具 + 第 7 轮 final 总结），仅调整模型推理思考深度而不卡工具轮次
+# 三挡均放开至 7 轮（最多调用工具 + final 总结），仅调整模型推理思考深度而不卡工具轮次
 _EFFORT_UPSTREAM_MAP: dict[str, tuple[str, int]] = {
     'low': ('low', 7),
     'medium': ('high', 7),
@@ -64,42 +69,65 @@ _EFFORT_UPSTREAM_MAP: dict[str, tuple[str, int]] = {
     'max': ('max', 7),
 }
 
-_REACT_SYSTEM_PROMPT = """你是招投标双书合规审查专家（ReAct Agent）。你可以调用以下 6 个确定性工具来回答用户关于《招标文件》、《投标文件》与招投标法律法规的问题：
+_REACT_SYSTEM_PROMPT = """你是招投标双书合规审查专家（ReAct Agent）。你可以调用以下 7 个确定性工具来回答用户关于《招标文件》、《投标文件》、会话补充附件（文档/图片）与招投标法律法规的问题：
 
 可用工具列表：
-1. "search_tender"：在招标文件中检索关键词，action_input 为关键词字符串（如 "质保期"）；
-2. "search_bid"：在投标文件中检索关键词，action_input 为关键词字符串（如 "质保期"）；
-3. "locate_chapter"：定位章节标题，action_input 为章节关键词字符串（如 "评标办法"）；
+1. "search_tender"：在招标文件中检索关键词，action_input 为关键词字符串或 {"keyword": "...", "after_offset": 0}（若前5处命中仅覆盖总则，可传 after_offset 续检后文）；
+2. "search_bid"：在投标文件中检索关键词，action_input 为关键词字符串或 {"keyword": "...", "after_offset": 0}；
+3. "locate_chapter"：定位章节标题，action_input 为章节关键词字符串或 {"chapter_title": "...", "doc": "tender"|"bid", "after_offset": 0}；
 4. "recalc_price"：调用报价算术沙盒复算分项报价，action_input 为对象 {"items": [{"name": "分项名", "qty": "数量", "unit_price": "单价", "total_price": "合价"}], "table_total": "合计(可选)", "bid_total": "总报价(可选)"}（注意 items 每项必须包含 qty、unit_price、total_price）；
 5. "check_cert_expiry"：调用证照效期核验器，action_input 为 {"cert_text": "...", "open_date": "YYYY-MM-DD"}；
 6. "cite_regulation"：在招投标法规库中检索法条原文，action_input 为 {"keyword": "...", "article_no": "第X条"}；
-7. "final"：当你已通过工具拿到原文证据准备给出最终回答时使用，action_input 为：
-   {"answer": "最终解答正文", "quotes": ["逐字摘自原文的引用句1", "逐字摘自原文的引用句2"]}
+7. "search_attachment"：在用户上传的会话补充附件（含文档与图片 OCR 文本）中检索关键词，action_input 为 {"keyword": "...", "attachment_id": "可选指定附件ID", "after_offset": 0}；
+8. "final"：当你已通过工具拿到原文证据准备给出最终回答时使用，action_input 为：
+   {"answer": "最终解答正文", "quotes": [{"source": "tender"|"bid"|"attachment", "attachment_id": "当source为attachment时填附件ID", "quote": "逐字摘自原文的引用句"}]}
 
-每轮你必须只输出一个 JSON 对象，格式如下：
+每轮你必须只输出一个合法的 JSON 对象（字符串内部严禁出现未转义的裸换行），格式如下：
 {
   "thought": "思考过程",
-  "action": "search_tender" | "search_bid" | "locate_chapter" | "recalc_price" | "check_cert_expiry" | "cite_regulation" | "final",
+  "action": "search_tender" | "search_bid" | "locate_chapter" | "recalc_price" | "check_cert_expiry" | "cite_regulation" | "search_attachment" | "final",
   "action_input": ...
 }
 ⚠️ 铁律：final 中的 quotes 必须 100% 逐字抄录自工具返回的原文窗口，严禁改写或编造！只输出 JSON。"""
 
 
 def _parse_llm_json(content: str) -> Optional[dict]:
+    """E24 §2.5.4：解析 LLM 返回的 JSON 对象；当严格 json.loads 因字符串内含未转义真实换行/制表符失败时，
+    自动降级使用 json.loads(..., strict=False) 容错解析。
+    """
     if not content:
         return None
     m = _JSON_BLOCK_RE.search(content)
     if not m:
         return None
-    try:
-        obj = json.loads(m.group())
-        return obj if isinstance(obj, dict) else None
-    except json.JSONDecodeError:
-        return None
+    raw_block = m.group()
+    for is_strict in (True, False):
+        try:
+            obj = json.loads(raw_block, strict=is_strict)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _looks_like_unparsed_tool_json(raw_content: str) -> bool:
+    """E24 §2.5.4：判断无法解析的原始模型输出是否属于残缺的工具调用 JSON（含 "action" 与 "thought"/"action_input"），
+    严禁将此类原始 JSON 源码直接当作自然语言回答吐给用户。
+    """
+    s = (raw_content or '').strip()
+    if not s:
+        return False
+    if '"action"' in s and ('"thought"' in s or '"action_input"' in s or any(t in s for t in ALLOWED_REACT_TOOLS)):
+        return True
+    if s.startswith('{') and ('action' in s and 'action_input' in s):
+        return True
+    return False
+
 
 def _coerce_action_input(action_input: Any) -> Any:
-    """E23 §2.4.3：若 LLM 将 action_input 输出为字符串化 JSON（如 '{\"items\": [...]}'），
-    自动尝试 json.loads 解包为 dict/list，防止 recalc_price/check_cert_expiry/cite_regulation/locate_chapter 误拒。
+    """E23 §2.4.3 / E24：若 LLM 将 action_input 输出为字符串化 JSON（如 '{\"items\": [...]}'），
+    自动尝试 json.loads(strict=False) 解包为 dict/list。
     """
     if not isinstance(action_input, str):
         return action_input
@@ -108,12 +136,13 @@ def _coerce_action_input(action_input: Any) -> Any:
         s = re.sub(r'^```(?:json)?\s*|\s*```$', '', s, flags=re.IGNORECASE).strip()
     if (s.startswith('{') and s.endswith('}')) or (s.startswith('[') and s.endswith(']')):
         try:
-            parsed = json.loads(s)
+            parsed = json.loads(s, strict=False)
             if isinstance(parsed, (dict, list)):
                 return parsed
         except Exception:
             pass
     return action_input
+
 
 def _offset_to_page(offset: Optional[int], page_spans: list[tuple[int, int, int]]) -> Optional[int]:
     """向后兼容辅助函数：当调用方直接传入旧版 [(start, end, page_no)] 列表时换算页码。"""
@@ -143,8 +172,8 @@ def _format_history_messages(
     max_turns: int = 6,
     max_chars_per_msg: int = 800,
 ) -> list[dict[str, str]]:
-    """E21 §2.1：从会话历史提取 role in ('user','assistant') 的有效消息，
-    过滤空内容与 loading 占位，按时间正序保留最近 max_turns*2 条，单条超出 max_chars_per_msg 截断加 '…'。
+    """E21 §2.1 / E24 §1.2：从会话历史提取 role in ('user','assistant') 的纯文本消息，
+    历史消息严禁重复携带 base64 图片（仅保留纯文本内容，过滤空内容与 loading 占位）。
     """
     if not history or not isinstance(history, list):
         return []
@@ -158,7 +187,16 @@ def _format_history_messages(
         role = str(item.get('role') or '').strip().lower()
         if role not in ('user', 'assistant'):
             continue
-        content = str(item.get('content') or '').strip()
+        raw_content = item.get('content')
+        if isinstance(raw_content, list):
+            text_pieces = [
+                str(b.get('text') or '')
+                for b in raw_content
+                if isinstance(b, dict) and b.get('type') == 'text'
+            ]
+            content = '\n'.join(p for p in text_pieces if p).strip()
+        else:
+            content = str(raw_content or '').strip()
         if not content:
             continue
         if len(content) > max_chars_per_msg:
@@ -175,7 +213,7 @@ def _resolve_effort_and_rounds(
     client: Any = None,
 ) -> tuple[Optional[str], int]:
     """将前端三挡（low/medium/high）映射为上游合法推理深度（优先读 client.translate_reasoning_effort，
-    未配置时回退 _EFFORT_UPSTREAM_MAP 的 low/high/max），三挡均允许跑满 max_rounds（默认 7 轮：6 工具 + 1 final）。
+    未配置时回退 _EFFORT_UPSTREAM_MAP 的 low/high/max），三挡均允许跑满 max_rounds（默认 7 轮）。
     """
     base_limit = max(1, int(max_rounds or 7))
     raw_key = str(reasoning_effort or '').strip().lower()
@@ -230,14 +268,19 @@ def _search_text_windows(
     window: int = _SEARCH_WINDOW,
     page_spans: Optional[list[tuple[int, int, int]] | dict[str, Any]] = None,
     client: Any = None,
+    after_offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """在文本中检索关键词，返回 ±200 字符窗口、字符偏移与页码（自适应兼容 unified_ctx 字典与旧版 page_spans 列表）。"""
+    """在文本中检索关键词，返回 ±200 字符窗口、字符偏移与页码（E24：支持 after_offset 续检后文）。"""
     if not text or not keyword:
+        return []
+
+    start_pos = max(0, int(after_offset or 0))
+    if start_pos >= len(text):
         return []
 
     kw = str(keyword).strip()
     syn_terms = expand_query_synonyms(kw)
-    if kw in text:
+    if kw in text[start_pos:]:
         search_terms = [kw]
     else:
         extracted = _extract_keywords_from_question(kw)
@@ -250,7 +293,7 @@ def _search_text_windows(
     for term in search_terms:
         if not term:
             continue
-        start = 0
+        start = start_pos
         while len(hits) < _MAX_HITS_PER_SEARCH:
             idx = text.find(term, start)
             if idx < 0:
@@ -268,13 +311,14 @@ def _search_text_windows(
                     'keyword': term,
                     'quote': snippet,
                     'offset': real_off,
+                    'next_after_offset': idx + len(term),
                     'page': _resolve_page_adaptive(idx, ctx_or_spans),
                 })
             start = idx + len(term)
         if hits:
             break
 
-    if not hits:
+    if not hits and start_pos == 0:
         hybrid_res = hybrid_retrieve_windows(
             query=kw,
             doc_text=text,
@@ -290,22 +334,26 @@ def _search_text_windows(
                 'keyword': kw,
                 'quote': h['window'].strip() or h['quote'],
                 'offset': off,
+                'next_after_offset': off + len(h['quote']),
                 'page': _resolve_page_adaptive(off, ctx_or_spans),
             })
 
     return hits
 
 
-# ── 工具层：6 组确定性工具函数（支持独立调用与 ReAct 挂载）────────────────
+# ── 工具层：7 组确定性工具函数（支持独立调用与 ReAct 挂载）────────────────
 
 def search_tender(
     keyword: str,
     tender_text: str = '',
     window: int = _SEARCH_WINDOW,
     page_spans: Optional[list[tuple[int, int, int]] | dict[str, Any]] = None,
+    after_offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """工具 1a：在招标文件中检索关键词，返回 ±200 字符窗口 + 偏移 + 页码。"""
-    return _search_text_windows(tender_text, keyword, 'tender', window=window, page_spans=page_spans)
+    """工具 1a：在招标文件中检索关键词，返回 ±200 字符窗口 + 偏移 + 页码（支持 after_offset 续检）。"""
+    return _search_text_windows(
+        tender_text, keyword, 'tender', window=window, page_spans=page_spans, after_offset=after_offset
+    )
 
 
 def search_bid(
@@ -313,15 +361,23 @@ def search_bid(
     bid_text: str = '',
     window: int = _SEARCH_WINDOW,
     page_spans: Optional[list[tuple[int, int, int]] | dict[str, Any]] = None,
+    after_offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """工具 1b：在投标文件中检索关键词，返回 ±200 字符窗口 + 偏移 + 页码。"""
-    return _search_text_windows(bid_text, keyword, 'bid', window=window, page_spans=page_spans)
+    """工具 1b：在投标文件中检索关键词，返回 ±200 字符窗口 + 偏移 + 页码（支持 after_offset 续检）。"""
+    return _search_text_windows(
+        bid_text, keyword, 'bid', window=window, page_spans=page_spans, after_offset=after_offset
+    )
 
 
-def locate_chapter(text: str, chapter_title: str) -> list[dict[str, Any]]:
-    """工具 2：章节定位（复用 tender_extractor.locate_chapters 与 locate_keyword_sections）。"""
+def locate_chapter(
+    text: str,
+    chapter_title: str,
+    after_offset: int = 0,
+) -> list[dict[str, Any]]:
+    """工具 2：章节定位（复用 tender_extractor.locate_chapters 与 locate_keyword_sections，支持 after_offset）。"""
     if not text or not chapter_title:
         return []
+    start_pos = max(0, int(after_offset or 0))
     kw = str(chapter_title).strip()
     chapters = locate_chapters(text)
     matched = [
@@ -332,11 +388,12 @@ def locate_chapter(text: str, chapter_title: str) -> list[dict[str, Any]]:
             'excerpt': text[ch['start']:min(len(text), ch['start'] + 400)],
         }
         for ch in chapters
-        if kw in ch['title'] or kw in ch['index']
+        if ch['start'] >= start_pos and (kw in ch['title'] or kw in ch['index'])
     ]
     if matched:
         return matched
-    return locate_keyword_sections(text, (kw,), context_after=400)
+    sec_hits = locate_keyword_sections(text, (kw,), context_after=400)
+    return [h for h in sec_hits if int(h.get('start', 0)) >= start_pos]
 
 
 def recalc_price(
@@ -363,7 +420,6 @@ def recalc_price(
             }
         tp = it.get('total_price')
         if tp is None or str(tp).strip() == '':
-            # 兼容部分模型或历史调用使用 amount / subtotal 键名，若均无则明确提示缺少 total_price
             alt_tp = it.get('amount') if it.get('amount') is not None else it.get('subtotal')
             if alt_tp is not None and str(alt_tp).strip() != '':
                 it = {**it, 'total_price': alt_tp}
@@ -422,28 +478,297 @@ def cite_regulation(
     )
 
 
+def _normalize_runtime_attachments(
+    attachments: Optional[list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """E24 §2.5：规范化运行时附件列表，确保每项具备 text 与 page_ctx。"""
+    norm_list: list[dict[str, Any]] = []
+    for raw in attachments or []:
+        if not isinstance(raw, dict):
+            continue
+        att_id = str(raw.get('attachment_id') or raw.get('id') or '').strip()
+        filename = str(raw.get('filename') or raw.get('name') or att_id or '未命名附件').strip()
+        file_path = raw.get('file_path') or raw.get('abs_path') or raw.get('path')
+        text = raw.get('text')
+        is_image = bool(raw.get('is_image', False))
+        ocr_chars = int(raw.get('ocr_chars', 0) or 0)
+        page_ctx = raw.get('page_ctx')
+
+        if text is None and file_path and Path(str(file_path)).is_file():
+            try:
+                parsed_att = parse_qa_attachment(file_path)
+                text = parsed_att['text']
+                is_image = bool(parsed_att['is_image'])
+                ocr_chars = int(parsed_att['ocr_chars'])
+            except Exception:
+                text = ''
+
+        if page_ctx is None and file_path and Path(str(file_path)).is_file() and not is_image:
+            page_ctx = build_unified_page_context(file_path)
+
+        text_str = str(text or '')
+        if is_image and ocr_chars == 0 and text_str.strip():
+            ocr_chars = len(text_str.strip())
+
+        norm_list.append({
+            'attachment_id': att_id or filename,
+            'filename': filename,
+            'file_path': str(file_path) if file_path else None,
+            'text': text_str,
+            'is_image': is_image,
+            'ocr_chars': ocr_chars,
+            'has_text': bool(text_str.strip()),
+            'page_ctx': page_ctx or {'kind': 'none', 'pdf_spans': [], 'docx_spans': []},
+        })
+    return norm_list
+
+
+def search_attachment(
+    keyword: str = '',
+    attachment_id: str = '',
+    attachments: Optional[list[dict[str, Any]]] = None,
+    window: int = _SEARCH_WINDOW,
+    after_offset: int = 0,
+    client: Any = None,
+) -> list[dict[str, Any]]:
+    """工具 7（E24 新增）：在会话补充附件（含文档与图片 OCR 文本池）中检索关键词。
+
+    - 支持指定 attachment_id 或在全部附件中检索；
+    - 当图片附件无 OCR 文字（ocr_chars=0）时，返回明确的元信息说明，不编造图内文字。
+    """
+    norm_atts = _normalize_runtime_attachments(attachments)
+    if not norm_atts:
+        return []
+
+    target_id = str(attachment_id or '').strip()
+    if target_id:
+        candidates = [
+            a for a in norm_atts
+            if a['attachment_id'] == target_id or a['filename'] == target_id
+        ]
+    else:
+        candidates = norm_atts
+
+    if not candidates:
+        return [{
+            'source': 'attachment',
+            'attachment_id': target_id,
+            'attachment_name': '',
+            'quote': '',
+            'offset': None,
+            'page': None,
+            'is_image': False,
+            'ocr_chars': 0,
+            'note': f"未找到指定附件 ID：{target_id}",
+        }]
+
+    kw = str(keyword or '').strip()
+    all_hits: list[dict[str, Any]] = []
+
+    for att in candidates:
+        att_txt = att['text']
+        if not att_txt.strip():
+            if att['is_image']:
+                all_hits.append({
+                    'source': 'attachment',
+                    'attachment_id': att['attachment_id'],
+                    'attachment_name': att['filename'],
+                    'quote': '',
+                    'offset': None,
+                    'page': None,
+                    'is_image': True,
+                    'ocr_chars': 0,
+                    'note': f"图片附件「{att['filename']}」未识别出可检索文字（ocr_chars=0），请结合视觉观察或提示用户该图片无可提取文本",
+                })
+            continue
+
+        if not kw:
+            snippet = att_txt[after_offset:min(len(att_txt), after_offset + window * 2)].strip()
+            if snippet:
+                real_off = att_txt.find(snippet, after_offset)
+                if real_off < 0:
+                    real_off = after_offset
+                all_hits.append({
+                    'source': 'attachment',
+                    'attachment_id': att['attachment_id'],
+                    'attachment_name': att['filename'],
+                    'keyword': '',
+                    'quote': snippet,
+                    'offset': real_off,
+                    'page': _resolve_page_adaptive(real_off, att['page_ctx']),
+                    'is_image': att['is_image'],
+                    'ocr_chars': att['ocr_chars'],
+                })
+            continue
+
+        win_hits = _search_text_windows(
+            text=att_txt,
+            keyword=kw,
+            source_label='attachment',
+            window=window,
+            page_spans=att['page_ctx'],
+            client=client,
+            after_offset=after_offset,
+        )
+        for h in win_hits:
+            all_hits.append({
+                **h,
+                'source': 'attachment',
+                'attachment_id': att['attachment_id'],
+                'attachment_name': att['filename'],
+                'is_image': att['is_image'],
+                'ocr_chars': att['ocr_chars'],
+            })
+
+        if not win_hits and att['is_image'] and len(att_txt.strip()) <= 400 and after_offset == 0:
+            snippet = att_txt.strip()
+            real_off = att_txt.find(snippet)
+            all_hits.append({
+                'source': 'attachment',
+                'attachment_id': att['attachment_id'],
+                'attachment_name': att['filename'],
+                'keyword': kw,
+                'quote': snippet,
+                'offset': max(0, real_off),
+                'page': 1,
+                'is_image': True,
+                'ocr_chars': att['ocr_chars'],
+            })
+
+    return all_hits[:_MAX_HITS_PER_SEARCH]
+
+
 def _verify_and_locate_quotes(
     raw_quotes: list[Any],
     tender_text: str,
     bid_text: str,
     tender_pages: Optional[list[tuple[int, int, int]] | dict[str, Any]],
     bid_pages: Optional[list[tuple[int, int, int]] | dict[str, Any]],
+    attachments: Optional[list[dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
-    """对 LLM final 输出的每条 quote 强制执行 verify_quote 溯源。"""
+    """对 LLM final 输出的每条 quote 强制执行 verify_quote 溯源（E24 扩展支持 source='attachment' 与纯视觉结论降级标注）。"""
+    norm_atts = _normalize_runtime_attachments(attachments)
+    att_by_id = {a['attachment_id']: a for a in norm_atts}
+    att_by_name = {a['filename']: a for a in norm_atts}
+
     verified_list: list[dict[str, Any]] = []
     for item in raw_quotes or []:
         if isinstance(item, dict):
             q_str = str(item.get('quote') or item.get('text') or '').strip()
-            hint_src = item.get('source')
+            hint_src = str(item.get('source') or '').strip().lower() or None
+            hint_att_id = str(item.get('attachment_id') or '').strip() or None
+            hint_att_name = str(item.get('attachment_name') or '').strip() or None
         else:
             q_str = str(item or '').strip()
             hint_src = None
+            hint_att_id = None
+            hint_att_name = None
+
+        if not q_str and hint_src != 'attachment':
+            continue
+
+        # ── 1. 显式指定了 attachment 来源或带 attachment_id/attachment_name ──
+        if hint_src == 'attachment' or hint_att_id or hint_att_name:
+            matched_att = None
+            if hint_att_id and hint_att_id in att_by_id:
+                matched_att = att_by_id[hint_att_id]
+            elif hint_att_name and hint_att_name in att_by_name:
+                matched_att = att_by_name[hint_att_name]
+            elif hint_att_id and hint_att_id in att_by_name:
+                matched_att = att_by_name[hint_att_id]
+            elif not hint_att_id and not hint_att_name and len(norm_atts) == 1:
+                matched_att = norm_atts[0]
+
+            if matched_att is None:
+                # 伪造或不存在的 attachment_id / attachment_name -> 严正拦截并清空
+                verified_list.append({
+                    'source': 'attachment',
+                    'attachment_id': hint_att_id,
+                    'attachment_name': hint_att_name,
+                    'quote': '',
+                    'quote_raw_rejected': q_str,
+                    'offset': None,
+                    'page': None,
+                    'quote_verified': False,
+                    'note': '附件不存在或未在本轮会话中挂载，引用已清空',
+                })
+                continue
+
+            att_txt = matched_att['text']
+            if q_str and att_txt and verify_quote(q_str, att_txt):
+                off = att_txt.find(q_str)
+                if off < 0:
+                    head = re.sub(r'\s+', '', q_str)[:8]
+                    off = att_txt.find(head) if head else 0
+                    if off < 0:
+                        off = 0
+                verified_list.append({
+                    'source': 'attachment',
+                    'attachment_id': matched_att['attachment_id'],
+                    'attachment_name': matched_att['filename'],
+                    'quote': q_str,
+                    'offset': off,
+                    'page': _resolve_page_adaptive(off, matched_att['page_ctx']),
+                    'quote_verified': True,
+                })
+            elif matched_att['is_image']:
+                # 对纯看图结论或图片未精确命中 OCR 子串的情况：保留视觉说明但强制 quote_verified=False、offset=None
+                verified_list.append({
+                    'source': 'attachment',
+                    'attachment_id': matched_att['attachment_id'],
+                    'attachment_name': matched_att['filename'],
+                    'quote': q_str if not matched_att['has_text'] else '',
+                    'offset': None,
+                    'page': None,
+                    'quote_verified': False,
+                    'note': '视觉识别结论（非文字全文精确子串）',
+                })
+            else:
+                verified_list.append({
+                    'source': 'attachment',
+                    'attachment_id': matched_att['attachment_id'],
+                    'attachment_name': matched_att['filename'],
+                    'quote': '',
+                    'quote_raw_rejected': q_str,
+                    'offset': None,
+                    'page': None,
+                    'quote_verified': False,
+                    'note': '引用未通过附件原文溯源校验，已清空',
+                })
+            continue
 
         if not q_str:
             continue
 
+        # ── 2. 招标书 / 投标书 / 未注明来源自动反查 ──
         in_tender = verify_quote(q_str, tender_text) if tender_text else False
         in_bid = verify_quote(q_str, bid_text) if bid_text else False
+
+        matched_att_auto = None
+        if not in_tender and not in_bid and norm_atts:
+            for att in norm_atts:
+                if att['text'] and verify_quote(q_str, att['text']):
+                    matched_att_auto = att
+                    break
+
+        if matched_att_auto is not None:
+            att_txt = matched_att_auto['text']
+            off = att_txt.find(q_str)
+            if off < 0:
+                head = re.sub(r'\s+', '', q_str)[:8]
+                off = att_txt.find(head) if head else 0
+                if off < 0:
+                    off = 0
+            verified_list.append({
+                'source': 'attachment',
+                'attachment_id': matched_att_auto['attachment_id'],
+                'attachment_name': matched_att_auto['filename'],
+                'quote': q_str,
+                'offset': off,
+                'page': _resolve_page_adaptive(off, matched_att_auto['page_ctx']),
+                'quote_verified': True,
+            })
+            continue
 
         if hint_src == 'bid' and in_bid:
             src = 'bid'
@@ -485,6 +810,52 @@ def _verify_and_locate_quotes(
     return verified_list
 
 
+def _build_current_user_message(
+    question: str,
+    norm_atts: list[dict[str, Any]],
+    client: Any,
+) -> dict[str, Any]:
+    """E24 §1.2 & §2.5.2：构建本轮末尾 user 消息。
+    - 若携带附件，先在文本中列出已挂载附件清单（ID、文件名、类型、字数）；
+    - 仅当存在图片附件且 getattr(client, 'supports_vision', False) 为 True 时，构造 OpenAI 多模态 content 数组传入缩图后的 data_url。
+    """
+    att_desc_lines: list[str] = []
+    image_blocks: list[dict[str, Any]] = []
+    vision_enabled = bool(client is not None and getattr(client, 'supports_vision', False))
+
+    for att in norm_atts:
+        kind_str = f"图片(OCR识别 {att['ocr_chars']} 字)" if att['is_image'] else f"文档({len(att['text'])} 字)"
+        att_desc_lines.append(
+            f"- 附件ID={att['attachment_id']} | 文件名={att['filename']} | 类型={kind_str}"
+        )
+        if att['is_image'] and vision_enabled and att.get('file_path'):
+            try:
+                encoded = encode_image_for_vlm(att['file_path'])
+                image_blocks.append({
+                    'type': 'image_url',
+                    'image_url': {'url': encoded['data_url']},
+                })
+            except Exception:
+                pass
+
+    text_prompt = f"用户问题：{question}"
+    if att_desc_lines:
+        text_prompt += (
+            "\n\n【本轮已挂载的补充附件（可调用 search_attachment 检索）】\n"
+            + "\n".join(att_desc_lines)
+        )
+
+    if image_blocks:
+        return {
+            'role': 'user',
+            'content': [
+                {'type': 'text', 'text': text_prompt},
+                *image_blocks,
+            ],
+        }
+    return {'role': 'user', 'content': text_prompt}
+
+
 def ask_bid_expert_stream(
     tender_path: str | Path,
     bid_path: str | Path,
@@ -493,8 +864,9 @@ def ask_bid_expert_stream(
     max_rounds: int = 7,
     reasoning_effort: Optional[str] = None,
     history: Optional[list[dict[str, Any]]] = None,
+    attachments: Optional[list[dict[str, Any]]] = None,
 ) -> Iterator[dict[str, Any]]:
-    """E21 §2.1：F7 标书专家流式生成器主入口（依次 yield step -> answer_delta -> done 事件帧）。"""
+    """E21 / E24：F7 标书专家流式生成器主入口（依次 yield step -> answer_delta -> done 事件帧）。"""
     tender_doc = parse_document(str(tender_path))
     bid_doc = parse_document(str(bid_path))
     tender_text = tender_doc.text or ''
@@ -503,8 +875,9 @@ def ask_bid_expert_stream(
     tender_ctx = build_unified_page_context(tender_path)
     bid_ctx = build_unified_page_context(bid_path)
     formatted_history = _format_history_messages(history)
+    norm_atts = _normalize_runtime_attachments(attachments)
 
-    # ── 0-Token 离线降级分支（支持结合历史多轮提问补充上下文关键词）──
+    # ── 0-Token 离线降级分支（同步支持检索补充文档与图片 OCR 文本池）──
     if client is None:
         has_pronoun = any(pk in (question or '') for pk in _FOLLOWUP_PRONOUN_KEYS)
         domain_tokens = _extract_domain_tokens(question)
@@ -535,19 +908,29 @@ def ask_bid_expert_stream(
 
         t_hits: list[dict[str, Any]] = []
         b_hits: list[dict[str, Any]] = []
+        a_hits: list[dict[str, Any]] = []
         for kw in keywords:
             t_hits.extend(search_tender(kw, tender_text=tender_text, page_spans=tender_ctx))
             b_hits.extend(search_bid(kw, bid_text=bid_text, page_spans=bid_ctx))
+            if norm_atts:
+                a_hits.extend(search_attachment(kw, attachments=norm_atts))
 
         if not t_hits and tender_text:
             t_hits.extend(_search_text_windows(tender_text, question, 'tender', page_spans=tender_ctx))
         if not b_hits and bid_text:
             b_hits.extend(_search_text_windows(bid_text, question, 'bid', page_spans=bid_ctx))
+        if not a_hits and norm_atts:
+            a_hits.extend(search_attachment('', attachments=norm_atts))
+
+        valid_a_hits = [h for h in a_hits if h.get('quote')]
+        empty_img_atts = [a for a in norm_atts if a['is_image'] and not a['has_text']]
 
         quotes = []
-        for h in (t_hits[:2] + b_hits[:2]):
+        for h in (valid_a_hits[:2] + t_hits[:2] + b_hits[:2]):
             quotes.append({
                 'source': h['source'],
+                'attachment_id': h.get('attachment_id'),
+                'attachment_name': h.get('attachment_name'),
                 'quote': h['quote'],
                 'offset': h['offset'],
                 'page': h['page'],
@@ -558,12 +941,22 @@ def ask_bid_expert_stream(
         ctx_ref_q = context_user_question or last_user_question
         if ctx_ref_q and has_pronoun:
             summary_parts.append(f"【结合上一轮提问「{ctx_ref_q[:40]}」上下文】")
+        if valid_a_hits:
+            top_a = valid_a_hits[0]
+            summary_parts.append(
+                f"【补充附件「{top_a.get('attachment_name')}」命中】{top_a['quote']}（@字符{top_a['offset']}）"
+            )
+        if empty_img_atts and not valid_a_hits:
+            img_names = '、'.join(a['filename'] for a in empty_img_atts)
+            summary_parts.append(
+                f"【图片附件提示】图片「{img_names}」未识别出可检索文字（ocr_chars=0），当前为 0-Token 离线模式，请开启支持视觉的多模态模型或上传清晰文字版材料。"
+            )
         if t_hits:
             summary_parts.append(f"【招标文件命中】{t_hits[0]['quote']}（@字符{t_hits[0]['offset']}）")
         if b_hits:
             summary_parts.append(f"【投标文件命中】{b_hits[0]['quote']}（@字符{b_hits[0]['offset']}）")
-        if not t_hits and not b_hits:
-            summary_parts.append('未在招标文件或投标文件中检索到对应关键词内容。')
+        if not summary_parts:
+            summary_parts.append('未在招标文件、投标文件或补充附件中检索到对应关键词内容。')
         answer = '\n'.join(summary_parts)
 
         fallback_step = {
@@ -571,7 +964,11 @@ def ask_bid_expert_stream(
             'thought': '0 Token 关键词与混合同义词检索降级模式',
             'action': 'keyword_search',
             'action_input': keywords,
-            'observation': {'tender_hits': len(t_hits), 'bid_hits': len(b_hits)},
+            'observation': {
+                'tender_hits': len(t_hits),
+                'bid_hits': len(b_hits),
+                'attachment_hits': len(valid_a_hits),
+            },
         }
         yield {'type': 'step', 'data': fallback_step}
         for piece in _iter_answer_chunks(answer):
@@ -591,11 +988,12 @@ def ask_bid_expert_stream(
         }
         return
 
-    # ── 在线 ReAct 多步工具调用分支（注入历史上下文 + 挡位映射）──
-    messages: list[dict[str, str]] = [
+    # ── 在线 ReAct 多步工具调用分支（注入历史上下文 + 当轮多模态附件 + 挡位映射）──
+    user_msg = _build_current_user_message(question, norm_atts, client)
+    messages: list[dict[str, Any]] = [
         {'role': 'system', 'content': _REACT_SYSTEM_PROMPT},
         *formatted_history,
-        {'role': 'user', 'content': f"用户问题：{question}"},
+        user_msg,
     ]
     steps: list[dict[str, Any]] = []
     collected_tool_quotes: list[dict[str, Any]] = []
@@ -614,16 +1012,31 @@ def ask_bid_expert_stream(
         parsed = _parse_llm_json(raw_content)
 
         if not parsed:
+            # E24 §2.5.4：若模型输出了含 "action"/"thought" 的残缺工具 JSON，严禁直接作为最终答案吐给用户
+            if _looks_like_unparsed_tool_json(raw_content):
+                if r_idx < limit:
+                    messages.append({'role': 'assistant', 'content': raw_content})
+                    messages.append({
+                        'role': 'user',
+                        'content': (
+                            '你上一轮输出的 JSON 格式存在语法错误（请勿在 JSON 字符串内直接包含未转义的换行符）。'
+                            '请重新输出一个合法的单行 JSON 对象。'
+                        ),
+                    })
+                    continue
+                ans_fallback = '已完成标书条款检索，但模型输出格式异常，请参考下方已提取的原文溯源卡片或重试。'
+            else:
+                ans_fallback = raw_content.strip() or '未能生成有效回答。'
+
             end_step = {
                 'round': r_idx,
-                'thought': '模型未返回有效 JSON，直接结束',
+                'thought': '模型未返回有效结构化 JSON，收口输出可读结论',
                 'action': 'final',
                 'action_input': {},
                 'observation': None,
             }
             steps.append(end_step)
             yield {'type': 'step', 'data': end_step}
-            ans_fallback = raw_content.strip() or '未能生成有效回答。'
             for piece in _iter_answer_chunks(ans_fallback):
                 yield {'type': 'answer_delta', 'data': {'text': piece}}
             yield {
@@ -644,7 +1057,7 @@ def ask_bid_expert_stream(
         action = str(parsed.get('action') or 'final').strip()
         action_input = _coerce_action_input(parsed.get('action_input'))
 
-        # E4 第 474 行区：6 工具白名单检查
+        # E4 / E24：7 工具白名单检查
         if action == 'final' or ('answer' in parsed and action not in ALLOWED_REACT_TOOLS):
             final_payload = action_input if isinstance(action_input, dict) else parsed
             ans_text = str(final_payload.get('answer') or parsed.get('answer') or '').strip()
@@ -658,12 +1071,18 @@ def ask_bid_expert_stream(
                 bid_text=bid_text,
                 tender_pages=tender_ctx,
                 bid_pages=bid_ctx,
+                attachments=norm_atts,
             )
 
             valid_locs = []
             for vq in verified_quotes:
                 if vq.get('quote_verified') and vq.get('quote'):
-                    src_zh = '招标书' if vq['source'] == 'tender' else '投标书'
+                    if vq['source'] == 'attachment':
+                        src_zh = f"附件《{vq.get('attachment_name') or vq.get('attachment_id') or ''}》"
+                    elif vq['source'] == 'tender':
+                        src_zh = '招标书'
+                    else:
+                        src_zh = '投标书'
                     if vq.get('page') is not None:
                         valid_locs.append(f"{src_zh}第 {vq['page']} 页(@字符{vq['offset']})")
                     else:
@@ -699,9 +1118,14 @@ def ask_bid_expert_stream(
 
         observation: Any = None
         if action == 'search_tender':
-            kw = action_input.get('keyword', '') if isinstance(action_input, dict) else str(action_input or '')
+            if isinstance(action_input, dict):
+                kw = str(action_input.get('keyword') or '')
+                after_off = int(action_input.get('after_offset') or 0)
+            else:
+                kw = str(action_input or '')
+                after_off = 0
             observation = _search_text_windows(
-                tender_text, kw, 'tender', page_spans=tender_ctx, client=client
+                tender_text, kw, 'tender', page_spans=tender_ctx, client=client, after_offset=after_off
             )
             for h in observation[:2]:
                 collected_tool_quotes.append({
@@ -709,23 +1133,57 @@ def ask_bid_expert_stream(
                     'offset': h['offset'], 'page': h['page'], 'quote_verified': True,
                 })
         elif action == 'search_bid':
-            kw = action_input.get('keyword', '') if isinstance(action_input, dict) else str(action_input or '')
+            if isinstance(action_input, dict):
+                kw = str(action_input.get('keyword') or '')
+                after_off = int(action_input.get('after_offset') or 0)
+            else:
+                kw = str(action_input or '')
+                after_off = 0
             observation = _search_text_windows(
-                bid_text, kw, 'bid', page_spans=bid_ctx, client=client
+                bid_text, kw, 'bid', page_spans=bid_ctx, client=client, after_offset=after_off
             )
             for h in observation[:2]:
                 collected_tool_quotes.append({
                     'source': 'bid', 'quote': h['quote'],
                     'offset': h['offset'], 'page': h['page'], 'quote_verified': True,
                 })
+        elif action == 'search_attachment':
+            if isinstance(action_input, dict):
+                kw = str(action_input.get('keyword') or '')
+                att_id_in = str(action_input.get('attachment_id') or '')
+                after_off = int(action_input.get('after_offset') or 0)
+            else:
+                kw = str(action_input or '')
+                att_id_in = ''
+                after_off = 0
+            observation = search_attachment(
+                keyword=kw,
+                attachment_id=att_id_in,
+                attachments=norm_atts,
+                after_offset=after_off,
+                client=client,
+            )
+            for h in observation[:2]:
+                if h.get('quote'):
+                    collected_tool_quotes.append({
+                        'source': 'attachment',
+                        'attachment_id': h.get('attachment_id'),
+                        'attachment_name': h.get('attachment_name'),
+                        'quote': h['quote'],
+                        'offset': h['offset'],
+                        'page': h['page'],
+                        'quote_verified': True,
+                    })
         elif action == 'locate_chapter':
             if isinstance(action_input, dict):
                 target_doc = bid_text if action_input.get('doc') == 'bid' else tender_text
                 ch_title = str(action_input.get('chapter_title') or action_input.get('keyword') or '')
+                after_off = int(action_input.get('after_offset') or 0)
             else:
                 target_doc = tender_text
                 ch_title = str(action_input or '')
-            observation = locate_chapter(target_doc, ch_title)
+                after_off = 0
+            observation = locate_chapter(target_doc, ch_title, after_offset=after_off)
         elif action == 'recalc_price':
             if isinstance(action_input, dict):
                 observation = recalc_price(
@@ -804,8 +1262,9 @@ def ask_bid_expert(
     max_rounds: int = 7,
     reasoning_effort: Optional[str] = None,
     history: Optional[list[dict[str, Any]]] = None,
+    attachments: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
-    """F7 标书专家 ReAct 追问同步主入口（消费 ask_bid_expert_stream 的 done 帧，公共签名与返回结构保持一字不变）。"""
+    """F7 标书专家 ReAct 追问同步主入口（消费 ask_bid_expert_stream 的 done 帧，公共签名与返回结构保持向后兼容）。"""
     final_data: Optional[dict[str, Any]] = None
     for event in ask_bid_expert_stream(
         tender_path=tender_path,
@@ -815,6 +1274,7 @@ def ask_bid_expert(
         max_rounds=max_rounds,
         reasoning_effort=reasoning_effort,
         history=history,
+        attachments=attachments,
     ):
         if event.get('type') == 'done':
             final_data = event.get('data')
