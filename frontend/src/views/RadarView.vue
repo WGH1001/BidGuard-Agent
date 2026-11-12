@@ -13,6 +13,7 @@ const authStore = useAuthStore()
 const loading = ref(false)
 const detailLoading = ref(false)
 const listLoading = ref(false)
+const rescanningId = ref<number | null>(null)
 const historyTasks = ref<BidTaskOut[]>([])
 const scanResult = ref<RadarScanOut | null>(null)
 
@@ -136,6 +137,20 @@ async function handleDeleteHistory(task: BidTaskOut): Promise<void> {
     await loadHistoryList(true)
   } else {
     await loadHistoryList(false)
+  }
+}
+
+async function handleRescan(taskId: number): Promise<void> {
+  if (rescanningId.value !== null) return
+  rescanningId.value = taskId
+  try {
+    const res = await radarApi.rescan(taskId)
+    scanResult.value = res
+    saveToSessionStorage(res)
+    await loadHistoryList(false)
+    ElMessage.success(`控标雷达记录 #${taskId} 已重新扫描完成`)
+  } finally {
+    rescanningId.value = null
   }
 }
 
@@ -297,6 +312,18 @@ onBeforeUnmount(() => {
                 {{ item.stats_json?.recommendation || '已扫描' }}
               </span>
               <el-button
+                type="primary"
+                link
+                size="small"
+                class="rri-del-btn"
+                :loading="rescanningId === item.id"
+                :disabled="rescanningId !== null && rescanningId !== item.id"
+                title="重新执行控标雷达扫描与开标日期提取"
+                @click.stop="handleRescan(item.id)"
+              >
+                重扫
+              </el-button>
+              <el-button
                 type="danger"
                 link
                 size="small"
@@ -433,15 +460,30 @@ onBeforeUnmount(() => {
                 检出疑似排他参数 {{ scanResult.suspicious_params.length }} 处
               </span>
               <span
-                v-if="scanResult.open_date"
-                class="sev-pill info mono-num"
+                class="sev-pill mono-num"
+                :class="scanResult.open_date ? 'info' : 'neutral'"
                 :title="scanResult.open_date_quote ? `原文摘录：${scanResult.open_date_quote}` : undefined"
               >
-                开标日期：{{ scanResult.open_date }}（{{ scanResult.open_date_source === 'tender_llm' ? 'AI 局部窗' : '正文识别' }}）
+                {{
+                  scanResult.open_date
+                    ? `开标日期：${scanResult.open_date}（${scanResult.open_date_source === 'tender_llm' ? 'AI 局部窗' : '正文识别'}）`
+                    : '开标日期：未识别'
+                }}
               </span>
               <span class="sev-pill" :class="scanResult.llm_status === 'done' ? 'ok' : 'info'">
                 {{ scanResult.llm_status === 'done' ? '确定性 + 大模型④ 双层复核' : '0-Token 确定性模式' }}
               </span>
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                :loading="rescanningId === scanResult.task_id"
+                :disabled="rescanningId !== null && rescanningId !== scanResult.task_id"
+                style="margin-left: auto"
+                @click="handleRescan(scanResult.task_id)"
+              >
+                重新扫描
+              </el-button>
             </div>
           </div>
           <div class="cb-summary">{{ scanResult.conclusion.summary }}</div>

@@ -8,9 +8,11 @@
 """
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import io
+import json
 from pathlib import Path
 import re
 from typing import Optional
@@ -511,4 +513,73 @@ def list_audit_logs(
             )
             for r in rows
         ],
+    )
+
+
+_CSV_FORMULA_PREFIXES = ('=', '+', '-', '@')
+_MAX_AUDIT_EXPORT_ROWS = 10000
+
+
+def _sanitize_csv_cell(val: object) -> str:
+    """E25 §2.5：对以 = / + / - / @ 开头的单元格前置单引号转义，防御 Excel CSV 公式注入攻击。"""
+    if val is None:
+        return ''
+    s = str(val)
+    if s and s[0] in _CSV_FORMULA_PREFIXES:
+        return f"'{s}"
+    return s
+
+
+@router.get('/audit-logs/export')
+@router.get('/audit/export', include_in_schema=False)
+def export_audit_logs_csv(
+    action: Optional[str] = Query(default=None),
+    current_user: AuthUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """E25 §2.5：管理员导出本租户安全审计留痕日志为 UTF-8 BOM CSV 文件（上限 10000 条，防公式注入转义）。"""
+    tenant_id = int(current_user.tenant_id)
+    q = db.query(AuditLog).filter_by(tenant_id=tenant_id)
+    clean_action = action.strip() if (action and action.strip()) else None
+    if clean_action:
+        q = q.filter_by(action=clean_action)
+
+    rows = q.order_by(AuditLog.id.desc()).limit(_MAX_AUDIT_EXPORT_ROWS).all()
+
+    buf = io.StringIO()
+    buf.write('\ufeff')  # UTF-8 BOM，确保 Excel 直接双击打开中文不乱码
+    writer = csv.writer(buf, lineterminator='\n')
+    writer.writerow(['ID', '审计动作', '操作对象', '详情快照', 'IP', '记录时间(UTC)'])
+
+    for r in rows:
+        detail_str = (
+            json.dumps(r.detail_json, ensure_ascii=False)
+            if r.detail_json is not None
+            else ''
+        )
+        created_str = r.created_at.strftime('%Y-%m-%d %H:%M:%S') if r.created_at else ''
+        writer.writerow([
+            r.id,
+            _sanitize_csv_cell(r.action),
+            _sanitize_csv_cell(r.target or ''),
+            _sanitize_csv_cell(detail_str),
+            _sanitize_csv_cell(r.ip or ''),
+            _sanitize_csv_cell(created_str),
+        ])
+
+    record_audit(
+        db,
+        action='export_audit_logs',
+        tenant_id=tenant_id,
+        user_id=current_user.get('id'),
+        target='audit_logs.csv',
+        detail_json={'action_filter': clean_action, 'exported_count': len(rows)},
+    )
+
+    date_tag = datetime.now(timezone.utc).strftime('%Y%m%d')
+    csv_bytes = buf.getvalue().encode('utf-8')
+    return StreamingResponse(
+        io.BytesIO(csv_bytes),
+        media_type='text/csv; charset=utf-8',
+        headers={'Content-Disposition': f'attachment; filename="audit_logs_{date_tag}.csv"'},
     )

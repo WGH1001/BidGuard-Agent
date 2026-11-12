@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from backend.auth import AuthUser, get_current_user, record_audit
 import backend.database as db_mod
 from backend.database import PROJECT_ROOT, get_db
-from backend.models import BidCheckTask, QaSession, ensure_qa_sessions_columns
+from backend.models import BidCheckTask, BidFinding, QaSession, ensure_qa_sessions_columns
 from backend.schemas import (
     OkResponse,
     QaAskRequest,
@@ -59,9 +59,89 @@ def _att_dict_to_out(a: dict[str, Any]) -> QaAttachmentOut:
     )
 
 
-def _session_to_out(s: QaSession) -> QaSessionOut:
-    raw_atts = getattr(s, 'attachments_json', None) or []
-    atts_out = [_att_dict_to_out(a) for a in raw_atts if isinstance(a, dict)]
+_DEFAULT_SUGGESTED_QUESTIONS = (
+    '招标文件要求的免费质保期是多久？我方投标书在哪响应的？',
+    '评分细则表里关于业绩和证书的加分项有哪些？',
+    '本项目最高投标限价是多少？我方总报价是多少？',
+    '招标文件中带 ★ 号的强制性技术要求有哪些？',
+    '分“资格废标门槛”和“评分加分项”列出招标文件要求提供的全部企业证照、产品认证及人员证书并标明出处页码。',
+)
+
+
+def _build_suggested_questions(
+    db: Optional[Session],
+    task: Optional[BidCheckTask],
+    attachments: list[dict[str, Any]],
+) -> list[str]:
+    """E25 §2.3：0-Token 纯确定性动态生成 4~5 条上下文快捷追问。"""
+    questions: list[str] = []
+
+    if attachments:
+        att_names = '、'.join(str(a.get('filename') or '') for a in attachments[:2] if a.get('filename'))
+        has_img = any(bool(a.get('is_image')) for a in attachments)
+        if has_img:
+            questions.append(
+                f"请结合已上传的图片/附件（{att_names or '补充材料'}），核验其中的公章、证书编号或有效期是否满足招标要求？"
+            )
+        else:
+            questions.append(
+                f"请结合已上传的补充附件（{att_names or '补遗文件'}），交叉核验我方投标书是否存在未响应或前后不一致之处？"
+            )
+
+    if task is not None:
+        stats = task.stats_json or {}
+        cfg = task.config_json or {}
+        findings: list[BidFinding] = []
+        if db is not None:
+            try:
+                findings = db.query(BidFinding).filter_by(task_id=task.id).all()
+            except Exception:
+                findings = []
+
+        has_f2_issue = (
+            stats.get('price_status') == 'NEED_MANUAL'
+            or any(f.source_module == 'F2' for f in findings)
+        )
+        has_f4_star_issue = (
+            int(stats.get('f1_extracted_count') or stats.get('total_requirements') or 0) > 0
+            or any(f.source_module == 'F4' for f in findings)
+        )
+        has_f3_or_date_issue = (
+            not cfg.get('open_date')
+            or any(f.source_module == 'F3' for f in findings)
+        )
+
+        if has_f2_issue:
+            questions.append('本项目招标最高投标限价是多少？我方开标一览表总报价与分项报价合计是否完全一致？')
+        if has_f4_star_issue:
+            questions.append('招标文件中带 ★ 号的实质性要求有哪些？我方投标书逐条在哪些页码作出了响应？')
+        if has_f3_or_date_issue:
+            questions.append('招标文件规定的开标时间（投标截止时间）和社保证明覆盖月份要求是什么？我方证照是否全部在有效期内？')
+
+    # 内置投前备证兜底提问（为 E26 确定性证照清单与台账联动卡先行过渡）
+    cert_checklist_q = '分“资格废标门槛”和“评分加分项”列出招标文件要求提供的全部企业证照、产品认证及人员证书并标明出处页码。'
+    if cert_checklist_q not in questions:
+        questions.append(cert_checklist_q)
+
+    for dq in _DEFAULT_SUGGESTED_QUESTIONS:
+        if len(questions) >= 5:
+            break
+        if dq not in questions:
+            questions.append(dq)
+
+    return questions[:5]
+
+
+def _session_to_out(s: QaSession, db: Optional[Session] = None) -> QaSessionOut:
+    raw_atts = [a for a in (getattr(s, 'attachments_json', None) or []) if isinstance(a, dict)]
+    atts_out = [_att_dict_to_out(a) for a in raw_atts]
+    bound_task: Optional[BidCheckTask] = getattr(s, 'task', None)
+    if bound_task is None and s.task_id is not None and db is not None:
+        try:
+            bound_task = db.query(BidCheckTask).filter_by(id=s.task_id, tenant_id=s.tenant_id).first()
+        except Exception:
+            bound_task = None
+    suggested = _build_suggested_questions(db, bound_task, raw_atts)
     return QaSessionOut(
         id=s.id,
         tenant_id=s.tenant_id,
@@ -72,6 +152,7 @@ def _session_to_out(s: QaSession) -> QaSessionOut:
         bid_path=s.bid_path,
         messages_json=list(s.messages_json or []),
         attachments=atts_out,
+        suggested_questions=suggested,
         created_at=s.created_at.isoformat() if s.created_at else None,
         updated_at=s.updated_at.isoformat() if s.updated_at else None,
     )
@@ -204,7 +285,7 @@ def create_qa_session(
     db.add(qa_sess)
     db.commit()
     db.refresh(qa_sess)
-    return _session_to_out(qa_sess)
+    return _session_to_out(qa_sess, db)
 
 
 @router.get('/sessions', response_model=list[QaSessionOut])
@@ -221,7 +302,7 @@ def list_qa_sessions(
     if task_id is not None:
         q = q.filter_by(task_id=task_id)
     rows = q.order_by(QaSession.id.desc()).all()
-    return [_session_to_out(r) for r in rows]
+    return [_session_to_out(r, db) for r in rows]
 
 
 @router.get('/sessions/{session_id}', response_model=QaSessionOut)
@@ -234,7 +315,7 @@ def get_qa_session(
     """获取单条问答会话完整历史消息与已上传附件清单。"""
     tenant_id = int(current_user.tenant_id)
     row = _get_tenant_session_or_404(db, session_id, tenant_id)
-    return _session_to_out(row)
+    return _session_to_out(row, db)
 
 
 @router.post('/sessions/{session_id}/attachments', response_model=QaAttachmentOut)

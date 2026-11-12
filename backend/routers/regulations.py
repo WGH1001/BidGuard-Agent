@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -337,3 +338,56 @@ def delete_regulation_law(
         ok=True,
         message=f"已删除《{law_name}》及全部 {int(deleted_articles or article_count)} 条条文",
     )
+
+@router.delete('/articles/{article_id}', response_model=OkResponse)
+def delete_regulation_article(
+    article_id: int,
+    current_user: AuthUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> OkResponse:
+    """E25 §2.4：管理员删除单条法规条文，并按剩余条文重算所属 RegulationLaw 的 article_count 与 content_hash。"""
+    article = db.query(RegulationArticle).filter_by(id=article_id).first()
+    if article is None:
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'ARTICLE_NOT_FOUND', 'message': f"未找到 ID={article_id} 的法规条文"},
+        )
+
+    law_id = article.law_id
+    art_no = article.article_no
+    law = db.query(RegulationLaw).filter_by(id=law_id).first()
+    law_name = law.name if law else f"law:{law_id}"
+
+    db.delete(article)
+    db.flush()
+
+    if law is not None:
+        remaining = (
+            db.query(RegulationArticle)
+            .filter_by(law_id=law.id)
+            .order_by(RegulationArticle.id.asc())
+            .all()
+        )
+        law.article_count = len(remaining)
+        if remaining:
+            combined = '\n'.join(f"{a.article_no}:{a.content_hash}" for a in remaining)
+            law.content_hash = hashlib.sha256(combined.encode('utf-8')).hexdigest()
+        else:
+            law.content_hash = hashlib.sha256(b'').hexdigest()
+
+    db.commit()
+
+    record_audit(
+        db,
+        action='delete_regulation_article',
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.get('id'),
+        target=f"{law_name}{art_no}",
+        detail_json={
+            'law_id': law_id,
+            'law_name': law_name,
+            'article_id': article_id,
+            'article_no': art_no,
+        },
+    )
+    return OkResponse(ok=True, message=f"已删除《{law_name}》{art_no}")

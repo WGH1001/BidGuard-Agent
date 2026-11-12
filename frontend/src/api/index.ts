@@ -10,6 +10,7 @@ import type {
   BidTaskListOut,
   BidTaskOut,
   CertificateOut,
+  CertificateParseOut,
   CertificateUpsertRequest,
   ChangePasswordRequest,
   DashboardStatsOut,
@@ -231,6 +232,9 @@ export const radarApi = {
   detail(taskId: number): Promise<RadarScanOut> {
     return get<RadarScanOut>(`/radar/${taskId}`)
   },
+  rescan(taskId: number): Promise<RadarScanOut> {
+    return post<RadarScanOut>(`/radar/${taskId}/rescan`)
+  },
   remove(taskId: number): Promise<OkResponse> {
     return del<OkResponse>(`/radar/${taskId}`)
   },
@@ -371,6 +375,26 @@ export const rulesApi = {
   deleteCertificate(certId: number): Promise<OkResponse> {
     return del<OkResponse>(`/rules/certificates/${certId}`)
   },
+  parseCertificateFile(file: File): Promise<CertificateParseOut> {
+    const fd = new FormData()
+    fd.append('file', file, file.name)
+    return post<CertificateParseOut>('/rules/certificates/parse-file', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
+  uploadCertificateAttachment(certId: number, file: File): Promise<CertificateOut> {
+    const fd = new FormData()
+    fd.append('file', file, file.name)
+    return post<CertificateOut>(`/rules/certificates/${certId}/attachment`, fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
+  downloadCertificateAttachment(certId: number, fallbackName = `certificate_${certId}`): Promise<string> {
+    return downloadFromApi(`/rules/certificates/${certId}/attachment`, fallbackName)
+  },
+  deleteCertificateAttachment(certId: number): Promise<CertificateOut> {
+    return del<CertificateOut>(`/rules/certificates/${certId}/attachment`)
+  },
 }
 
 export const reportsApi = {
@@ -399,6 +423,11 @@ export const reportsApi = {
   }): Promise<AuditLogListOut> {
     return get<AuditLogListOut>('/reports/audit-logs', { params })
   },
+  exportAuditLogsCsv(action?: string): Promise<string> {
+    const clean = action?.trim()
+    const qs = clean ? `?action=${encodeURIComponent(clean)}` : ''
+    return downloadFromApi(`/reports/audit-logs/export${qs}`, 'audit_logs.csv')
+  },
 }
 
 export const auditApi = {
@@ -408,6 +437,9 @@ export const auditApi = {
     page_size?: number
   }): Promise<AuditLogListOut> {
     return reportsApi.listAuditLogs(params)
+  },
+  exportLogsCsv(action?: string): Promise<string> {
+    return reportsApi.exportAuditLogsCsv(action)
   },
 }
 
@@ -454,5 +486,8 @@ export const regulationsApi = {
   },
   deleteLaw(lawId: number): Promise<RegulationLawOut | OkResponse> {
     return del<OkResponse>(`/regulations/laws/${lawId}`)
+  },
+  deleteArticle(articleId: number): Promise<OkResponse> {
+    return del<OkResponse>(`/regulations/articles/${articleId}`)
   },
 }

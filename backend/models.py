@@ -197,6 +197,7 @@ class BidRuleConfig(Base):
 
 
 # ── 6. company_certificates（企业投标证照效期台账表）──────────────────────
+# ── 6. company_certificates（企业投标证照效期台账表）──────────────────────
 class CompanyCertificate(Base):
     __tablename__ = 'company_certificates'
 
@@ -207,6 +208,10 @@ class CompanyCertificate(Base):
     valid_until = Column(Date, nullable=False)
     warn_days = Column(Integer, nullable=False, default=30)
     remark = Column(Text, nullable=True)
+    # E25 §2.6：企业证照可选上传原件留档字段
+    attachment_name = Column(String(256), nullable=True)
+    attachment_path = Column(String(512), nullable=True)
+    attachment_size = Column(Integer, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_utc_now)
     updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
 
@@ -433,12 +438,29 @@ def ensure_user_model_configs_columns(bind_or_conn: Any) -> list[str]:
     )
 
 
+_E25_CERT_NEW_COLS = (
+    ('attachment_name', 'VARCHAR(256)', 'VARCHAR(256)'),
+    ('attachment_path', 'VARCHAR(512)', 'VARCHAR(512)'),
+    ('attachment_size', 'INTEGER', 'INTEGER'),
+)
+
+
+def ensure_company_certificates_columns(bind_or_conn: Any) -> list[str]:
+    """E25 §2.6：探测老库 company_certificates 表，若缺少 attachment_name / attachment_path / attachment_size 则自动补齐。"""
+    return _ensure_table_columns_generic(
+        bind_or_conn,
+        'company_certificates',
+        _E25_CERT_NEW_COLS,
+    )
+
+
 @event.listens_for(Base.metadata, 'after_create')
 def _auto_migrate_bid_check_tasks_after_create(target, connection, **kwargs):
-    """在 Base.metadata.create_all（含 init_db 启动时）完成后自动探测老库并补齐 E11 / E24 新列。"""
+    """在 Base.metadata.create_all（含 init_db 启动时）完成后自动探测老库并补齐 E11 / E24 / E25 新列。"""
     ensure_bid_check_tasks_columns(connection)
     ensure_qa_sessions_columns(connection)
     ensure_user_model_configs_columns(connection)
+    ensure_company_certificates_columns(connection)
 
 
 def apply_sqlite_pragmas(engine: Any) -> None:
@@ -470,7 +492,13 @@ def apply_sqlite_pragmas(engine: Any) -> None:
             mc_cols = {row[1] for row in cursor.fetchall()}
             if mc_cols and 'supports_vision' not in mc_cols:
                 cursor.execute("ALTER TABLE user_model_configs ADD COLUMN supports_vision BOOLEAN NOT NULL DEFAULT 0")
+            # E25：同步探测补齐 company_certificates 的 3 个附件列
+            cursor.execute("PRAGMA table_info(company_certificates)")
+            cc_cols = {row[1] for row in cursor.fetchall()}
+            if cc_cols:
+                for col_name, _pg_t, sq_t in _E25_CERT_NEW_COLS:
+                    if col_name not in cc_cols:
+                        cursor.execute(f"ALTER TABLE company_certificates ADD COLUMN {col_name} {sq_t}")
         except Exception:
             pass
         cursor.close()
-

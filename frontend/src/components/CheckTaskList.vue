@@ -274,6 +274,12 @@ defineExpose({
         <div class="ri-files">
           <div>招：{{ item.tender_filename || '—' }}</div>
           <div>投：{{ item.bid_filename || '—' }}</div>
+          <div class="ri-open-date mono-num">
+            开标：
+            <span :class="item.config_json?.open_date ? 'od-ok' : 'od-miss'">
+              {{ item.config_json?.open_date || '未识别' }}
+            </span>
+          </div>
         </div>
 
         <div class="ri-prog-row">
@@ -509,6 +515,15 @@ defineExpose({
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ri-open-date .od-ok {
+  color: var(--txt-strong);
+  font-weight: 700;
+}
+
+.ri-open-date .od-miss {
+  color: var(--txt-muted);
 }
 
 .ri-prog-row {

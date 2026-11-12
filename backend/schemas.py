@@ -189,6 +189,44 @@ class RunTaskTriggerOut(BaseModel):
 
 
 # ── 4. /api/extract 契约 ─────────────────────────────────────────────────
+class MatchedLedgerCertOut(BaseModel):
+    id: int
+    cert_name: str
+    cert_no: Optional[str] = None
+    valid_until: str
+    days_remaining: int
+    status: Literal['valid', 'expiring_soon', 'expired']
+    has_attachment: bool = False
+    attachment_name: Optional[str] = None
+
+
+class RequiredCertItemOut(BaseModel):
+    cert_name: str
+    category: str
+    requirement_level: Literal['mandatory', 'bonus'] = 'mandatory'
+    source_section: str
+    quote: str
+    quote_verified: bool = True
+    offset: Optional[int] = None
+    page: Optional[int] = None
+    score_hint: Optional[str] = None
+    ledger_status: Literal['valid', 'expiring_soon', 'expired', 'not_in_ledger'] = 'not_in_ledger'
+    matched_cert: Optional[MatchedLedgerCertOut] = None
+    matched_count: int = 0
+
+
+class CertLedgerSummaryOut(BaseModel):
+    total: int = 0
+    mandatory_count: int = 0
+    bonus_count: int = 0
+    valid_count: int = 0
+    expiring_soon_count: int = 0
+    expired_count: int = 0
+    not_in_ledger_count: int = 0
+    reference_date: str
+    reference_date_source: Literal['open_date', 'today'] = 'today'
+
+
 class ExtractChecklistOut(BaseModel):
     filename: str
     source_type: str
@@ -207,6 +245,8 @@ class ExtractChecklistOut(BaseModel):
     scoring_tables: list[dict[str, Any]] = Field(default_factory=list)
     scoring_prose: list[dict[str, Any]] = Field(default_factory=list)
     llm_structured: list[dict[str, Any]] = Field(default_factory=list)
+    required_certificates: list[RequiredCertItemOut] = Field(default_factory=list)
+    cert_ledger_summary: Optional[CertLedgerSummaryOut] = None
 
 
 # ── 5. /api/deviation 契约 ───────────────────────────────────────────────
@@ -307,6 +347,7 @@ class QaSessionOut(BaseModel):
     bid_path: Optional[str] = None
     messages_json: list[dict[str, Any]] = Field(default_factory=list)
     attachments: list[QaAttachmentOut] = Field(default_factory=list)
+    suggested_questions: list[str] = Field(default_factory=list)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -361,9 +402,19 @@ class CertificateOut(BaseModel):
     is_expired: bool = False
     is_expiring_soon: bool = False
     remark: Optional[str] = None
+    attachment_name: Optional[str] = None
+    attachment_size: Optional[int] = None
+    has_attachment: bool = False
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
+
+class CertificateParseOut(BaseModel):
+    cert_name_hint: Optional[str] = None
+    cert_no_hint: Optional[str] = None
+    valid_until_hint: Optional[str] = None
+    ocr_chars: int = 0
+    text_excerpt: str = ''
 
 # ── 9. /api/reports 契约 ─────────────────────────────────────────────────
 class AuditLogItemOut(BaseModel):

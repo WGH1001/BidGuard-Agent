@@ -157,6 +157,12 @@ body,
   border: 1px solid var(--sev-ok-border);
 }
 
+.sev-pill.neutral {
+  background: #f1f5f9;
+  color: #64748b;
+  border: 1px solid #cbd5e1;
+}
+
 .mono-num {
   font-family: "JetBrains Mono", Consolas, "Courier New", monospace;
   font-variant-numeric: tabular-nums;

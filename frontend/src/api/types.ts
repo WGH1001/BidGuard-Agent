@@ -119,7 +119,11 @@ export interface BidTaskOut {
   error_msg?: string | null
   stats_json?: BidTaskStats | null
   price_manual_json?: Record<string, unknown> | null
-  config_json?: Record<string, unknown> | null
+  config_json?: {
+    open_date?: string | null
+    open_date_source?: string | null
+    [key: string]: unknown
+  } | null
   llm_usage_json?: Record<string, unknown> | null
   delivered_at?: string | null
   created_at?: string | null
@@ -276,6 +280,44 @@ export interface ScoringProseItem {
   quote_verified?: boolean
 }
 
+export interface MatchedLedgerCertOut {
+  id: number
+  cert_name: string
+  cert_no?: string | null
+  valid_until: string
+  days_remaining: number
+  status: 'valid' | 'expiring_soon' | 'expired' | string
+  has_attachment: boolean
+  attachment_name?: string | null
+}
+
+export interface RequiredCertItemOut {
+  cert_name: string
+  category: 'enterprise_qualification' | 'product_cert' | 'staff_cert' | 'bid_bond_or_ca' | string
+  requirement_level: 'mandatory' | 'bonus' | string
+  source_section: string
+  quote: string
+  quote_verified: boolean
+  offset?: number | null
+  page?: number | null
+  score_hint?: string | null
+  ledger_status: 'valid' | 'expiring_soon' | 'expired' | 'not_in_ledger' | string
+  matched_cert?: MatchedLedgerCertOut | null
+  matched_count: number
+}
+
+export interface CertLedgerSummaryOut {
+  total: number
+  mandatory_count: number
+  bonus_count: number
+  valid_count: number
+  expiring_soon_count: number
+  expired_count: number
+  not_in_ledger_count: number
+  reference_date: string
+  reference_date_source: 'open_date' | 'today' | string
+}
+
 export interface ExtractChecklistOut {
   filename: string
   source_type: string
@@ -294,6 +336,8 @@ export interface ExtractChecklistOut {
   scoring_tables: ScoringTableItem[]
   scoring_prose: ScoringProseItem[]
   llm_structured: MarkedClauseItem[]
+  required_certificates?: RequiredCertItemOut[]
+  cert_ledger_summary?: CertLedgerSummaryOut | null
 }
 
 // ── 5. F5 偏离表导出 (/api/deviation) ────────────────────────────────────
@@ -416,6 +460,7 @@ export interface QaSessionOut {
   bid_path?: string | null
   messages_json: QaMessageItem[]
   attachments?: QaAttachmentOut[]
+  suggested_questions?: string[]
   created_at?: string | null
   updated_at?: string | null
 }
@@ -497,8 +542,19 @@ export interface CertificateOut {
   is_expired: boolean
   is_expiring_soon: boolean
   remark?: string | null
+  attachment_name?: string | null
+  attachment_size?: number | null
+  has_attachment?: boolean
   created_at?: string | null
   updated_at?: string | null
+}
+
+export interface CertificateParseOut {
+  cert_name_hint?: string | null
+  cert_no_hint?: string | null
+  valid_until_hint?: string | null
+  ocr_chars: number
+  text_excerpt: string
 }
 
 // ── 9. 交付中心与审计日志 (/api/reports) ─────────────────────────────────

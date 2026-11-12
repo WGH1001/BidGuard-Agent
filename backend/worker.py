@@ -357,6 +357,14 @@ class SSEBroadcaster:
         with self._lock:
             return self._latest.get(int(task_id))
 
+def _cleanup_task_deviation_artifacts(task_id: int) -> None:
+    """E25 §2.1.3：清理指定任务旧的偏离表 docx 与统计快照 sidecar，防止任务重跑后 F5 仍返回过时快照。"""
+    dev_dir = (PROJECT_ROOT / 'output' / 'deviation').resolve()
+    for fname in (f"{int(task_id)}_偏离表.docx", f"{int(task_id)}_stats.json"):
+        try:
+            (dev_dir / fname).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 class BidTaskWorker:
     """后台线程池核验流水线执行器。"""
@@ -370,8 +378,9 @@ class BidTaskWorker:
         self._shutdown = False
 
     def _reset_task_for_rerun(self, task_id: int) -> None:
-        """E3R 实锤 B + E11：启动/重跑任务前，同步清除 SSE 上一轮终态帧、清空旧耗时字段并将 DB 状态置为 extracting(progress=0)。"""
+        """E3R 实锤 B + E11 + E25：启动/重跑任务前，同步清除 SSE 上一轮终态帧、清理旧偏离表缓存、清空旧耗时字段并将 DB 状态置为 extracting(progress=0)。"""
         self.broadcaster.clear(task_id)
+        _cleanup_task_deviation_artifacts(task_id)
         session: Session = self.session_factory()
         try:
             ensure_bid_check_tasks_columns(session.get_bind())

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { regulationsApi, rulesApi } from '@/api'
@@ -17,6 +18,7 @@ import { useAuthStore } from '@/stores/auth'
 defineOptions({ name: 'RulesAndCertsView' })
 
 const authStore = useAuthStore()
+const route = useRoute()
 
 const activeTab = ref<'rules' | 'certs' | 'regulations'>('rules')
 const loadingRules = ref(false)
@@ -107,6 +109,10 @@ const certs = ref<CertificateOut[]>([])
 const certDialogVisible = ref(false)
 const savingCert = ref(false)
 const editingCertId = ref<number | null>(null)
+const pendingCertFile = ref<File | null>(null)
+const parsingCertFile = ref(false)
+const certParseHintSummary = ref('')
+const editingExistingAttachmentName = ref<string | null>(null)
 
 const certForm = reactive({
   cert_name: '',
@@ -132,6 +138,10 @@ function openCreateCert(): void {
   certForm.valid_until = '2027-06-30'
   certForm.warn_days = 30
   certForm.remark = ''
+  pendingCertFile.value = null
+  parsingCertFile.value = false
+  certParseHintSummary.value = ''
+  editingExistingAttachmentName.value = null
   certDialogVisible.value = true
 }
 
@@ -142,7 +152,59 @@ function openEditCert(row: Partial<CertificateOut>): void {
   certForm.valid_until = row.valid_until ?? ''
   certForm.warn_days = row.warn_days ?? 30
   certForm.remark = row.remark || ''
+  pendingCertFile.value = null
+  parsingCertFile.value = false
+  certParseHintSummary.value = ''
+  editingExistingAttachmentName.value = row.has_attachment ? (row.attachment_name || '已上传原件') : null
   certDialogVisible.value = true
+}
+
+async function onCertFileChange(ev: Event): Promise<void> {
+  const input = ev.target as HTMLInputElement
+  const f = input.files?.[0]
+  input.value = ''
+  if (!f) return
+
+  const ext = f.name.includes('.') ? f.name.slice(f.name.lastIndexOf('.')).toLowerCase() : ''
+  if (!['.pdf', '.png', '.jpg', '.jpeg'].includes(ext)) {
+    ElMessage.warning('仅支持上传 .pdf / .png / .jpg / .jpeg 格式证照扫件')
+    return
+  }
+  if (f.size <= 0) {
+    ElMessage.warning('所选证照文件为空')
+    return
+  }
+  if (f.size > 20 * 1024 * 1024) {
+    ElMessage.warning('证照扫件单文件不能超过 20MB')
+    return
+  }
+
+  pendingCertFile.value = f
+  parsingCertFile.value = true
+  certParseHintSummary.value = '正在识别证照文字并预填字段…'
+  try {
+    const parsed = await rulesApi.parseCertificateFile(f)
+    const isCreate = editingCertId.value === null
+    if (parsed.cert_name_hint && (isCreate || !certForm.cert_name.trim())) {
+      certForm.cert_name = parsed.cert_name_hint
+    }
+    if (parsed.cert_no_hint && (isCreate || !certForm.cert_no.trim())) {
+      certForm.cert_no = parsed.cert_no_hint
+    }
+    if (parsed.valid_until_hint && (isCreate || !certForm.valid_until.trim())) {
+      certForm.valid_until = parsed.valid_until_hint
+    }
+    const parts: string[] = [`已识别 ${parsed.ocr_chars} 字`]
+    if (parsed.cert_name_hint) parts.push(`名称：${parsed.cert_name_hint}`)
+    if (parsed.cert_no_hint) parts.push(`编号：${parsed.cert_no_hint}`)
+    if (parsed.valid_until_hint) parts.push(`截止日：${parsed.valid_until_hint}`)
+    certParseHintSummary.value = parts.join(' ｜ ')
+    ElMessage.success('证照文字预识别完成，请核对上方预填字段后保存')
+  } catch {
+    certParseHintSummary.value = '未能自动提取字段（保存时仍将留档原件，可手动填写字段）'
+  } finally {
+    parsingCertFile.value = false
+  }
 }
 
 async function handleSaveCert(): Promise<void> {
@@ -159,18 +221,59 @@ async function handleSaveCert(): Promise<void> {
       warn_days: Number(certForm.warn_days) || 30,
       remark: certForm.remark.trim() || null,
     }
+    let savedCert: CertificateOut
     if (editingCertId.value === null) {
-      await rulesApi.createCertificate(payload)
-      ElMessage.success('已新增企业投标证照记录')
+      savedCert = await rulesApi.createCertificate(payload)
     } else {
-      await rulesApi.updateCertificate(editingCertId.value, payload)
-      ElMessage.success('证照记录已更新')
+      savedCert = await rulesApi.updateCertificate(editingCertId.value, payload)
     }
+    if (pendingCertFile.value) {
+      await rulesApi.uploadCertificateAttachment(savedCert.id, pendingCertFile.value)
+    }
+    ElMessage.success(
+      editingCertId.value === null
+        ? pendingCertFile.value
+          ? '已新增企业投标证照并留档原件'
+          : '已新增企业投标证照记录'
+        : pendingCertFile.value
+          ? '证照记录与原件附件已更新'
+          : '证照记录已更新',
+    )
     certDialogVisible.value = false
+    pendingCertFile.value = null
     await fetchCerts()
   } finally {
     savingCert.value = false
   }
+}
+
+async function handleDownloadCertAttachment(row: Partial<CertificateOut>): Promise<void> {
+  if (!row.id || !row.has_attachment) return
+  const fn = await rulesApi.downloadCertificateAttachment(
+    row.id,
+    row.attachment_name || `certificate_${row.id}`,
+  )
+  ElMessage.success(`已下载证照原件：${fn}`)
+}
+
+async function handleDeleteCertAttachment(row: Partial<CertificateOut>): Promise<void> {
+  if (!row.id || !row.has_attachment) return
+  try {
+    await ElMessageBox.confirm(
+      `确认解绑并删除证照「${row.cert_name}」的已上传原件（${row.attachment_name || '原件'}）吗？`,
+      '确认删除证照原件',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除原件',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+  await rulesApi.deleteCertificateAttachment(row.id)
+  ElMessage.success('证照原件附件已清理')
+  await fetchCerts()
 }
 
 async function handleDeleteCert(row: Partial<CertificateOut>): Promise<void> {
@@ -276,6 +379,26 @@ async function handleDeleteLaw(law: RegulationLawOut): Promise<void> {
   }
 }
 
+async function handleDeleteArticle(art: RegulationArticleOut): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `确认从《${selectedLaw.value?.name ?? '当前法规'}》删除条文「${art.article_no}」吗？删除后将自动重算该法规哈希与条文数。`,
+      '确认删除单条法条',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+
+  await regulationsApi.deleteArticle(art.id)
+  ElMessage.success(`已删除条文 ${art.article_no}`)
+  await fetchLaws(false)
+}
+
 async function fetchLawArticles(): Promise<void> {
   if (selectedLawId.value === null) return
   loadingArticles.value = true
@@ -360,6 +483,10 @@ async function handleImportLawFile(ev: Event): Promise<void> {
 }
 
 onMounted(() => {
+  const qTab = typeof route.query.tab === 'string' ? route.query.tab : ''
+  if (qTab === 'rules' || qTab === 'certs' || qTab === 'regulations') {
+    activeTab.value = qTab
+  }
   void fetchRuleConfig()
   void fetchCerts()
   void fetchLaws(true)
@@ -549,6 +676,20 @@ onMounted(() => {
               </el-table-column>
 
               <el-table-column prop="remark" label="适用投标场景备注" min-width="180" />
+
+              <el-table-column label="原件留档" min-width="170">
+                <template #default="{ row }">
+                  <div v-if="row.has_attachment" class="cert-att-cell">
+                    <el-button link type="primary" @click="handleDownloadCertAttachment(row)">
+                      下载原件 ({{ row.attachment_name || '已留档' }})
+                    </el-button>
+                    <el-button link type="danger" @click="handleDeleteCertAttachment(row)">
+                      解绑
+                    </el-button>
+                  </div>
+                  <span v-else class="muted-txt">未上传</span>
+                </template>
+              </el-table-column>
 
               <el-table-column label="操作" width="140" fixed="right">
                 <template #default="{ row }">
@@ -763,6 +904,16 @@ onMounted(() => {
                       >
                         送入核验台测试 ↑
                       </el-button>
+                      <el-button
+                        v-if="authStore.isAdmin"
+                        size="small"
+                        link
+                        type="danger"
+                        title="管理员删除该条法规条文"
+                        @click="handleDeleteArticle(art)"
+                      >
+                        删除
+                      </el-button>
                     </div>
                     <div class="art-content">{{ art.content }}</div>
                   </div>
@@ -822,6 +973,35 @@ onMounted(() => {
 
         <el-form-item label="备注说明">
           <el-input v-model="certForm.remark" placeholder="例如：政企安全项目资格审查必附项" />
+        </el-form-item>
+
+        <el-form-item label="上传证照原件扫件（可选 · PDF / PNG / JPG ≤20MB，支持 OCR 自动预填）">
+          <div class="cert-upload-box">
+            <label class="cert-upload-btn">
+              <span>
+                {{
+                  parsingCertFile
+                    ? 'OCR 识别预填中…'
+                    : pendingCertFile
+                      ? `已选：${pendingCertFile.name}`
+                      : '+ 选择 PDF / 图片扫件自动预填并留档'
+                }}
+              </span>
+              <input
+                type="file"
+                accept=".pdf,.png,.jpg,.jpeg"
+                style="display: none"
+                :disabled="parsingCertFile || savingCert"
+                @change="onCertFileChange"
+              />
+            </label>
+            <div v-if="editingExistingAttachmentName && !pendingCertFile" class="cert-upload-hint">
+              当前已绑定原件：<b>{{ editingExistingAttachmentName }}</b>（重新选择文件可覆盖更新）
+            </div>
+            <div v-if="certParseHintSummary" class="cert-upload-hint ok">
+              {{ certParseHintSummary }}
+            </div>
+          </div>
         </el-form-item>
       </el-form>
 
@@ -1220,5 +1400,48 @@ onMounted(() => {
   margin-top: 12px;
   display: flex;
   justify-content: flex-end;
+}
+
+.cert-upload-box {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cert-upload-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 14px;
+  border-radius: 6px;
+  border: 1px dashed var(--brand);
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.cert-upload-hint {
+  font-size: 12px;
+  color: var(--txt-sec);
+}
+
+.cert-upload-hint.ok {
+  color: var(--sev-ok);
+  font-weight: 600;
+}
+
+.cert-att-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.muted-txt {
+  font-size: 12px;
+  color: var(--txt-muted);
 }
 </style>

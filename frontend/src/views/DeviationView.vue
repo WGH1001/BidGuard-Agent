@@ -14,11 +14,29 @@ type DeviationFilterKind = 'ALL' | 'no_deviation' | 'negative' | 'missing' | 'co
 const loadingTasks = ref(false)
 const generating = ref(false)
 const downloading = ref(false)
+const runningConflictMsg = ref('')
+let loadSeq = 0
 
 const tasks = ref<BidTaskOut[]>([])
 const selectedTaskId = ref<number | null>(null)
 const devResult = ref<DeviationExportOut | null>(null)
 const statusFilter = ref<DeviationFilterKind>('ALL')
+
+function isTaskInFlight(task?: BidTaskOut | null): boolean {
+  return Boolean(task && ['extracting', 'checking', 'grading'].includes(task.status))
+}
+
+function extractErrCodeAndMsg(err: unknown): { code?: string; message?: string } {
+  const detail = (err as { response?: { data?: { detail?: { code?: string; message?: string } | string } } })
+    ?.response?.data?.detail
+  if (detail && typeof detail === 'object') {
+    return { code: detail.code, message: detail.message }
+  }
+  if (typeof detail === 'string') {
+    return { message: detail }
+  }
+  return {}
+}
 
 /**
  * E20 子项 1：按选定种类过滤预览行（仅前端视图过滤，不影响 Word 导出全量行与 F4 后端契约）
@@ -58,40 +76,71 @@ async function loadAvailableTasks(): Promise<void> {
     } else if (tasks.value.length > 0) {
       selectedTaskId.value = tasks.value[0].id
     }
-
-    if (selectedTaskId.value) {
-      await handleLoadDeviation()
-    }
   } finally {
+    // E25 §2.1：列表拉取完毕立即释放 loadingTasks，绝不包裹 handleLoadDeviation 导致下拉框锁死
     loadingTasks.value = false
+  }
+
+  if (selectedTaskId.value) {
+    await handleLoadDeviation()
   }
 }
 
 /** 进页面/切换任务：调 GET，产物已存在时后端秒回复用 */
 async function handleLoadDeviation(): Promise<void> {
-  if (!selectedTaskId.value) return
+  const tid = selectedTaskId.value
+  if (!tid) return
+  const seq = ++loadSeq
+  runningConflictMsg.value = ''
   generating.value = true
   try {
-    devResult.value = await deviationApi.get(selectedTaskId.value)
+    const res = await deviationApi.get(tid)
+    if (seq !== loadSeq || selectedTaskId.value !== tid) return
+    devResult.value = res
     statusFilter.value = 'ALL'
+  } catch (err: unknown) {
+    if (seq !== loadSeq || selectedTaskId.value !== tid) return
+    const { code, message } = extractErrCodeAndMsg(err)
+    const status = (err as { response?: { status?: number } })?.response?.status
+    if (status === 409 || code === 'CHECK_TASK_RUNNING') {
+      devResult.value = null
+      runningConflictMsg.value = message || '该体检任务正在核验中，请等待完成后再查看或生成偏离表'
+    }
   } finally {
-    generating.value = false
+    if (seq === loadSeq) {
+      generating.value = false
+    }
   }
 }
 
 /** 仅"重新生成"按钮：强制全量重算 */
 async function handleGenerateDeviation(): Promise<void> {
-  if (!selectedTaskId.value) {
+  const tid = selectedTaskId.value
+  if (!tid) {
     ElMessage.warning('请先选择一个防废标体检任务')
     return
   }
+  const seq = ++loadSeq
+  runningConflictMsg.value = ''
   generating.value = true
   try {
-    devResult.value = await deviationApi.generate(selectedTaskId.value)
+    const res = await deviationApi.generate(tid)
+    if (seq !== loadSeq || selectedTaskId.value !== tid) return
+    devResult.value = res
     statusFilter.value = 'ALL'
-    ElMessage.success(`偏离表生成完成：共对齐 ${devResult.value.total_rows} 条实质性条款`)
+    ElMessage.success(`偏离表生成完成：共对齐 ${res.total_rows} 条实质性条款`)
+  } catch (err: unknown) {
+    if (seq !== loadSeq || selectedTaskId.value !== tid) return
+    const { code, message } = extractErrCodeAndMsg(err)
+    const status = (err as { response?: { status?: number } })?.response?.status
+    if (status === 409 || code === 'CHECK_TASK_RUNNING') {
+      devResult.value = null
+      runningConflictMsg.value = message || '该体检任务正在核验中，请等待完成后再查看或生成偏离表'
+    }
   } finally {
-    generating.value = false
+    if (seq === loadSeq) {
+      generating.value = false
+    }
   }
 }
 
@@ -135,14 +184,14 @@ onMounted(() => {
           v-model="selectedTaskId"
           :loading="loadingTasks"
           placeholder="选择已上传双书的体检任务"
-          style="width: 320px"
+          style="width: 340px"
           @change="handleLoadDeviation"
         >
           <el-option
             v-for="t in tasks"
             :key="t.id"
             :value="t.id"
-            :label="`#${t.id} ${t.title}`"
+            :label="`#${t.id} ${t.title}${isTaskInFlight(t) ? ' [核验中]' : ''}`"
           />
         </el-select>
 
@@ -288,9 +337,11 @@ onMounted(() => {
       <div v-else class="bg-panel dev-empty">
         <el-empty
           :description="
-            generating
-              ? '正在消费 F4 核验结果生成标准偏离表，请稍候…'
-              : '请选择一个防废标体检任务以生成并预览《技术与商务偏离表》'
+            runningConflictMsg
+              ? `${runningConflictMsg}（您可随时切换上方下拉框查看其他已完成任务）`
+              : generating
+                ? '正在消费 F4 核验结果生成标准偏离表，请稍候…'
+                : '请选择一个防废标体检任务以生成并预览《技术与商务偏离表》'
           "
         />
       </div>

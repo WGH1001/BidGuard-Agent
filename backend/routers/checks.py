@@ -29,7 +29,7 @@ from backend.schemas import (
     PriceManualBackfillRequest,
     RunTaskTriggerOut,
 )
-from backend.worker import get_worker
+from backend.worker import _cleanup_task_deviation_artifacts, get_worker
 from core.price_sandbox import PriceSandbox
 
 router = APIRouter(prefix='/api/checks', tags=['checks'])
@@ -315,10 +315,11 @@ def trigger_check_pipeline(
     current_user: AuthUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> RunTaskTriggerOut:
-    """触发后台核验流水线（支持后台异步入队与 sync=True 同步完成）。"""
+    """触发后台核验流水线（支持后台异步入队与 sync=True 同步完成；E25 重跑前主动清理旧偏离表快照）。"""
     tenant_id = int(current_user.tenant_id)
     task = _get_tenant_task_or_404(db, task_id, tenant_id)
 
+    _cleanup_task_deviation_artifacts(task.id)
     worker = get_worker()
     worker.submit_check_task(task.id, sync=sync)
     db.expire_all()

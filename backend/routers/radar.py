@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""B2 / E23 · 第 6 组路由：/api/radar（上传招标文件 -> F6 scan_rigging_radar 控标雷达扫描并落库）。"""
+"""B2 / E23 / E25 · 第 6 组路由：/api/radar（上传招标文件 -> F6 scan_rigging_radar 控标雷达扫描落库与单条重扫 rescan）。"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -36,6 +36,140 @@ router = APIRouter(prefix='/api/radar', tags=['radar'])
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _execute_radar_scan(
+    db: Session,
+    task: BidCheckTask,
+    tender_abs: Path,
+    tenant_id: int,
+    user_id: Optional[int],
+    audit_action: str,
+) -> RadarScanOut:
+    """E25 §2.2.1：执行或重新执行 F6 控标雷达扫描并更新 task / findings / 审计日志。"""
+    client, _ = resolve_effective_llm_client(db, user_id)
+
+    detected_open_date: Optional[str] = None
+    open_date_source: Optional[str] = None
+    open_date_quote: Optional[str] = None
+    try:
+        tender_doc = parse_document(str(tender_abs))
+        tender_text = tender_doc.text or ''
+        date_ev = extract_open_date_with_evidence(tender_text)
+        if date_ev:
+            detected_open_date = str(date_ev['open_date'])
+            open_date_source = 'tender_extracted'
+            open_date_quote = str(date_ev.get('quote') or '')[:240] or None
+        elif client is not None and tender_text:
+            llm_ev = extract_open_date_fallback_with_llm(tender_text, client)
+            if llm_ev:
+                detected_open_date = str(llm_ev['open_date'])
+                open_date_source = 'tender_llm'
+                open_date_quote = str(llm_ev.get('quote') or '')[:240] or None
+    except Exception:
+        detected_open_date = None
+        open_date_source = None
+        open_date_quote = None
+
+    cfg_out = dict(task.config_json or {})
+    if detected_open_date:
+        cfg_out['open_date'] = detected_open_date
+        if open_date_source:
+            cfg_out['open_date_source'] = open_date_source
+        if open_date_quote:
+            cfg_out['open_date_quote'] = open_date_quote
+    else:
+        cfg_out.pop('open_date', None)
+        cfg_out.pop('open_date_source', None)
+        cfg_out.pop('open_date_quote', None)
+    task.config_json = cfg_out
+
+    try:
+        radar_res = scan_rigging_radar(tender_abs, client=client)
+    except Exception:
+        radar_res = scan_rigging_radar(tender_abs, client=None)
+
+    suspicious_list = list(radar_res.get('suspicious_params') or [])
+    conclusion = radar_res.get('conclusion') or {
+        'recommendation': '值得投',
+        'summary': '未检出明显疑似排他性参数（仅供参考）。',
+    }
+    llm_status = str(radar_res.get('llm_status') or 'skipped')
+
+    # 清理该任务旧的 F6 findings 后重新写入
+    db.query(BidFinding).filter_by(task_id=task.id, source_module='F6').delete(synchronize_session=False)
+
+    for item in suspicious_list:
+        bf = BidFinding(
+            task_id=task.id,
+            source_module='F6',
+            code='SUSPECTED_EXCLUSIVE_PARAM',
+            severity='warning',
+            category=str(item.get('exclusive_type') or '疑似排他参数'),
+            clause_no='招标技术/资格条款',
+            quote=str(item.get('quote') or ''),
+            quote_offset=item.get('offset'),
+            page=item.get('page'),
+            quote_verified=bool(item.get('quote_verified', True)),
+            message=str(item.get('reason') or '疑似排他性控标参数'),
+            suggestion='建议投前向招标代理机构发出书面澄清/提疑函确认是否接受等效产品或资质',
+            consequence='deduction',
+            detail_json={
+                'exclusive_type': item.get('exclusive_type'),
+                'confidence': item.get('confidence'),
+                'llm_status': item.get('llm_status', llm_status),
+            },
+        )
+        db.add(bf)
+
+    now_utc = _utc_now()
+    task.status = 'delivered'
+    task.progress = 100
+    task.stage_detail = f"控标扫描完成：{conclusion.get('recommendation')}（检出 {len(suspicious_list)} 处疑似项）"
+    task.stats_json = {
+        'suspicious_count': len(suspicious_list),
+        'recommendation': conclusion.get('recommendation'),
+        'summary': conclusion.get('summary'),
+        'llm_status': llm_status,
+    }
+    task.delivered_at = now_utc
+    task.updated_at = now_utc
+    db.commit()
+
+    record_audit(
+        db,
+        action=audit_action,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        target=f"task:{task.id}",
+        detail_json=task.stats_json,
+    )
+
+    return RadarScanOut(
+        open_date=detected_open_date,
+        open_date_source=open_date_source,
+        open_date_quote=open_date_quote,
+        task_id=task.id,
+        title=task.title,
+        llm_status=llm_status,
+        suspicious_params=[
+            SuspiciousParamOut(
+                quote=str(p.get('quote') or ''),
+                offset=int(p.get('offset') or 0),
+                page=p.get('page'),
+                exclusive_type=str(p.get('exclusive_type') or '参数定向'),
+                confidence=float(p.get('confidence') or 0.8),
+                reason=str(p.get('reason') or ''),
+                quote_verified=bool(p.get('quote_verified', True)),
+                llm_status=str(p.get('llm_status') or llm_status),
+            )
+            for p in suspicious_list
+        ],
+        conclusion=RadarConclusionOut(
+            recommendation=str(conclusion.get('recommendation') or '值得投'),
+            summary=str(conclusion.get('summary') or ''),
+        ),
+    )
 
 
 @router.get('', response_model=BidTaskListOut)
@@ -113,6 +247,39 @@ def get_radar_scan_detail(
     )
 
 
+@router.post('/{task_id}/rescan', response_model=RadarScanOut)
+def rescan_radar_task(
+    task_id: int,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> RadarScanOut:
+    """E25 §2.2.1：对已上传的 F6 控标雷达记录重新执行扫描与开标日期提取（源文件缺失返回 422）。"""
+    tenant_id = int(current_user.tenant_id)
+    user_id = current_user.get('id')
+    task = _get_tenant_task_or_404(db, task_id, tenant_id)
+    if task.task_type != 'radar':
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'TASK_NOT_FOUND', 'message': '该任务不是控标雷达扫描记录'},
+        )
+
+    tender_abs = resolve_project_path(task.tender_path)
+    if not tender_abs.is_file():
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'SOURCE_FILES_MISSING', 'message': '招标文件原件缺失，无法重新扫描'},
+        )
+
+    return _execute_radar_scan(
+        db=db,
+        task=task,
+        tender_abs=tender_abs,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        audit_action='radar_rescan',
+    )
+
+
 @router.delete('/{task_id}', response_model=OkResponse)
 def delete_radar_task(
     task_id: int,
@@ -153,116 +320,11 @@ def run_radar_scan(
     db.commit()
 
     tender_abs = resolve_project_path(t_rel)
-    client, _ = resolve_effective_llm_client(db, user_id)
-
-    detected_open_date: Optional[str] = None
-    open_date_source: Optional[str] = None
-    open_date_quote: Optional[str] = None
-    try:
-        tender_doc = parse_document(str(tender_abs))
-        tender_text = tender_doc.text or ''
-        date_ev = extract_open_date_with_evidence(tender_text)
-        if date_ev:
-            detected_open_date = str(date_ev['open_date'])
-            open_date_source = 'tender_extracted'
-            open_date_quote = str(date_ev.get('quote') or '')[:240] or None
-        elif client is not None and tender_text:
-            llm_ev = extract_open_date_fallback_with_llm(tender_text, client)
-            if llm_ev:
-                detected_open_date = str(llm_ev['open_date'])
-                open_date_source = 'tender_llm'
-                open_date_quote = str(llm_ev.get('quote') or '')[:240] or None
-    except Exception:
-        detected_open_date = None
-        open_date_source = None
-        open_date_quote = None
-
-    if detected_open_date:
-        cfg_out: dict[str, str] = {'open_date': detected_open_date}
-        if open_date_source:
-            cfg_out['open_date_source'] = open_date_source
-        if open_date_quote:
-            cfg_out['open_date_quote'] = open_date_quote
-        task.config_json = cfg_out
-
-    try:
-        radar_res = scan_rigging_radar(tender_abs, client=client)
-    except Exception:
-        radar_res = scan_rigging_radar(tender_abs, client=None)
-
-    suspicious_list = list(radar_res.get('suspicious_params') or [])
-    conclusion = radar_res.get('conclusion') or {
-        'recommendation': '值得投',
-        'summary': '未检出明显疑似排他性参数（仅供参考）。',
-    }
-    llm_status = str(radar_res.get('llm_status') or 'skipped')
-
-    for item in suspicious_list:
-        bf = BidFinding(
-            task_id=task.id,
-            source_module='F6',
-            code='SUSPECTED_EXCLUSIVE_PARAM',
-            severity='warning',
-            category=str(item.get('exclusive_type') or '疑似排他参数'),
-            clause_no='招标技术/资格条款',
-            quote=str(item.get('quote') or ''),
-            quote_offset=item.get('offset'),
-            page=item.get('page'),
-            quote_verified=bool(item.get('quote_verified', True)),
-            message=str(item.get('reason') or '疑似排他性控标参数'),
-            suggestion='建议投前向招标代理机构发出书面澄清/提疑函确认是否接受等效产品或资质',
-            consequence='deduction',
-            detail_json={
-                'exclusive_type': item.get('exclusive_type'),
-                'confidence': item.get('confidence'),
-                'llm_status': item.get('llm_status', llm_status),
-            },
-        )
-        db.add(bf)
-
-    task.status = 'delivered'
-    task.progress = 100
-    task.stage_detail = f"控标扫描完成：{conclusion.get('recommendation')}（检出 {len(suspicious_list)} 处疑似项）"
-    task.stats_json = {
-        'suspicious_count': len(suspicious_list),
-        'recommendation': conclusion.get('recommendation'),
-        'summary': conclusion.get('summary'),
-        'llm_status': llm_status,
-    }
-    task.delivered_at = _utc_now()
-    db.commit()
-
-    record_audit(
-        db,
-        action='radar_scan',
+    return _execute_radar_scan(
+        db=db,
+        task=task,
+        tender_abs=tender_abs,
         tenant_id=tenant_id,
         user_id=user_id,
-        target=f"task:{task.id}",
-        detail_json=task.stats_json,
-    )
-
-    return RadarScanOut(
-        open_date=detected_open_date,
-        open_date_source=open_date_source,
-        open_date_quote=open_date_quote,
-        task_id=task.id,
-        title=task.title,
-        llm_status=llm_status,
-        suspicious_params=[
-            SuspiciousParamOut(
-                quote=str(p.get('quote') or ''),
-                offset=int(p.get('offset') or 0),
-                page=p.get('page'),
-                exclusive_type=str(p.get('exclusive_type') or '参数定向'),
-                confidence=float(p.get('confidence') or 0.8),
-                reason=str(p.get('reason') or ''),
-                quote_verified=bool(p.get('quote_verified', True)),
-                llm_status=str(p.get('llm_status') or llm_status),
-            )
-            for p in suspicious_list
-        ],
-        conclusion=RadarConclusionOut(
-            recommendation=str(conclusion.get('recommendation') or '值得投'),
-            summary=str(conclusion.get('summary') or ''),
-        ),
+        audit_action='radar_scan',
     )

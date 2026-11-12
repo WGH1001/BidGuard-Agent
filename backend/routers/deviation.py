@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""B2 · 第 5 组路由：/api/deviation（调用 F5 export_deviation_table 生成偏离表 docx 并提供下载）。"""
+"""B2 / E25 · 第 5 组路由：/api/deviation（调用 F5 export_deviation_table 生成偏离表 docx 并提供下载，拦截在途核验任务 409）。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -12,7 +12,7 @@ from backend.auth import AuthUser, get_current_user, record_audit
 from backend.database import PROJECT_ROOT, get_db
 from backend.models import BidCheckTask
 from backend.schemas import DeviationExportOut
-from backend.worker import resolve_effective_llm_client, resolve_project_path
+from backend.worker import get_worker, resolve_effective_llm_client, resolve_project_path
 from core.deviation_exporter import export_deviation_table
 from core.tender_extractor import build_review_checklist
 
@@ -114,6 +114,17 @@ def _deviation_entry(
         raise HTTPException(
             status_code=404,
             detail={'code': 'TASK_NOT_FOUND', 'message': '任务不存在或无权访问'},
+        )
+
+    # E25 §2.1.2：若任务正在核验中，直接返回 HTTP 409 CHECK_TASK_RUNNING，防止半途抢跑或读脏数据
+    worker = get_worker()
+    if task.status in ('extracting', 'checking', 'grading') or task.id in worker._in_flight:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                'code': 'CHECK_TASK_RUNNING',
+                'message': '该体检任务正在核验中，请等待完成后再查看或生成偏离表',
+            },
         )
 
     tender_abs = resolve_project_path(task.tender_path)

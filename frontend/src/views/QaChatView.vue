@@ -19,6 +19,7 @@ const cachedActiveSessionId = ref<number | null>(null)
 const cachedMessages = ref<QaMessageItem[]>([])
 const cachedAttachments = ref<QaAttachmentOut[]>([])
 const cachedSelectedAttachmentIds = ref<string[]>([])
+const cachedSuggestedQuestions = ref<string[]>([])
 const cachedAsking = ref<boolean>(false)
 let initializedOnce = false
 let cancelActiveStreamFn: (() => void) | null = null
@@ -40,6 +41,7 @@ function resetQaModuleCache(): void {
   cachedMessages.value = []
   cachedAttachments.value = []
   cachedSelectedAttachmentIds.value = []
+  cachedSuggestedQuestions.value = []
   cachedAsking.value = false
   initializedOnce = false
 }
@@ -71,6 +73,7 @@ const activeSessionId = cachedActiveSessionId
 const messages = cachedMessages
 const attachments = cachedAttachments
 const selectedAttachmentIds = cachedSelectedAttachmentIds
+const suggestedQuestions = cachedSuggestedQuestions
 const asking = cachedAsking
 
 const PRESET_QUESTIONS = [
@@ -78,7 +81,12 @@ const PRESET_QUESTIONS = [
   '评分细则表里关于业绩和证书的加分项有哪些？',
   '本项目最高投标限价是多少？我方总报价是多少？',
   '招标文件中带 ★ 号的强制性技术要求有哪些？',
+  '分“资格废标门槛”和“评分加分项”列出招标文件要求提供的全部企业证照、产品认证及人员证书并标明出处页码。',
 ]
+
+const effectivePresetQuestions = computed<string[]>(() =>
+  suggestedQuestions.value.length > 0 ? suggestedQuestions.value : PRESET_QUESTIONS,
+)
 
 const EFFORT_STORAGE_KEY = 'bidguard_qa_reasoning_effort_v1'
 const savedEffort = localStorage.getItem(EFFORT_STORAGE_KEY)
@@ -148,6 +156,7 @@ async function refreshSessionsList(): Promise<void> {
     messages.value = []
     attachments.value = []
     selectedAttachmentIds.value = []
+    suggestedQuestions.value = []
   }
 }
 
@@ -158,6 +167,7 @@ async function selectSession(sess: QaSessionOut): Promise<void> {
   messages.value = [...(detail.messages_json || [])]
   attachments.value = [...(detail.attachments || [])]
   selectedAttachmentIds.value = attachments.value.map((a) => a.attachment_id)
+  suggestedQuestions.value = [...(detail.suggested_questions || [])]
 }
 
 async function handleCreateSession(): Promise<void> {
@@ -176,6 +186,7 @@ async function handleCreateSession(): Promise<void> {
     messages.value = []
     attachments.value = []
     selectedAttachmentIds.value = []
+    suggestedQuestions.value = [...(created.suggested_questions || [])]
     ElMessage.success(`已新建问答会话 #${created.id}`)
   } finally {
     creatingSession.value = false
@@ -207,6 +218,7 @@ async function handleDeleteSession(sess: QaSessionOut): Promise<void> {
       messages.value = []
       attachments.value = []
       selectedAttachmentIds.value = []
+      suggestedQuestions.value = []
     }
   }
   ElMessage.success('问答会话已删除')
@@ -225,6 +237,7 @@ async function handleUploadAttachment(file: File): Promise<void> {
     messages.value = []
     attachments.value = []
     selectedAttachmentIds.value = []
+    suggestedQuestions.value = [...(created.suggested_questions || [])]
   }
   const sid = activeSessionId.value
   if (!sid) return
@@ -235,6 +248,12 @@ async function handleUploadAttachment(file: File): Promise<void> {
     attachments.value = [...attachments.value, uploaded]
     if (!selectedAttachmentIds.value.includes(uploaded.attachment_id)) {
       selectedAttachmentIds.value = [...selectedAttachmentIds.value, uploaded.attachment_id]
+    }
+    try {
+      const refreshed = await qaApi.getSession(sid)
+      suggestedQuestions.value = [...(refreshed.suggested_questions || [])]
+    } catch {
+      // ignore suggestion refresh failure
     }
     const desc = uploaded.is_image
       ? uploaded.has_text
@@ -249,9 +268,16 @@ async function handleUploadAttachment(file: File): Promise<void> {
 
 async function handleDeleteAttachment(att: QaAttachmentOut): Promise<void> {
   if (!activeSessionId.value || asking.value) return
-  await qaApi.deleteAttachment(activeSessionId.value, att.attachment_id)
+  const sid = activeSessionId.value
+  await qaApi.deleteAttachment(sid, att.attachment_id)
   attachments.value = attachments.value.filter((a) => a.attachment_id !== att.attachment_id)
   selectedAttachmentIds.value = selectedAttachmentIds.value.filter((id) => id !== att.attachment_id)
+  try {
+    const refreshed = await qaApi.getSession(sid)
+    suggestedQuestions.value = [...(refreshed.suggested_questions || [])]
+  } catch {
+    // ignore suggestion refresh failure
+  }
   ElMessage.success(`已移除附件「${att.filename}」`)
 }
 
@@ -499,7 +525,7 @@ onBeforeUnmount(() => {
           :uploading-attachment="uploadingAttachment"
           :attachments="attachments"
           v-model:selected-attachment-ids="selectedAttachmentIds"
-          :preset-questions="PRESET_QUESTIONS"
+          :preset-questions="effectivePresetQuestions"
           :reasoning-effort="reasoningEffort"
           @send="handleSendQuestion"
           @upload-attachment="handleUploadAttachment"

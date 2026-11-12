@@ -228,12 +228,24 @@ async function handleDeleteDeliveredTask(task: Partial<BidTaskOut>): Promise<voi
 
 // ── 页签 ②：安全审计日志状态（member 非管理员显示“仅管理员可见”，不弹错误） ──
 const loadingAudit = ref(false)
+const exportingAudit = ref(false)
 const auditForbidden = ref(false)
 const actionFilter = ref('')
 const auditPage = ref(1)
 const auditPageSize = ref(20)
 const auditTotal = ref(0)
 const auditLogs = ref<AuditLogItemOut[]>([])
+
+async function handleExportAuditCsv(): Promise<void> {
+  if (!authStore.isAdmin || exportingAudit.value) return
+  exportingAudit.value = true
+  try {
+    const fn = await auditApi.exportLogsCsv(actionFilter.value.trim() || undefined)
+    ElMessage.success(`已导出审计台账：${fn}`)
+  } finally {
+    exportingAudit.value = false
+  }
+}
 
 async function fetchAuditLogs(): Promise<void> {
   if (!authStore.isAdmin) {
@@ -332,6 +344,12 @@ onMounted(() => {
                   <div class="proj-title">{{ row.title }}</div>
                   <div class="proj-sub">
                     招标书：{{ row.tender_filename || '—' }} ｜ 投标书：{{ row.bid_filename || '—' }}
+                  </div>
+                  <div class="proj-sub mono-num">
+                    开标日期：
+                    <span :class="row.config_json?.open_date ? 'od-ok' : 'muted-txt'">
+                      {{ row.config_json?.open_date || '未识别' }}
+                    </span>
                   </div>
                 </template>
               </el-table-column>
@@ -451,6 +469,15 @@ onMounted(() => {
                 />
                 <el-button size="small" type="primary" @click="fetchAuditLogs">
                   筛选日志
+                </el-button>
+                <el-button
+                  size="small"
+                  type="success"
+                  plain
+                  :loading="exportingAudit"
+                  @click="handleExportAuditCsv"
+                >
+                  导出日志 (CSV)
                 </el-button>
               </div>
             </div>
@@ -708,5 +735,10 @@ onMounted(() => {
   margin-top: 16px;
   display: flex;
   justify-content: flex-end;
+}
+
+.od-ok {
+  color: #0f766e;
+  font-weight: 700;
 }
 </style>
