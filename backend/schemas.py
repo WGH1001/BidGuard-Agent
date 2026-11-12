@@ -194,6 +194,9 @@ class ExtractChecklistOut(BaseModel):
     source_type: str
     pages: int = 1
     chars: int = 0
+    open_date: Optional[str] = None
+    open_date_source: Optional[str] = None
+    open_date_quote: Optional[str] = None
     llm_status: str = 'skipped'
     chapters: list[dict[str, Any]] = Field(default_factory=list)
     marked_clauses: list[dict[str, Any]] = Field(default_factory=list)
@@ -239,10 +242,12 @@ class RadarConclusionOut(BaseModel):
 class RadarScanOut(BaseModel):
     task_id: int
     title: str
+    open_date: Optional[str] = None
+    open_date_source: Optional[str] = None
+    open_date_quote: Optional[str] = None
     llm_status: str
     suspicious_params: list[SuspiciousParamOut] = Field(default_factory=list)
     conclusion: RadarConclusionOut
-
 
 # ── 7. /api/qa 契约 ──────────────────────────────────────────────────────
 class QaSessionCreateRequest(BaseModel):

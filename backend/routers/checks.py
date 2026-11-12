@@ -2,9 +2,11 @@
 """B2 / E11 · 第 3 组路由：/api/checks（双书上传、任务 CRUD、流水线触发、SSE 流、反馈、NEED_MANUAL 人工回填、分阶段耗时透出）。"""
 from __future__ import annotations
 
+from datetime import date
 import json
 from pathlib import Path
 import queue
+import re
 import shutil
 from typing import Any, Optional
 
@@ -35,6 +37,33 @@ router = APIRouter(prefix='/api/checks', tags=['checks'])
 _ALLOWED_EXTS = {'.docx', '.pdf', '.txt'}
 _MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100MB
 _UPLOADS_ROOT = (PROJECT_ROOT / 'data' / 'uploads').resolve()
+_STRICT_ISO_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _validate_optional_open_date(open_date: Optional[str]) -> Optional[str]:
+    """E23：对用户手填的计划开标日期执行严格 YYYY-MM-DD 格式与合法日历校验。"""
+    raw = str(open_date or '').strip()
+    if not raw:
+        return None
+    if not _STRICT_ISO_DATE_RE.match(raw):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                'code': 'INVALID_OPEN_DATE',
+                'message': f"计划开标日期格式非法：{raw!r}，请使用有效 YYYY-MM-DD 日期（如 2026-11-05）或留空自动识别",
+            },
+        )
+    try:
+        parsed = date.fromisoformat(raw)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                'code': 'INVALID_OPEN_DATE',
+                'message': f"计划开标日期不是有效日历日期：{raw!r}（{e}）",
+            },
+        ) from e
+    return parsed.isoformat()
 
 
 # ── E11 扩展 Pydantic Out 模型：在不改动 backend/schemas.py 的前提下向前端透出 started_at / finished_at / duration ──
@@ -187,8 +216,10 @@ def create_check_task(
     task_title = (title or '').strip() or Path(bid_file.filename or '封标防废标体检任务').stem
 
     cfg_snap = {}
-    if open_date:
-        cfg_snap['open_date'] = open_date.strip()
+    validated_open_date = _validate_optional_open_date(open_date)
+    if validated_open_date:
+        cfg_snap['open_date'] = validated_open_date
+        cfg_snap['open_date_source'] = 'manual'
     if buyer_name:
         cfg_snap['buyer_name'] = buyer_name.strip()
 

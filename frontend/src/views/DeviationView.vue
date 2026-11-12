@@ -119,7 +119,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div v-loading="generating" class="deviation-page">
+  <div class="deviation-page">
     <!-- 顶部任务选择与操作条 -->
     <section class="bg-panel dev-header-bar">
       <div class="dh-left">
@@ -161,8 +161,9 @@ onMounted(() => {
       </div>
     </section>
 
-    <template v-if="devResult">
-      <!-- 统计概览卡片（支持点击卡片直接联动筛选对应种类的偏离行） -->
+    <div v-loading="generating" class="deviation-body-wrap">
+      <template v-if="devResult">
+        <!-- 统计概览卡片（支持点击卡片直接联动筛选对应种类的偏离行） -->
       <div class="dev-stats-grid">
         <div
           class="ds-card bg-panel clickable-card"
@@ -282,10 +283,17 @@ onMounted(() => {
           </el-table-column>
         </el-table>
       </section>
-    </template>
+      </template>
 
-    <div v-else class="bg-panel dev-empty">
-      <el-empty description="请选择一个防废标体检任务以生成并预览《技术与商务偏离表》" />
+      <div v-else class="bg-panel dev-empty">
+        <el-empty
+          :description="
+            generating
+              ? '正在消费 F4 核验结果生成标准偏离表，请稍候…'
+              : '请选择一个防废标体检任务以生成并预览《技术与商务偏离表》'
+          "
+        />
+      </div>
     </div>
   </div>
 </template>
@@ -295,6 +303,13 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.deviation-body-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 220px;
 }
 
 .dev-header-bar {

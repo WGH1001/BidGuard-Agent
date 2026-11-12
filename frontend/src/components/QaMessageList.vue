@@ -1,20 +1,54 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
-import { formatPageOrOffset, type QaMessageItem, type QaQuoteOut } from '@/api/types'
+import { computed, nextTick, ref, watch } from 'vue'
+import {
+  formatPageOrOffset,
+  type QaMessageItem,
+  type QaQuoteOut,
+  type ReasoningEffortLevel,
+} from '@/api/types'
 import ReActSteps from './ReActSteps.vue'
 
-const props = defineProps<{
-  messages: QaMessageItem[]
-  sending: boolean
-  presetQuestions?: string[]
-}>()
+const props = withDefaults(
+  defineProps<{
+    messages: QaMessageItem[]
+    sending: boolean
+    presetQuestions?: string[]
+    reasoningEffort?: ReasoningEffortLevel
+  }>(),
+  {
+    reasoningEffort: 'medium',
+  },
+)
 
 const emit = defineEmits<{
   (e: 'send', question: string): void
+  (e: 'update:reasoningEffort', level: ReasoningEffortLevel): void
 }>()
 
 const questionInput = ref('')
 const scrollContainerRef = ref<HTMLElement | null>(null)
+const effortMenuOpen = ref(false)
+const presetMenuOpen = ref(false)
+
+const EFFORT_OPTIONS: Array<{
+  value: ReasoningEffortLevel
+  label: string
+  desc: string
+}> = [
+  { value: 'low', label: '⚡ 极速', desc: '快响应 (low) · 开放 7 轮 6 工具' },
+  { value: 'medium', label: '⚖ 均衡', desc: '默认均衡 (high) · 开放 7 轮 6 工具' },
+  { value: 'high', label: '🧠 深度', desc: 'Max 深度推理 (max) · 开放 7 轮 6 工具' },
+]
+
+const currentEffortLabel = computed(() => {
+  const found = EFFORT_OPTIONS.find((o) => o.value === props.reasoningEffort)
+  return found ? found.label : '⚖ 均衡'
+})
+
+function selectEffort(level: ReasoningEffortLevel): void {
+  emit('update:reasoningEffort', level)
+  effortMenuOpen.value = false
+}
 
 function sourceBadge(src: string): { label: string; cls: string } {
   if (src === 'tender') {
@@ -35,11 +69,14 @@ function handleSendClick(): void {
   const clean = questionInput.value.trim()
   if (!clean || props.sending) return
   questionInput.value = ''
+  effortMenuOpen.value = false
+  presetMenuOpen.value = false
   emit('send', clean)
 }
 
 function handlePresetClick(q: string): void {
   if (props.sending) return
+  presetMenuOpen.value = false
   emit('send', q)
 }
 
@@ -72,7 +109,7 @@ defineExpose({
 </script>
 
 <template>
-  <div class="qa-msg-pane">
+  <div class="qa-msg-pane" @click="effortMenuOpen = false; presetMenuOpen = false">
     <!-- 消息流滚动区 -->
     <div ref="scrollContainerRef" class="msg-scroll-area">
       <div
@@ -172,9 +209,12 @@ defineExpose({
       />
     </div>
 
-    <!-- 底部预设快捷提问与输入框 -->
+    <!-- 底部输入舱（E23：空会话时展开快捷追问芯片，有消息后自动收起为弹出按钮；发送按钮旁集成三挡思考深度菜单） -->
     <div class="msg-input-dock">
-      <div v-if="props.presetQuestions && props.presetQuestions.length > 0" class="preset-chips">
+      <div
+        v-if="props.messages.length === 0 && props.presetQuestions && props.presetQuestions.length > 0"
+        class="preset-chips"
+      >
         <span class="chip-lbl">快捷追问：</span>
         <button
           v-for="pq in props.presetQuestions"
@@ -192,20 +232,78 @@ defineExpose({
         <el-input
           v-model="questionInput"
           type="textarea"
-          :rows="2"
+          :autosize="{ minRows: 1, maxRows: 4 }"
           :disabled="props.sending"
           placeholder="输入标书追问（支持多轮上下文追问，如：刚刚提到的条款在投标书哪一页？）按 Enter 发送…"
           @keydown="handleKeydown"
         />
-        <el-button
-          type="primary"
-          class="send-action-btn"
-          :loading="props.sending"
-          :disabled="props.sending"
-          @click="handleSendClick"
-        >
-          {{ props.sending ? '检索核验中…' : '发送追问' }}
-        </el-button>
+
+        <div class="dock-right-controls">
+          <!-- 对话开始后折叠的快捷追问弹出菜单 -->
+          <div
+            v-if="props.messages.length > 0 && props.presetQuestions && props.presetQuestions.length > 0"
+            class="pop-wrap"
+            @click.stop
+          >
+            <button
+              type="button"
+              class="dock-tool-btn"
+              :disabled="props.sending"
+              title="查看常用快捷追问"
+              @click="presetMenuOpen = !presetMenuOpen; effortMenuOpen = false"
+            >
+              💡 快捷追问 ▾
+            </button>
+            <div v-if="presetMenuOpen" class="pop-menu preset-pop-menu">
+              <div class="pm-hd">点击直接发起常见追问：</div>
+              <button
+                v-for="pq in props.presetQuestions"
+                :key="pq"
+                type="button"
+                class="pm-item"
+                @click="handlePresetClick(pq)"
+              >
+                {{ pq }}
+              </button>
+            </div>
+          </div>
+
+          <!-- 发送按钮左侧三挡推理深度弹出选择器 -->
+          <div class="pop-wrap" @click.stop>
+            <button
+              type="button"
+              class="dock-tool-btn effort-trigger-btn"
+              title="切换大模型 ReAct 推理思考深度（均开放 7 轮 6 工具）"
+              @click="effortMenuOpen = !effortMenuOpen; presetMenuOpen = false"
+            >
+              {{ currentEffortLabel }} ▾
+            </button>
+            <div v-if="effortMenuOpen" class="pop-menu effort-pop-menu">
+              <div class="pm-hd">选择 ReAct 推理思考深度：</div>
+              <button
+                v-for="opt in EFFORT_OPTIONS"
+                :key="opt.value"
+                type="button"
+                class="pm-item effort-opt-item"
+                :class="{ active: props.reasoningEffort === opt.value }"
+                @click="selectEffort(opt.value)"
+              >
+                <span class="eoi-lbl">{{ opt.label }}</span>
+                <span class="eoi-desc">{{ opt.desc }}</span>
+              </button>
+            </div>
+          </div>
+
+          <el-button
+            type="primary"
+            class="send-action-btn"
+            :loading="props.sending"
+            :disabled="props.sending"
+            @click="handleSendClick"
+          >
+            {{ props.sending ? '核验中…' : '发送追问' }}
+          </el-button>
+        </div>
       </div>
     </div>
   </div>
@@ -216,16 +314,16 @@ defineExpose({
   display: flex;
   flex-direction: column;
   height: 100%;
-  min-height: 540px;
+  min-height: 480px;
 }
 
 .msg-scroll-area {
   flex: 1;
   overflow-y: auto;
-  padding: 18px 20px;
+  padding: 14px 18px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
   background: var(--bg-subtle);
 }
 
@@ -243,8 +341,8 @@ defineExpose({
 }
 
 .bubble {
-  max-width: 85%;
-  padding: 14px 16px;
+  max-width: 92%;
+  padding: 12px 15px;
   border-radius: 10px;
   box-shadow: var(--shadow-card);
 }
@@ -259,7 +357,7 @@ defineExpose({
   font-size: 10.5px;
   font-weight: 800;
   opacity: 0.85;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
 }
 
 .u-text {
@@ -270,7 +368,7 @@ defineExpose({
 }
 
 .assistant-bubble {
-  width: 86%;
+  width: 92%;
   background: #ffffff;
   border: 1px solid var(--border-line);
   border-bottom-left-radius: 2px;
@@ -281,9 +379,9 @@ defineExpose({
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding-bottom: 8px;
+  padding-bottom: 7px;
   border-bottom: 1px solid var(--border-line);
-  margin-bottom: 10px;
+  margin-bottom: 9px;
 }
 
 .a-name {
@@ -302,7 +400,7 @@ defineExpose({
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 14px;
+  padding: 11px 14px;
   background: var(--brand-soft);
   border: 1px solid var(--brand-border);
   border-radius: 6px;
@@ -359,12 +457,12 @@ defineExpose({
 }
 
 .quotes-grid {
-  margin-top: 12px;
-  padding-top: 10px;
+  margin-top: 10px;
+  padding-top: 9px;
   border-top: 1px dashed var(--border-line);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
 }
 
 .qg-title {
@@ -374,7 +472,7 @@ defineExpose({
 }
 
 .quote-card {
-  padding: 9px 12px;
+  padding: 8px 11px;
   background: #f8fafc;
   border: 1px solid var(--border-line);
   border-left: 3px solid var(--brand);
@@ -386,7 +484,7 @@ defineExpose({
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  margin-bottom: 5px;
+  margin-bottom: 4px;
 }
 
 .qc-loc {
@@ -415,7 +513,7 @@ defineExpose({
 }
 
 .msg-input-dock {
-  padding: 12px 18px;
+  padding: 10px 16px;
   background: #ffffff;
   border-top: 1px solid var(--border-line);
 }
@@ -425,7 +523,7 @@ defineExpose({
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .chip-lbl {
@@ -435,7 +533,7 @@ defineExpose({
 }
 
 .preset-chip-btn {
-  padding: 4px 10px;
+  padding: 3px 9px;
   border-radius: 5px;
   border: 1px solid var(--border-line);
   background: var(--bg-subtle);
@@ -459,13 +557,119 @@ defineExpose({
 
 .input-row {
   display: flex;
-  gap: 10px;
-  align-items: stretch;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.dock-right-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.pop-wrap {
+  position: relative;
+}
+
+.dock-tool-btn {
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-subtle);
+  color: var(--txt-strong);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+
+.dock-tool-btn:hover:not(:disabled) {
+  border-color: var(--brand);
+  color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.effort-trigger-btn {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: var(--brand);
+}
+
+.pop-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  background: #ffffff;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.14);
+  padding: 8px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.preset-pop-menu {
+  width: 340px;
+}
+
+.effort-pop-menu {
+  width: 250px;
+}
+
+.pm-hd {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--txt-muted);
+  padding: 2px 6px 4px;
+  border-bottom: 1px solid var(--border-line);
+  margin-bottom: 2px;
+}
+
+.pm-item {
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 5px;
+  border: none;
+  background: transparent;
+  color: var(--txt-strong);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.pm-item:hover {
+  background: var(--bg-subtle);
+}
+
+.effort-opt-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.effort-opt-item.active {
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+
+.eoi-lbl {
+  font-weight: 800;
+  font-size: 12.5px;
+}
+
+.eoi-desc {
+  font-size: 11px;
+  color: var(--txt-muted);
 }
 
 .send-action-btn {
-  height: auto;
-  min-width: 120px;
+  height: 34px;
+  min-width: 96px;
   font-weight: 800;
 }
 </style>

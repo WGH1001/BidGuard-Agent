@@ -384,60 +384,25 @@ onBeforeUnmount(() => {
       </div>
     </aside>
 
-    <!-- 右栏：问答消息流与工具溯源展示 -->
+    <!-- 右栏：单行紧凑标题栏 + 高屏占比问答消息流（三挡深度切换已下沉至底部发送按钮左侧） -->
     <section class="qa-stage bg-panel">
       <div class="qst-header">
-        <div>
-          <h2>
-            F7 · 标书专家多轮 ReAct 追问工作台
-            <span v-if="activeSession" class="sess-tag mono-num">
-              （当前会话 #{{ activeSession.id }}：{{ activeSession.title }}）
-            </span>
-          </h2>
-          <p>
-            支持跨《招标文件》与《我方投标书》调用检索、章节定位、F2 报价沙盒、F3 证照效期与 E4 法规库工具；
-            所有原文摘录强制通过 verify_quote 校验。
-          </p>
+        <div class="qst-title-line">
+          <h2>F7 · 标书专家多轮 ReAct 追问工作台</h2>
+          <span v-if="activeSession" class="sess-tag mono-num">
+            #{{ activeSession.id }} {{ activeSession.title }}
+          </span>
         </div>
-
-        <!-- E19/E21：三挡思考深度切换器（极速=low / 均衡=high / 深度=max，均开放最多7轮=6工具+1收口） -->
-        <div class="effort-switch" title="切换大模型推理思考深度（三挡均可调用全部 6 个工具，最多 7 轮）">
-          <span class="es-lbl">推理深度：</span>
-          <button
-            type="button"
-            class="es-btn"
-            :class="{ active: reasoningEffort === 'low' }"
-            @click="setReasoningEffort('low')"
-          >
-            ⚡ 极速
-          </button>
-          <button
-            type="button"
-            class="es-btn"
-            :class="{ active: reasoningEffort === 'medium' }"
-            @click="setReasoningEffort('medium')"
-          >
-            ⚖ 均衡
-          </button>
-          <button
-            type="button"
-            class="es-btn"
-            :class="{ active: reasoningEffort === 'high' }"
-            @click="setReasoningEffort('high')"
-          >
-            🧠 深度
-          </button>
-        </div>
+        <span
+          class="qst-hint-pill"
+          title="支持跨《招标文件》与《我方投标书》调用检索、章节定位、F2 报价沙盒、F3 证照效期与 E4 法规库 6 大工具；所有原文摘录强制通过 verify_quote 逐字校验"
+        >
+          ⓘ 6 工具联动 · 原文溯源校验
+        </span>
       </div>
 
       <div class="qst-body">
-        <QaMessageList
-          ref="msgListRef"
-          :messages="messages"
-          :sending="asking"
-          :preset-questions="PRESET_QUESTIONS"
-          @send="handleSendQuestion"
-        />
+        <QaMessageList :messages="messages" :preset-questions="PRESET_QUESTIONS" :reasoning-effort="reasoningEffort" :sending="asking" @send="handleSendQuestion" @update:reasoning-effort="setReasoningEffort" ref="msgListRef"/>
       </div>
     </section>
   </div>
@@ -446,16 +411,16 @@ onBeforeUnmount(() => {
 <style scoped>
 .qa-chat-layout {
   display: grid;
-  grid-template-columns: 300px 1fr;
-  gap: 18px;
-  height: calc(100vh - 110px);
-  min-height: 620px;
+  grid-template-columns: 280px 1fr;
+  gap: 14px;
+  height: calc(100vh - 76px);
+  min-height: 580px;
 }
 
 .qa-sidebar {
   display: flex;
   flex-direction: column;
-  padding: 16px;
+  padding: 14px;
   height: 100%;
   overflow: hidden;
 }
@@ -463,10 +428,10 @@ onBeforeUnmount(() => {
 .qs-top {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding-bottom: 14px;
+  gap: 8px;
+  padding-bottom: 12px;
   border-bottom: 1px solid var(--border-line);
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .qs-label {
@@ -489,7 +454,7 @@ onBeforeUnmount(() => {
 }
 
 .qs-item {
-  padding: 10px 12px;
+  padding: 9px 11px;
   border-radius: 8px;
   border: 1px solid var(--border-line);
   background: var(--bg-subtle);
@@ -549,62 +514,50 @@ onBeforeUnmount(() => {
 }
 
 .qst-header {
-  padding: 16px 22px;
+  height: 44px;
+  padding: 0 18px;
   border-bottom: 1px solid var(--border-line);
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
+  gap: 12px;
+  flex-shrink: 0;
 }
 
-.effort-switch {
-  display: inline-flex;
+.qst-title-line {
+  display: flex;
   align-items: center;
-  gap: 6px;
-  background: var(--bg-subtle);
-  padding: 4px 8px;
-  border-radius: 7px;
-  border: 1px solid var(--border-line);
-}
-
-.es-lbl {
-  font-size: 11.5px;
-  font-weight: 800;
-  color: var(--txt-sec);
-}
-
-.es-btn {
-  border: 1px solid transparent;
-  background: transparent;
-  padding: 3px 9px;
-  border-radius: 5px;
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--txt-sec);
-  cursor: pointer;
-}
-
-.es-btn.active {
-  background: var(--brand);
-  color: #ffffff;
+  gap: 10px;
+  min-width: 0;
 }
 
 .qst-header h2 {
-  font-size: 16.5px;
+  font-size: 15px;
   font-weight: 900;
   color: var(--txt-strong);
+  white-space: nowrap;
 }
 
 .sess-tag {
-  font-size: 13px;
+  font-size: 12.5px;
+  font-weight: 700;
   color: var(--brand);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.qst-header p {
-  font-size: 12px;
+.qst-hint-pill {
+  font-size: 11.5px;
+  font-weight: 700;
   color: var(--txt-sec);
-  margin-top: 3px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-line);
+  padding: 2px 9px;
+  border-radius: 99px;
+  cursor: help;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .qst-body {

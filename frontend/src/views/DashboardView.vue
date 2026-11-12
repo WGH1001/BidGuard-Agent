@@ -289,7 +289,15 @@ onBeforeUnmount(() => {
         <div v-if="countdownAlerts.length > 0" class="countdown-list">
           <div v-for="alert in countdownAlerts" :key="alert.task_id" class="cd-row">
             <div class="cd-main">
-              <div class="cd-title">{{ alert.title }}</div>
+              <div class="cd-title-line">
+                <span
+                  class="sev-pill cd-type-pill"
+                  :class="alert.task_type === 'radar' ? 'warning' : 'info'"
+                >
+                  {{ alert.task_type === 'radar' ? 'F6 雷达' : '双书体检' }}
+                </span>
+                <span class="cd-title" :title="alert.title">{{ alert.title }}</span>
+              </div>
               <div class="cd-meta">
                 开标日：{{ alert.open_date || '待设定' }}
                 <template v-if="alert.days_left != null">
@@ -305,7 +313,7 @@ onBeforeUnmount(() => {
                 预警 {{ alert.warning_count }}
               </span>
               <span v-if="alert.veto_count === 0 && alert.warning_count === 0" class="sev-pill ok">
-                零否决项
+                {{ alert.task_type === 'radar' ? '零排他项' : '零否决项' }}
               </span>
             </div>
           </div>
@@ -319,7 +327,7 @@ onBeforeUnmount(() => {
       <div class="sec-hd">
         <div>
           <h3>在途投标项目防废标体检台账</h3>
-          <p>支持查看 F1~F4 核验详情、导出标准 Word 偏离表或进入交付中心打包</p>
+          <p>实时汇总 F1~F5 封标防废标体检与 F6 投前控标雷达记录，支持直达详情、导出偏离表或交付打包</p>
         </div>
         <el-button size="small" @click="router.push('/checks')">查看全部任务 →</el-button>
       </div>
@@ -602,6 +610,9 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  max-height: 290px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .cd-row {
@@ -616,10 +627,30 @@ onBeforeUnmount(() => {
   background: #ffffff;
 }
 
+.cd-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.cd-title-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cd-type-pill {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  padding: 1px 6px;
+}
+
 .cd-title {
   font-size: 13px;
   font-weight: 800;
   color: var(--txt-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cd-meta {

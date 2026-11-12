@@ -177,6 +177,13 @@ function onSelectBidFile(ev: Event): void {
   }
 }
 
+function isValidIsoDate(val: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(val)) return false
+  const [y, m, d] = val.split('-').map(Number)
+  const dt = new Date(Date.UTC(y, m - 1, d))
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d
+}
+
 async function handleCreateSubmit(): Promise<void> {
   if (!tenderFile.value) {
     ElMessage.warning('请先选择招标文件（.docx / .pdf / .txt）')
@@ -186,13 +193,18 @@ async function handleCreateSubmit(): Promise<void> {
     ElMessage.warning('请先选择我方投标文件（.docx / .pdf / .txt）')
     return
   }
+  const cleanOpenDate = String(form.openDate || '').trim()
+  if (cleanOpenDate && !isValidIsoDate(cleanOpenDate)) {
+    ElMessage.warning('计划开标日期格式非法，请填写或选择有效的 YYYY-MM-DD 日期（如 2026-11-05）或留空自动识别')
+    return
+  }
   creating.value = true
   try {
     const created = await checksApi.create({
       tenderFile: tenderFile.value,
       bidFile: bidFile.value,
       title: form.title,
-      openDate: form.openDate,
+      openDate: cleanOpenDate,
       buyerName: form.buyerName,
       autoRun: false,
     })
@@ -344,7 +356,16 @@ defineExpose({
 
           <div class="two-cols">
             <el-form-item label="计划开标日期（用于 F3 证照有效期核验，留空则体检时自动从招标书识别）">
-              <el-input v-model.trim="form.openDate" placeholder="留空自动识别，或填 YYYY-MM-DD" />
+              <el-date-picker
+                v-model="form.openDate"
+                type="date"
+                format="YYYY-MM-DD"
+                value-format="YYYY-MM-DD"
+                clearable
+                :editable="true"
+                placeholder="留空自动识别，或选择 YYYY-MM-DD"
+                style="width: 100%"
+              />
             </el-form-item>
 
             <el-form-item label="采购人/招标单位全称（防串名自伤）">

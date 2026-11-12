@@ -57,7 +57,11 @@ def extract_tender_checklists(
         client, llm_status = resolve_effective_llm_client(db, current_user.get('id'))
         if client is not None:
             try:
-                res = extract_tender_with_llm(str(tmp_path), client=client)
+                res = extract_tender_with_llm(
+                    str(tmp_path),
+                    client=client,
+                    open_date_fallback=True,
+                )
                 score_res = extract_scoring_with_llm(str(tmp_path), client=client)
                 scoring_prose = list(score_res.get('scoring_prose') or [])
                 llm_structured = list(res.get('llm_structured') or [])
@@ -97,6 +101,9 @@ def extract_tender_checklists(
             source_type=str(res.get('source_type') or ext.lstrip('.')),
             pages=int(res.get('pages') or 1),
             chars=int(res.get('chars') or 0),
+            open_date=res.get('open_date'),
+            open_date_source=res.get('open_date_source') or ('tender_extracted' if res.get('open_date') else None),
+            open_date_quote=res.get('open_date_quote'),
             llm_status=llm_status,
             chapters=list(res.get('chapters') or []),
             marked_clauses=marked_list,

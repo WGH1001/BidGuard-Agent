@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""B2 · 第 2 组路由：/api/dashboard（防废标体检总览，全部按 tenant_id 过滤聚合）。"""
+"""B2 / E23 · 第 2 组路由：/api/dashboard（防废标体检总览，全部按 tenant_id 过滤聚合）。"""
 from __future__ import annotations
 
 from datetime import date
@@ -101,7 +101,9 @@ def get_dashboard_stats(
         1 for c in certs if c.valid_until and (c.valid_until - today).days <= int(c.warn_days or 30)
     )
 
-    # 截标倒计时与重点任务看板
+    # E23 §2.2：截标倒计时与重点任务看板
+    # - F6 (radar) 仅读自身 config_json.open_date，不盲借 pre_check 的租户默认规则日期；
+    # - 优先将有 open_date 的项目置顶，其次附最近 open_date=None 的项目，上限放宽至 8 条。
     default_rule = db.query(BidRuleConfig).filter_by(tenant_id=tenant_id, is_default=True).first()
     default_open_date = default_rule.open_date if default_rule else None
 
@@ -109,32 +111,43 @@ def get_dashboard_stats(
     for f in findings:
         findings_by_task.setdefault(f.task_id, []).append(f)
 
-    countdown_alerts: list[CountdownTaskItem] = []
-    for t in tasks[:5]:
+    dated_items: list[CountdownTaskItem] = []
+    undated_items: list[CountdownTaskItem] = []
+
+    for t in tasks:
         t_findings = findings_by_task.get(t.id, [])
         t_veto = sum(1 for f in t_findings if f.severity == 'error')
         t_warn = sum(1 for f in t_findings if f.severity == 'warning')
-        open_str = (t.config_json or {}).get('open_date') or (
-            default_open_date.isoformat() if default_open_date else None
-        )
+        cfg_open = str((t.config_json or {}).get('open_date') or '').strip() or None
+        if t.task_type == 'radar':
+            open_str = cfg_open
+        else:
+            open_str = cfg_open or (default_open_date.isoformat() if default_open_date else None)
+
         days_left = None
         if open_str:
             try:
                 days_left = (date.fromisoformat(str(open_str)[:10]) - today).days
             except Exception:
                 days_left = None
-        countdown_alerts.append(
-            CountdownTaskItem(
-                task_id=t.id,
-                title=t.title,
-                task_type=t.task_type,
-                status=t.status,
-                open_date=open_str,
-                days_left=days_left,
-                veto_count=t_veto,
-                warning_count=t_warn,
-            )
+                open_str = None
+
+        item = CountdownTaskItem(
+            task_id=t.id,
+            title=t.title,
+            task_type=t.task_type,
+            status=t.status,
+            open_date=open_str,
+            days_left=days_left,
+            veto_count=t_veto,
+            warning_count=t_warn,
         )
+        if open_str is not None:
+            dated_items.append(item)
+        else:
+            undated_items.append(item)
+
+    countdown_alerts = (dated_items + undated_items)[:8]
 
     return DashboardStatsOut(
         tenant_id=tenant_id,

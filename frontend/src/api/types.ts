@@ -281,6 +281,9 @@ export interface ExtractChecklistOut {
   source_type: string
   pages: number
   chars: number
+  open_date?: string | null
+  open_date_source?: string | null
+  open_date_quote?: string | null
   llm_status: 'done' | 'skipped' | string
   chapters: Array<{ index: string; title: string; start: number }>
   marked_clauses: MarkedClauseItem[]
@@ -337,6 +340,9 @@ export interface RadarConclusionOut {
 export interface RadarScanOut {
   task_id: number
   title: string
+  open_date?: string | null
+  open_date_source?: string | null
+  open_date_quote?: string | null
   llm_status: 'done' | 'skipped' | string
   suspicious_params: SuspiciousParamOut[]
   conclusion: RadarConclusionOut

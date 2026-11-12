@@ -14,6 +14,7 @@
 签名约定（业务侧唯一入口）：
     extract_tender_with_llm(file_path, client=None, env=None) -> dict
 """
+from datetime import date
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from typing import Optional
 from core.llm_gateway import get_llm_client
 from core.quote_verifier import verify_quote
 from core.tender_extractor import (
+    _parse_cn_numeral_int,
     build_review_checklist,
     extract_scoring_tables,
     locate_keyword_sections,
@@ -119,13 +121,20 @@ def structure_candidate(window: str, candidate: dict, client) -> dict:
     return out
 
 
-def extract_tender_with_llm(file_path: str, client=None, env: Optional[str] = None) -> dict:
+def extract_tender_with_llm(
+    file_path: str,
+    client=None,
+    env: Optional[str] = None,
+    *,
+    open_date_fallback: bool = False,
+) -> dict:
     """F1 主入口：确定性层圈选 → LLM 逐段结构化。
 
     Args:
         file_path: 招标文件路径（docx/pdf/txt）。
         client: LLMClient 实例；None 时自动 get_llm_client(env)。
         env: 模型环境名（demo=智谱 / prod=内网网关），client 传入时忽略。
+        open_date_fallback: E23 为 True 且确定性层未识别到开标日期时，用局部窗向 LLM 兜底提取并过 verify_quote。
 
     Returns:
         build_review_checklist 的结果 + 'llm_structured'（结构化后的 requirement
@@ -137,29 +146,54 @@ def extract_tender_with_llm(file_path: str, client=None, env: Optional[str] = No
     reqs = [c for c in result['marked_clauses'] if c.get('kind') == 'requirement']
     # 模式 A/B 措辞型候选同样送结构化（无标记语料的实质要求全靠它们）
     wording = list(result['invalid_bid_clauses'])
+
+    def _get_full_text() -> str:
+        txt = result['text'] if 'text' in result else None
+        if txt is None:
+            # build_review_checklist 不回传全文，按记录偏移直接从文件解析一次
+            from core.parser import parse_document
+            txt = parse_document(file_path).text
+        return txt
+
     if not reqs and not wording:
+        calls = 0
+        if open_date_fallback and not result.get('open_date'):
+            if client is None:
+                client = get_llm_client(env)
+            full_text = _get_full_text()
+            od_ev = extract_open_date_fallback_with_llm(full_text, client)
+            if od_ev:
+                result['open_date'] = od_ev['open_date']
+                result['open_date_source'] = 'tender_llm'
+                result['open_date_quote'] = od_ev['quote']
+                calls += int(od_ev.get('llm_calls') or 1)
         result['llm_structured'] = []
-        result['llm_usage'] = {'calls': 0}
+        result['llm_usage'] = {'calls': calls}
         return result
 
     if client is None:
         client = get_llm_client(env)
 
-    full_text = result['text'] if 'text' in result else None
-    if full_text is None:
-        # build_review_checklist 不回传全文，按记录偏移直接从文件解析一次
-        from core.parser import parse_document
-        full_text = parse_document(file_path).text
+    full_text = _get_full_text()
 
     structured = []
     for cand in reqs + wording:
         window = _expand_window(full_text, cand['start'], cand['end'])
         structured.append(structure_candidate(window, cand, client))
 
+    extra_calls = 0
+    if open_date_fallback and not result.get('open_date'):
+        od_ev = extract_open_date_fallback_with_llm(full_text, client)
+        if od_ev:
+            result['open_date'] = od_ev['open_date']
+            result['open_date_source'] = 'tender_llm'
+            result['open_date_quote'] = od_ev['quote']
+            extra_calls += int(od_ev.get('llm_calls') or 1)
+
     usage = client.total_usage() if hasattr(client, 'total_usage') else {}
     result['llm_structured'] = structured
     result['llm_usage'] = {
-        'calls': len(structured),
+        'calls': len(structured) + extra_calls,
         'usage': usage,
     }
     return result
@@ -202,6 +236,144 @@ def _merge_spans(spans: list, gap: int = 800) -> list:
         else:
             merged.append([lo, hi])
     return [tuple(s) for s in merged]
+
+
+_OPEN_DATE_LLM_CLUE_RE = re.compile(
+    r'开标|截标|截止时间|截止日期|递交|响应文件|磋商|谈判|招标公告|采购公告|投标须知|更正|延期'
+)
+_OPEN_DATE_LLM_HINT_RE = re.compile(
+    r'开标|截标|截止时间|截止日期|递交.{0,10}(?:时间|截止)|更正|延期|变更公告|磋商时间|谈判时间|开启'
+)
+_SNIPPET_ARABIC_DATE_RE = re.compile(
+    r'(?<!\d)(\d{4})\s*[年\-/\.]\s*(\d{1,2})\s*[月\-/\.]\s*(\d{1,2})\s*日?(?!\d)'
+)
+_SNIPPET_CN_DATE_RE = re.compile(
+    r'([〇零O一二三四五六七八九]{4})\s*年\s*'
+    r'([一二三四五六七八九十]{1,2})\s*月\s*'
+    r'([一二三四五六七八九十廿]{1,3})\s*日?'
+)
+
+_OPEN_DATE_PROMPT = """你是招标文件审查专家。正则规则未能从文档中确定性提取到【开标/截标日期】，下面给出从招标文件局部截取的关键片段窗口（含前文概览与时间锚点周边）。请从中提取真正的【开标日期】（或提交投标/响应文件的截止日期）。
+
+【招标文件局部原文窗口】
+{window}
+
+要求（严格遵守）：
+1. 必须区分“开标/截标/提交响应文件截止时间”与“公告发布时间、获取采购文件时间、质疑期限、免费质保期、投标有效期”；
+2. open_date：规范格式 YYYY-MM-DD（如 "2026-10-16"）；若窗口中无明确开标/截标年月日，输出 null；
+3. quote：包含该日期及锚点词的原文片段，必须从上方窗口【逐字连续摘录】（保持中文大写数字或阿拉伯数字原样，严禁改写或补写），长度不少于 6 字；若 open_date 为 null，输出空串。
+
+只输出 JSON 对象，不要任何其他文字：
+{{"open_date": "YYYY-MM-DD 或 null", "quote": "逐字原文摘录或空串"}}"""
+
+
+def _extract_iso_dates_in_snippet(snippet: str) -> set[str]:
+    """从逐字摘录片段中确定性解析所有有效 YYYY-MM-DD 日期，用于反幻觉交叉校验。"""
+    found: set[str] = set()
+    if not snippet:
+        return found
+
+    for m in _SNIPPET_ARABIC_DATE_RE.finditer(snippet):
+        try:
+            d = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            if 2020 <= d.year <= 2035:
+                found.add(d.strftime('%Y-%m-%d'))
+        except ValueError:
+            continue
+
+    for m in _SNIPPET_CN_DATE_RE.finditer(snippet):
+        y_raw = m.group(1).replace('O', '〇')
+        y = _parse_cn_numeral_int(y_raw, is_year=True)
+        mo = _parse_cn_numeral_int(m.group(2))
+        da = _parse_cn_numeral_int(m.group(3))
+        if y is None or mo is None or da is None:
+            continue
+        try:
+            d = date(y, mo, da)
+            if 2020 <= d.year <= 2035:
+                found.add(d.strftime('%Y-%m-%d'))
+        except ValueError:
+            continue
+
+    return found
+
+
+def extract_open_date_fallback_with_llm(text: str, client) -> Optional[dict]:
+    """E23 规则正则未命中时的局部窗 LLM 开标日期兜底（严格过 verify_quote + 日期一致性校验）。
+
+    约束：
+    - 绝不发送全文：仅拼接前文窗口与关键词锚点 ±350/+700 合并窗（最多 3 窗，总计 ≤ 5000 字）；
+    - 无招标时间线索或 client 为 None 时零调用直接返回 None；
+    - quote 未过 verify_quote() 连续子串核验，或 quote 内不含对应有效日历日期时，一律拒收。
+    """
+    if not text or client is None:
+        return None
+    if not _OPEN_DATE_LLM_CLUE_RE.search(text):
+        return None
+
+    spans: list[tuple[int, int]] = [(0, min(len(text), 2200))]
+    for m in _OPEN_DATE_LLM_HINT_RE.finditer(text):
+        spans.append((max(0, m.start() - 350), min(len(text), m.end() + 700)))
+        if len(spans) >= 12:
+            break
+
+    merged = _merge_spans(spans, gap=300)
+    windows: list[str] = []
+    total_chars = 0
+    for lo, hi in merged[:3]:
+        win = text[lo:min(hi, lo + 2200)]
+        if total_chars + len(win) > 5000:
+            win = win[:max(0, 5000 - total_chars)]
+        if len(win) < 20:
+            continue
+        windows.append(win)
+        total_chars += len(win)
+        if total_chars >= 5000:
+            break
+
+    if not windows:
+        return None
+
+    combined = '\n---\n'.join(windows)
+    prompt = _OPEN_DATE_PROMPT.format(window=combined)
+    try:
+        resp = client.chat([{'role': 'user', 'content': prompt}], model_tier='flash')
+        obj = _parse_llm_json(getattr(resp, 'content', '') or '')
+    except Exception:
+        return None
+
+    if not obj:
+        return None
+
+    raw_date = str(obj.get('open_date') or '').strip()
+    if not raw_date or raw_date.lower() in ('null', 'none') or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', raw_date):
+        return None
+    try:
+        parsed_d = date.fromisoformat(raw_date)
+    except ValueError:
+        return None
+    if not (2020 <= parsed_d.year <= 2035):
+        return None
+
+    quote = str(obj.get('quote') or '').strip()
+    if len(quote) < 6:
+        return None
+    if not any(verify_quote(quote, w) for w in windows):
+        return None
+
+    # 铁律双锁：quote 必须真实通过原文核验，且其中包含确定性可解析出的同一个日期
+    if raw_date not in _extract_iso_dates_in_snippet(quote):
+        return None
+
+    pos = text.find(quote)
+    return {
+        'open_date': raw_date,
+        'quote': quote,
+        'quote_verified': True,
+        'source': 'tender_llm',
+        'offset': pos if pos >= 0 else None,
+        'llm_calls': 1,
+    }
 
 
 def _scoring_windows(text: str, eval_chapter: Optional[dict],

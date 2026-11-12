@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""B2 · 第 6 组路由：/api/radar（上传招标文件 -> F6 scan_rigging_radar 控标雷达扫描并落库）。"""
+"""B2 / E23 · 第 6 组路由：/api/radar（上传招标文件 -> F6 scan_rigging_radar 控标雷达扫描并落库）。"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -26,7 +26,10 @@ from backend.schemas import (
     SuspiciousParamOut,
 )
 from backend.worker import resolve_effective_llm_client, resolve_project_path
+from core.parser import parse_document
 from core.rigging_radar import scan_rigging_radar
+from core.tender_extractor import extract_open_date_with_evidence
+from core.tender_llm import extract_open_date_fallback_with_llm
 
 router = APIRouter(prefix='/api/radar', tags=['radar'])
 
@@ -94,7 +97,11 @@ def get_radar_scan_detail(
             )
         )
 
+    cfg = task.config_json or {}
     return RadarScanOut(
+        open_date=cfg.get('open_date'),
+        open_date_source=cfg.get('open_date_source'),
+        open_date_quote=cfg.get('open_date_quote'),
         task_id=task.id,
         title=task.title,
         llm_status=llm_status,
@@ -147,6 +154,37 @@ def run_radar_scan(
 
     tender_abs = resolve_project_path(t_rel)
     client, _ = resolve_effective_llm_client(db, user_id)
+
+    detected_open_date: Optional[str] = None
+    open_date_source: Optional[str] = None
+    open_date_quote: Optional[str] = None
+    try:
+        tender_doc = parse_document(str(tender_abs))
+        tender_text = tender_doc.text or ''
+        date_ev = extract_open_date_with_evidence(tender_text)
+        if date_ev:
+            detected_open_date = str(date_ev['open_date'])
+            open_date_source = 'tender_extracted'
+            open_date_quote = str(date_ev.get('quote') or '')[:240] or None
+        elif client is not None and tender_text:
+            llm_ev = extract_open_date_fallback_with_llm(tender_text, client)
+            if llm_ev:
+                detected_open_date = str(llm_ev['open_date'])
+                open_date_source = 'tender_llm'
+                open_date_quote = str(llm_ev.get('quote') or '')[:240] or None
+    except Exception:
+        detected_open_date = None
+        open_date_source = None
+        open_date_quote = None
+
+    if detected_open_date:
+        cfg_out: dict[str, str] = {'open_date': detected_open_date}
+        if open_date_source:
+            cfg_out['open_date_source'] = open_date_source
+        if open_date_quote:
+            cfg_out['open_date_quote'] = open_date_quote
+        task.config_json = cfg_out
+
     try:
         radar_res = scan_rigging_radar(tender_abs, client=client)
     except Exception:
@@ -204,6 +242,9 @@ def run_radar_scan(
     )
 
     return RadarScanOut(
+        open_date=detected_open_date,
+        open_date_source=open_date_source,
+        open_date_quote=open_date_quote,
         task_id=task.id,
         title=task.title,
         llm_status=llm_status,

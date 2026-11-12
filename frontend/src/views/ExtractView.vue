@@ -515,6 +515,20 @@ onBeforeUnmount(() => {
         <div><b>文档名称：</b>{{ result.filename }} ({{ result.source_type.toUpperCase() }})</div>
         <div><b>文档规模：</b><span class="mono-num">{{ result.chars }}</span> 字符</div>
         <div>
+          <b>开标日期：</b>
+          <span
+            class="sev-pill mono-num"
+            :class="result.open_date ? 'info' : 'neutral'"
+            :title="result.open_date_quote ? `原文摘录：${result.open_date_quote}` : undefined"
+          >
+            {{
+              result.open_date
+                ? `${result.open_date}（${result.open_date_source === 'tender_llm' ? 'AI 局部窗' : '正文识别'}）`
+                : '未识别'
+            }}
+          </span>
+        </div>
+        <div>
           <b>★/▲ 实质要求：</b>
           <span class="sev-pill ok">{{ reqCount }} 条</span>
           <span class="muted-note">（另过滤非要求说明语/碎片 {{ nonReqCount }} 条）</span>

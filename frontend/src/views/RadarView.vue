@@ -432,6 +432,13 @@ onBeforeUnmount(() => {
               <span class="sev-pill info">
                 检出疑似排他参数 {{ scanResult.suspicious_params.length }} 处
               </span>
+              <span
+                v-if="scanResult.open_date"
+                class="sev-pill info mono-num"
+                :title="scanResult.open_date_quote ? `原文摘录：${scanResult.open_date_quote}` : undefined"
+              >
+                开标日期：{{ scanResult.open_date }}（{{ scanResult.open_date_source === 'tender_llm' ? 'AI 局部窗' : '正文识别' }}）
+              </span>
               <span class="sev-pill" :class="scanResult.llm_status === 'done' ? 'ok' : 'info'">
                 {{ scanResult.llm_status === 'done' ? '确定性 + 大模型④ 双层复核' : '0-Token 确定性模式' }}
               </span>

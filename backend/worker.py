@@ -40,23 +40,22 @@ from backend.utils.crypto import decrypt_api_key
 from core.llm_gateway import build_client_from_user_config, get_llm_client
 from core.parser import parse_document
 from core.price_extractor import run_price_check
-from core.qualification_scanner import scan_qualifications
+from core.qualification_scanner import parse_cn_date, scan_qualifications
+from core.quote_verifier import verify_quote
 from core.response_checker import (
     _build_unified_page_context,
     _resolve_unified_page,
     run_response_check,
 )
-from core.tender_extractor import build_review_checklist
-from core.tender_llm import extract_tender_with_llm
+from core.tender_extractor import (
+    build_review_checklist,
+    extract_open_date_from_tender_text,
+    extract_open_date_with_evidence,
+)
+from core.tender_llm import extract_open_date_fallback_with_llm, extract_tender_with_llm
 
 DEFAULT_FALLBACK_OPEN_DATE = '2026-11-05'
 
-# E15 §2.2：招标文件开标/递交截止日期 0-Token 确定性提取正则（容忍数字与年月日间夹杂空白字符）
-_OPEN_DATE_EXTRACT_RE = re.compile(
-    r'(?:开\s*标\s*时\s*间|开\s*标\s*日\s*期|提交投标文件截止时间|递交投标文件截止时间|投标截止时间|投标文件递交截止时间|响应文件提交截止时间|响应文件开启时间)'
-    r'[^\d\n]{0,28}?'
-    r'(20[2-3]\s*\d)\s*[年\-/.]\s*([01]?\s*\d)\s*[月\-/.]\s*([0-3]?\s*\d)\s*日?'
-)
 
 # E15 §2.3：报价相关章节锚点词（用于定位投标书中的报价表区域中心偏移）
 _PRICE_SECTION_HEADING_RE = re.compile(
@@ -76,25 +75,6 @@ def resolve_project_path(rel_or_abs: Optional[str | Path]) -> Path:
     if p.is_absolute():
         return p
     return (PROJECT_ROOT / p).resolve()
-
-
-def extract_open_date_from_tender_text(text: str) -> Optional[str]:
-    """E15 §2.2：从招标文件全文中提取开标日期或投标截止日期（返回 YYYY-MM-DD，未识别返回 None）。"""
-    if not text:
-        return None
-    for m in _OPEN_DATE_EXTRACT_RE.finditer(text):
-        y_str = re.sub(r'\s+', '', m.group(1))
-        m_str = re.sub(r'\s+', '', m.group(2))
-        d_str = re.sub(r'\s+', '', m.group(3))
-        try:
-            year = int(y_str)
-            month = int(m_str)
-            day = int(d_str)
-            dt = datetime(year, month, day)
-            return dt.strftime('%Y-%m-%d')
-        except ValueError:
-            continue
-    return None
 
 
 def _format_amount_variants(amt_str: Optional[str]) -> list[str]:
@@ -494,12 +474,16 @@ class BidTaskWorker:
                 .filter_by(tenant_id=task.tenant_id, is_default=True)
                 .first()
             )
-            user_or_rule_open_date = str(
-                cfg_snap.get('open_date')
-                or (rule_cfg.open_date.isoformat() if (rule_cfg and rule_cfg.open_date) else '')
-                or ''
+            existing_open_src = str(cfg_snap.get('open_date_source') or '').strip()
+            manual_open_date = (
+                str(cfg_snap.get('open_date') or '').strip()
+                if existing_open_src in ('', 'manual')
+                else ''
+            )
+            rule_open_date = str(
+                rule_cfg.open_date.isoformat() if (rule_cfg and rule_cfg.open_date) else ''
             ).strip()
-            open_date_str = user_or_rule_open_date or DEFAULT_FALLBACK_OPEN_DATE
+            open_date_str = manual_open_date or rule_open_date or DEFAULT_FALLBACK_OPEN_DATE
             open_date_fallback_used = False
 
             social_months = list(
@@ -519,7 +503,7 @@ class BidTaskWorker:
                 or []
             )
 
-            # ── 阶段 1：extracting（F1 招标红线与 ★/▲ 条款提取 + E15 开标日期自动识别回填）──
+            # ── 阶段 1：extracting（F1 招标红线与 ★/▲ 条款提取 + E15/E23 开标日期自动识别回填）──
             self._emit_stage(session, task, 'extracting', 20, 'F1 正在提取招标文件废标红线与 ★/▲ 实质性条款')
             t_f1 = time.perf_counter()
             if client is not None:
@@ -535,26 +519,107 @@ class BidTaskWorker:
             invalid_bid_clauses = list(f1_res.get('invalid_bid_clauses') or [])
             f1_requirements = marked_clauses + invalid_bid_clauses
 
-            # E15 §2.2：若用户与规则均未指定 open_date，从招标书解析文本自动提取开标日期（用户手填永远优先）
-            if not user_or_rule_open_date:
-                tender_parsed = parse_document(str(tender_abs))
-                detected_open_date = extract_open_date_from_tender_text(tender_parsed.text)
+            # E23 §2.1.2：优先级为 任务手填 > 标书原文自动提取 > 正则未命中时 AI 局部窗兜底 > 规则页默认日期 > DEFAULT_FALLBACK_OPEN_DATE
+            # 同时写入 open_date_source / open_date_quote 显式来源可观测性，并在手填与标书原文不一致时追加 OPEN_DATE_MISMATCH 预警
+            tender_parsed = parse_document(str(tender_abs))
+            tender_date_ev = extract_open_date_with_evidence(tender_parsed.text)
+            detected_open_date = ''
+            detected_source = ''
+            detected_quote = ''
+            detected_offset: Optional[int] = None
+            if tender_date_ev and tender_date_ev.get('open_date'):
+                detected_open_date = str(tender_date_ev['open_date']).strip()
+                detected_source = 'tender_extracted'
+                detected_quote = str(tender_date_ev.get('quote') or '')
+                detected_offset = tender_date_ev.get('offset')
+            elif f1_res.get('open_date'):
+                detected_open_date = str(f1_res['open_date']).strip()
+                detected_source = str(f1_res.get('open_date_source') or 'tender_extracted')
+                detected_quote = str(f1_res.get('open_date_quote') or '')
+            elif client is not None and tender_parsed.text:
+                llm_date_ev = extract_open_date_fallback_with_llm(tender_parsed.text, client)
+                if llm_date_ev and llm_date_ev.get('open_date'):
+                    detected_open_date = str(llm_date_ev['open_date']).strip()
+                    detected_source = 'tender_llm'
+                    detected_quote = str(llm_date_ev.get('quote') or '')
+                    detected_offset = llm_date_ev.get('offset')
+
+            open_date_mismatch: Optional[dict[str, Any]] = None
+
+            if not manual_open_date:
                 if detected_open_date:
                     open_date_str = detected_open_date
                     cfg_snap['open_date'] = detected_open_date
+                    cfg_snap['open_date_source'] = detected_source
+                    if detected_quote:
+                        cfg_snap['open_date_quote'] = detected_quote[:240]
+                    else:
+                        cfg_snap.pop('open_date_quote', None)
+                    cfg_snap.pop('open_date_effective', None)
+                    cfg_snap.pop('open_date_detected', None)
+                    cfg_snap.pop('open_date_detected_source', None)
                     task.config_json = dict(cfg_snap)
                     task.updated_at = _utc_now()
                     session.commit()
+                    src_label = 'AI 局部窗提取' if detected_source == 'tender_llm' else '标书正文提取'
                     self._emit_stage(
                         session,
                         task,
                         'extracting',
                         35,
-                        f"已自动识别开标日期：{detected_open_date}",
+                        f"已自动识别开标日期（{src_label}）：{detected_open_date}",
                     )
+                elif rule_open_date:
+                    open_date_str = rule_open_date
+                    cfg_snap.pop('open_date', None)
+                    cfg_snap.pop('open_date_quote', None)
+                    cfg_snap.pop('open_date_detected', None)
+                    cfg_snap.pop('open_date_detected_source', None)
+                    cfg_snap['open_date_source'] = 'rule_default'
+                    cfg_snap['open_date_effective'] = rule_open_date
+                    task.config_json = dict(cfg_snap)
+                    task.updated_at = _utc_now()
+                    session.commit()
                 else:
                     open_date_str = DEFAULT_FALLBACK_OPEN_DATE
                     open_date_fallback_used = True
+                    cfg_snap.pop('open_date', None)
+                    cfg_snap.pop('open_date_quote', None)
+                    cfg_snap.pop('open_date_detected', None)
+                    cfg_snap.pop('open_date_detected_source', None)
+                    cfg_snap['open_date_source'] = 'fallback_default'
+                    cfg_snap['open_date_effective'] = DEFAULT_FALLBACK_OPEN_DATE
+                    task.config_json = dict(cfg_snap)
+                    task.updated_at = _utc_now()
+                    session.commit()
+            else:
+                cfg_snap['open_date_source'] = 'manual'
+                cfg_snap.pop('open_date_effective', None)
+                manual_d = parse_cn_date(manual_open_date)
+                if (
+                    manual_d is not None
+                    and detected_open_date
+                    and manual_d.strftime('%Y-%m-%d') != detected_open_date
+                ):
+                    open_date_mismatch = {
+                        'manual_open_date': manual_d.strftime('%Y-%m-%d'),
+                        'detected_open_date': detected_open_date,
+                        'detected_source': detected_source,
+                        'quote': detected_quote,
+                        'offset': detected_offset,
+                    }
+                    cfg_snap['open_date_detected'] = detected_open_date
+                    cfg_snap['open_date_detected_source'] = detected_source
+                    if detected_quote:
+                        cfg_snap['open_date_quote'] = detected_quote[:240]
+                else:
+                    cfg_snap.pop('open_date_detected', None)
+                    cfg_snap.pop('open_date_detected_source', None)
+                    if detected_quote:
+                        cfg_snap['open_date_quote'] = detected_quote[:240]
+                task.config_json = dict(cfg_snap)
+                task.updated_at = _utc_now()
+                session.commit()
 
             duration_record['f1_ms'] = max(0, int(round((time.perf_counter() - t_f1) * 1000)))
 
@@ -651,6 +716,61 @@ class BidTaskWorker:
                         suggestion='请替换有效期内证照或清理外部项目单位名称',
                         consequence='veto' if f3_item.get('severity') == 'error' else 'deduction',
                         detail_json=f3_detail,
+                    )
+                )
+
+            # (b2) E23：手填开标日期与招标文件原文提取日期不一致时，发出双向冲突预警（仍按手填日期核验）
+            if open_date_mismatch is not None:
+                raw_ev_quote = str(open_date_mismatch.get('quote') or '').strip()
+                ev_offset = open_date_mismatch.get('offset')
+                ev_verified = bool(raw_ev_quote and verify_quote(raw_ev_quote, tender_parsed.text))
+                if not ev_verified:
+                    raw_ev_quote = ''
+                    ev_offset = None
+
+                t_phys_page: Optional[int] = None
+                t_footer_page: Optional[int] = None
+                t_is_docx = False
+                if ev_verified and isinstance(ev_offset, int):
+                    tender_page_ctx = _build_unified_page_context(tender_abs)
+                    t_phys_page, t_footer_page, t_is_docx = _resolve_unified_page(
+                        ev_offset, tender_page_ctx
+                    )
+
+                mismatch_detail: dict[str, Any] = {
+                    'manual_open_date': open_date_mismatch['manual_open_date'],
+                    'detected_open_date': open_date_mismatch['detected_open_date'],
+                    'quote_source': 'tender',
+                }
+                if t_phys_page is not None:
+                    mismatch_detail['tender_page'] = t_phys_page
+                    mismatch_detail['tender_footer_page'] = t_footer_page
+                    mismatch_detail['tender_is_docx'] = t_is_docx
+
+                m_date_user = open_date_mismatch['manual_open_date']
+                m_date_doc = open_date_mismatch['detected_open_date']
+                new_findings.append(
+                    BidFinding(
+                        task_id=task.id,
+                        source_module='F3',
+                        code='OPEN_DATE_MISMATCH',
+                        severity='warning',
+                        category='开标日期冲突核验',
+                        clause_no='开标时间 / 递交截止时间',
+                        quote=raw_ev_quote,
+                        quote_offset=ev_offset,
+                        quote_verified=ev_verified,
+                        page=t_phys_page,
+                        message=(
+                            f"手填开标日期（{m_date_user}）与招标文件原文识别的开标日期（{m_date_doc}）不一致，"
+                            f"本次 F3 效期核验按手填日期执行；若无官方延期/更正补充公告，请核实是否填错或识别有误"
+                        ),
+                        suggestion=(
+                            f"请核对招标文件原条款或最新更正公告：若以招标书原文（{m_date_doc}）为准，"
+                            f"请修正开标日期后重跑体检；若确已延期至 {m_date_user}，可忽略本预警"
+                        ),
+                        consequence='deduction',
+                        detail_json=mismatch_detail,
                     )
                 )
 

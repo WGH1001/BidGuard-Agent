@@ -70,7 +70,7 @@ _REACT_SYSTEM_PROMPT = """你是招投标双书合规审查专家（ReAct Agent�
 1. "search_tender"：在招标文件中检索关键词，action_input 为关键词字符串（如 "质保期"）；
 2. "search_bid"：在投标文件中检索关键词，action_input 为关键词字符串（如 "质保期"）；
 3. "locate_chapter"：定位章节标题，action_input 为章节关键词字符串（如 "评标办法"）；
-4. "recalc_price"：调用报价算术沙盒复算分项报价，action_input 为 {"items": [...], "bid_total": ...}；
+4. "recalc_price"：调用报价算术沙盒复算分项报价，action_input 为对象 {"items": [{"name": "分项名", "qty": "数量", "unit_price": "单价", "total_price": "合价"}], "table_total": "合计(可选)", "bid_total": "总报价(可选)"}（注意 items 每项必须包含 qty、unit_price、total_price）；
 5. "check_cert_expiry"：调用证照效期核验器，action_input 为 {"cert_text": "...", "open_date": "YYYY-MM-DD"}；
 6. "cite_regulation"：在招投标法规库中检索法条原文，action_input 为 {"keyword": "...", "article_no": "第X条"}；
 7. "final"：当你已通过工具拿到原文证据准备给出最终回答时使用，action_input 为：
@@ -97,6 +97,23 @@ def _parse_llm_json(content: str) -> Optional[dict]:
     except json.JSONDecodeError:
         return None
 
+def _coerce_action_input(action_input: Any) -> Any:
+    """E23 §2.4.3：若 LLM 将 action_input 输出为字符串化 JSON（如 '{\"items\": [...]}'），
+    自动尝试 json.loads 解包为 dict/list，防止 recalc_price/check_cert_expiry/cite_regulation/locate_chapter 误拒。
+    """
+    if not isinstance(action_input, str):
+        return action_input
+    s = action_input.strip()
+    if s.startswith('```'):
+        s = re.sub(r'^```(?:json)?\s*|\s*```$', '', s, flags=re.IGNORECASE).strip()
+    if (s.startswith('{') and s.endswith('}')) or (s.startswith('[') and s.endswith(']')):
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, (dict, list)):
+                return parsed
+        except Exception:
+            pass
+    return action_input
 
 def _offset_to_page(offset: Optional[int], page_spans: list[tuple[int, int, int]]) -> Optional[int]:
     """向后兼容辅助函数：当调用方直接传入旧版 [(start, end, page_no)] 列表时换算页码。"""
@@ -329,9 +346,40 @@ def recalc_price(
     bid_total_upper: Optional[str] = None,
     price_cap=None,
 ) -> dict[str, Any]:
-    """工具 3：调用 F2 PriceSandbox 复算报价。"""
+    """工具 3：调用 F2 PriceSandbox 复算报价（E23：若分项缺少 total_price 明确提示，防止默认按 0 误报算术差错）。"""
+    if not isinstance(items, list) or len(items) == 0:
+        return {
+            'passed': False,
+            'error': 'recalc_price 需要非空 items 列表，每项须包含 name、qty、unit_price、total_price 字段',
+            'findings': [],
+        }
+    normalized_items: list[dict[str, Any]] = []
+    for idx, it in enumerate(items, start=1):
+        if not isinstance(it, dict):
+            return {
+                'passed': False,
+                'error': f'recalc_price 第 {idx} 项格式错误，须为包含 name、qty、unit_price、total_price 的字典',
+                'findings': [],
+            }
+        tp = it.get('total_price')
+        if tp is None or str(tp).strip() == '':
+            # 兼容部分模型或历史调用使用 amount / subtotal 键名，若均无则明确提示缺少 total_price
+            alt_tp = it.get('amount') if it.get('amount') is not None else it.get('subtotal')
+            if alt_tp is not None and str(alt_tp).strip() != '':
+                it = {**it, 'total_price': alt_tp}
+            else:
+                return {
+                    'passed': False,
+                    'error': (
+                        f"recalc_price 第 {idx} 项（「{it.get('name') or idx}」）缺少 total_price（合价）字段；"
+                        f"请提供完整 {'{name, qty, unit_price, total_price}'} 后再复算"
+                    ),
+                    'findings': [],
+                }
+        normalized_items.append(it)
+
     sandbox = PriceSandbox(
-        items=items,
+        items=normalized_items,
         table_total=table_total,
         bid_total=bid_total,
         bid_total_upper=bid_total_upper,
@@ -594,7 +642,7 @@ def ask_bid_expert_stream(
 
         thought = str(parsed.get('thought') or '').strip()
         action = str(parsed.get('action') or 'final').strip()
-        action_input = parsed.get('action_input')
+        action_input = _coerce_action_input(parsed.get('action_input'))
 
         # E4 第 474 行区：6 工具白名单检查
         if action == 'final' or ('answer' in parsed and action not in ALLOWED_REACT_TOOLS):
@@ -690,7 +738,9 @@ def ask_bid_expert_stream(
             elif isinstance(action_input, list):
                 observation = recalc_price(items=action_input)
             else:
-                observation = {'error': 'recalc_price 需要 items 列表'}
+                observation = {
+                    'error': 'recalc_price 需要包含 items 列表的对象，每项格式为 {"name", "qty", "unit_price", "total_price"}'
+                }
         elif action == 'check_cert_expiry':
             if isinstance(action_input, dict):
                 observation = check_cert_expiry(

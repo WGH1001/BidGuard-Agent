@@ -20,13 +20,20 @@
 ```python
 # core/tender_extractor.py —— 0 Token 确定性层
 build_review_checklist(file_path: str) -> dict
-# 返回：{'file','source_type','pages','chars','chapters','marked_clauses',
-#        'invalid_bid_clauses','qualification_hits','compliance_hits',
-#        'eval_chapter','scoring_hits','scoring_tables'}
+# 返回：{'file','source_type','pages','chars','open_date','open_date_source',
+#        'open_date_quote','chapters','marked_clauses','invalid_bid_clauses',
+#        'qualification_hits','compliance_hits','eval_chapter','scoring_hits',
+#        'scoring_tables'}
+extract_open_date_from_tender_text(text: str) -> Optional[str]
+extract_open_date_with_evidence(text: str) -> Optional[dict[str, Any]]
+# 返回：{'open_date': 'YYYY-MM-DD', 'quote': 原文逐字片段, 'offset': int} 或 None
 
 # core/tender_llm.py —— LLM 结构化层（在确定性层结果上追加键）
-extract_tender_with_llm(file_path: str, client=None, env: Optional[str] = None) -> dict
-# = build_review_checklist 结果 + {'llm_structured': [...], 'llm_usage': {'calls', 'usage'}}
+extract_open_date_fallback_with_llm(text: str, client) -> Optional[dict]
+# E23 规则未命中时局部窗（≤3 窗 ≤5000 字）LLM 兜底；强制过 verify_quote + 日期一致性校验，
+# 返回 {'open_date': 'YYYY-MM-DD', 'quote': str, 'quote_verified': True, 'source': 'tender_llm', ...} 或 None
+extract_tender_with_llm(file_path: str, client=None, env: Optional[str] = None, *, open_date_fallback: bool = False) -> dict
+# = build_review_checklist 结果 + {'llm_structured': [...], 'llm_usage': {'calls', 'usage'}}（open_date_fallback=True 时正则未命中则触发局部窗 LLM 开标日兜底）
 
 extract_scoring_with_llm(file_path: str, client=None, env: Optional[str] = None) -> dict
 # 返回：{'scoring_tables': [...], 'scoring_prose': [...], 'scoring_llm_usage': {...}}
@@ -234,3 +241,4 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 | 2026-11-11 | E20 F1/F5/F6 体验与 Docker 端口共存：仅前端视图与 `docker-compose.yml`（`POSTGRES_PORT:-15432`）调整，core↔backend 签名零改动 | 实现侧 + 验收 |
 | 2026-11-11 | E21 F7 多轮上下文与流式直播：`core/bid_react_agent.py` 新增 `history` 参数与流式入口 `ask_bid_expert_stream`，三挡推理映射智谱合法值 `low/high/max`（`max_rounds` 默认放开至 `7` 轮以支持 6 工具+1 `final`，仅调深度）；`backend/routers/qa.py` 同步与流式端点注入 `messages_json` 历史并新增 `POST /api/qa/sessions/{id}/ask/stream`（`QaAskRequest.max_rounds` 放宽至 `1..8` 默认 `7`） | 实现侧 + 验收修复 |
 | 2026-11-11 | E22 LLM 网关思考参数防御加固：`LLMClient` 新增 `translate_reasoning_effort(value)`，`_is_thinking_reject` 升级为组合条件识别，`_build_extra_body()` 强制隔离 `reasoning_effort_map`，`chat()` 与 `chat_stream()` 共用剥参重试与单实例内存熔断（`_mark_effort_unsupported`）；`bid_react_agent._resolve_effort_and_rounds(..., client=None)` 向后兼容新增可选 `client` 形参 | 实现侧 + 验收 |
+| 2026-11-12 | E23 开标日期全链路与工作区/工具修复：`core/tender_extractor.py` 新增通用 `extract_open_date_from_tender_text` / `extract_open_date_with_evidence` 并纳入 `build_review_checklist` 返回 `'open_date'` / `'open_date_source'` / `'open_date_quote'`；`core/tender_llm.py` 新增局部窗兜底 `extract_open_date_fallback_with_llm`（严格过 `verify_quote` + 日期一致性校验）与 `extract_tender_with_llm(..., *, open_date_fallback=False)`；`/api/extract`（`ExtractChecklistOut`）与 `/api/radar`（`RadarScanOut`）透出 `open_date` / `open_date_source` / `open_date_quote`；`POST /api/checks` 新增手填开标日严格 `YYYY-MM-DD` 日历校验（`HTTP 422 INVALID_OPEN_DATE`）；`backend/worker.py` 持久化 `open_date_source` 并在手填≠标书识别日时发出 `OPEN_DATE_MISMATCH` 预警；`core/bid_react_agent.py` 新增 `_coerce_action_input` 自动解包字符串化 JSON 并完善 `recalc_price` 缺失 `total_price` 校验提示 | 架构侧 + 验收 |

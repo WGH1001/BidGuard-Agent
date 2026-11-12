@@ -143,6 +143,43 @@ function handleSseProgress(frame: SSEProgressFrame): void {
   }
 }
 
+const OPEN_DATE_SOURCE_LABELS: Record<string, string> = {
+  manual: '用户手填',
+  tender_extracted: '标书正文识别',
+  tender_llm: 'AI 局部窗提取',
+  rule_default: '规则默认值',
+  fallback_default: '默认兜底·请核对',
+}
+
+const openDateMeta = computed(() => {
+  const cfg = (currentTask.value?.config_json ?? null) as Record<string, unknown> | null
+  if (!cfg) return null
+  const dateVal = String(cfg.open_date_effective || cfg.open_date || '').trim()
+  if (!dateVal) return null
+  const srcKey = String(cfg.open_date_source || '').trim()
+  const srcLabel = OPEN_DATE_SOURCE_LABELS[srcKey] || '任务配置'
+  const quote = String(cfg.open_date_quote || '').trim()
+  const detected = String(cfg.open_date_detected || '').trim()
+  let title = `开标日期来源：${srcLabel}`
+  if (quote) {
+    title += `\n原文摘录：${quote}`
+  }
+  if (detected && detected !== dateVal) {
+    title += `\n⚠️ 标书原文识别为 ${detected}，与当前设定不一致`
+  }
+  const pillClass =
+    srcKey === 'fallback_default' || (detected && detected !== dateVal)
+      ? 'warning'
+      : srcKey === 'manual'
+        ? 'ok'
+        : 'info'
+  return {
+    text: `开标日期：${dateVal}（${srcLabel}）`,
+    pillClass,
+    title,
+  }
+})
+
 const stageDurationItems = computed<StageDurationItem[]>(() => {
   const dur = currentTaskExt.value?.duration
   if (!dur) return []
@@ -398,6 +435,14 @@ onBeforeUnmount(() => {
                 }}
               </span>
               <span
+                v-if="openDateMeta"
+                class="sev-pill mono-num"
+                :class="openDateMeta.pillClass"
+                :title="openDateMeta.title"
+              >
+                {{ openDateMeta.text }}
+              </span>
+              <span
                 v-if="currentTask.stats_json?.price_status === 'NEED_MANUAL'"
                 class="sev-pill warning"
               >
@@ -600,6 +645,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
   margin-bottom: 6px;
 }
 

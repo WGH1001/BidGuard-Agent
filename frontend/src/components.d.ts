@@ -15,6 +15,7 @@ declare module 'vue' {
     ElButton: typeof import('element-plus/es/components/button/index')['ElButton']
     ElCheckbox: typeof import('element-plus/es/components/checkbox/index')['ElCheckbox']
     ElCheckboxGroup: typeof import('element-plus/es/components/checkbox/index')['ElCheckboxGroup']
+    ElDatePicker: typeof import('element-plus/es/components/date-picker/index')['ElDatePicker']
     ElDialog: typeof import('element-plus/es/components/dialog/index')['ElDialog']
     ElEmpty: typeof import('element-plus/es/components/empty/index')['ElEmpty']
     ElForm: typeof import('element-plus/es/components/form/index')['ElForm']

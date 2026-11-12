@@ -38,6 +38,13 @@ const assetNavs = computed(() => NAV_ITEMS.filter((i) => i.group === 'asset'))
 const systemNavs = computed(() => NAV_ITEMS.filter((i) => i.group === 'system'))
 
 const currentPageTitle = computed(() => (route.meta.title as string) || '防废标体检工作台')
+const roleLabel = computed(() => (authStore.isAdmin ? '系统管理员' : '投标商务专员'))
+const userDisplayName = computed(
+  () => (authStore.user?.display_name || authStore.user?.username || '').trim(),
+)
+const showSeparateRoleBadge = computed(
+  () => Boolean(userDisplayName.value && userDisplayName.value !== roleLabel.value),
+)
 
 function switchTheme(mode: SidebarThemeMode): void {
   appStore.setSidebarTheme(mode)
@@ -145,17 +152,14 @@ function handleLogout(): void {
         </div>
 
         <div class="tb-right">
-          <button type="button" class="tb-quick-btn primary" @click="router.push('/checks')">
-            + 发起封标防废标体检
-          </button>
-          <button type="button" class="tb-quick-btn" @click="router.push('/radar')">
-            投前控标雷达
-          </button>
-
           <div class="tb-user-chip">
-            <span class="u-name">{{ authStore.user?.display_name || authStore.user?.username }}</span>
-            <span class="u-role" :class="authStore.isAdmin ? 'is-admin' : 'is-member'">
-              {{ authStore.isAdmin ? '系统管理员' : '投标商务专员' }}
+            <span class="u-name">{{ userDisplayName }}</span>
+            <span
+              v-if="showSeparateRoleBadge"
+              class="u-role"
+              :class="authStore.isAdmin ? 'is-admin' : 'is-member'"
+            >
+              {{ roleLabel }}
             </span>
           </div>
         </div>
@@ -366,14 +370,14 @@ function handleLogout(): void {
 }
 
 .bg-topbar {
-  height: 60px;
+  height: 44px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border-line);
-  padding: 0 28px;
+  padding: 0 20px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
   position: sticky;
   top: 0;
   z-index: 30;
@@ -474,7 +478,7 @@ function handleLogout(): void {
 
 .bg-content-canvas {
   flex: 1;
-  padding: 24px 28px;
+  padding: 14px 20px;
   max-width: 1640px;
   width: 100%;
   margin: 0 auto;

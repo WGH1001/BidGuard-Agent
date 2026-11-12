@@ -17,7 +17,9 @@
     locate_keyword_sections(text, keywords) -> list[dict]  # 审查区/评分区定位
     build_review_checklist(file_path) -> dict        # 四类候选汇总（一次成稿）
 """
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from typing import Any, Optional
 import re
 
 from core.interfaces import ParsedDoc
@@ -112,6 +114,188 @@ def _classify_kind(merged_text: str) -> str:
 _EVAL_CHAPTER_KEYS = ('评标办法', '评标方法', '评标标准', '评分细则')
 _QUALIFY_KEYS = ('资格性审查', '资格审查', '申请人的资格要求', '供应商资格要求')
 _COMPLIANCE_KEYS = ('符合性审查', '实质性要求审查')
+
+# ── E23 §2.1：招标文件开标/投标截止日期 0-Token 确定性提取（通用结构规则 + 防误抓护栏）──
+_OPEN_DATE_ANCHOR_RE = re.compile(
+    r'(?:提交投标文件截止时间[、，,\s]*开标时间(?:和地点|及地点)?'
+    r'|递交投标文件截止时间[、，,\s]*开标时间(?:和地点|及地点)?'
+    r'|开\s*标\s*(?:及|与)\s*截\s*标\s*时\s*间(?:和地点|及地点)?'
+    r'|开\s*标\s*时\s*间(?:和地点|及地点)?'
+    r'|开\s*标\s*日\s*期'
+    r'|截\s*标\s*时\s*间'
+    r'|截\s*标\s*日\s*期'
+    r'|提交投标文件截止时间'
+    r'|递交投标文件截止时间'
+    r'|投标文件递交截止时间'
+    r'|投标截止时间'
+    r'|递交响应文件截止时间'
+    r'|提交响应文件截止时间'
+    r'|响应文件提交截止时间'
+    r'|响应文件开启时间'
+    r'|磋商(?:响应)?文件(?:递交|提交)截止时间'
+    r'|报价截止时间)'
+)
+
+_OPEN_DATE_VALUE_RE = re.compile(
+    r'(20[2-3]\s*\d)\s*[年\-/.]\s*([01]?\s*\d)\s*[月\-/.]\s*([0-3]?\s*\d)\s*日?'
+)
+
+_OPEN_DATE_CN_VALUE_RE = re.compile(
+    r'([二两][〇零oO0-9一二三四五六七八九]{3})\s*年\s*'
+    r'([正一二三四五六七八九十冬腊]{1,3})\s*月\s*'
+    r'([一二三四五六七八九十廿]{1,3})\s*日?'
+)
+
+# 锚点与日期之间若出现新的非开标章节标题（如前文无日期的资格句后接"获取招标文件"），立即截断搜索窗口防串行误抓
+_NON_OPEN_SECTION_STOP_RE = re.compile(
+    r'(?:获取(?:招标|采购|磋商|谈判)文件|招标文件(?:的)?获取|采购文件(?:的)?获取|公告期限|投标人资格要求|申请人的资格要求)'
+)
+
+_CN_DIGIT_MAP = {
+    '〇': 0, '零': 0, 'o': 0, 'O': 0, '0': 0,
+    '一': 1, '壹': 1, '1': 1,
+    '二': 2, '贰': 2, '两': 2, '2': 2,
+    '三': 3, '叁': 3, '3': 3,
+    '四': 4, '肆': 4, '4': 4,
+    '五': 5, '伍': 5, '5': 5,
+    '六': 6, '陆': 6, '6': 6,
+    '七': 7, '柒': 7, '7': 7,
+    '八': 8, '捌': 8, '8': 8,
+    '九': 9, '玖': 9, '9': 9,
+}
+
+
+def _parse_cn_numeral_int(raw: str, *, is_year: bool = False) -> Optional[int]:
+    """将中文数字日期段（如 '二〇二六' / '十一' / '二十五'）转为整数。"""
+    s = re.sub(r'\s+', '', raw or '')
+    if not s:
+        return None
+    if is_year:
+        if len(s) != 4:
+            return None
+        digits: list[str] = []
+        for ch in s:
+            d = _CN_DIGIT_MAP.get(ch)
+            if d is None:
+                return None
+            digits.append(str(d))
+        return int(''.join(digits))
+
+    if s in ('正',):
+        return 1
+    if s in ('冬',):
+        return 11
+    if s in ('腊',):
+        return 12
+    if '廿' in s:
+        tail = s.replace('廿', '')
+        return 20 + (_CN_DIGIT_MAP.get(tail, 0) if tail else 0)
+    if '十' in s:
+        left, right = s.split('十', 1)
+        tens = 1 if not left else _CN_DIGIT_MAP.get(left)
+        ones = 0 if not right else _CN_DIGIT_MAP.get(right)
+        if tens is None or ones is None:
+            return None
+        return tens * 10 + ones
+    if len(s) == 1 and s in _CN_DIGIT_MAP:
+        return _CN_DIGIT_MAP[s]
+    return None
+
+
+def _is_valid_gap_and_not_range(window: str, date_start: int, date_end: int) -> bool:
+    """校验锚点与日期间的噪声可控，且该日期不紧跟'至/到/—'+另一日期（排除获取时间区间）。"""
+    between = window[:date_start]
+    cleaned_between = re.sub(
+        r'[\s:：、，,。；;（）()\[\]【】\-—.．0-9一二三四五六七八九十]|时间|日期|地点|北京|上午|下午|截标|开标',
+        '',
+        between,
+    )
+    if len(cleaned_between) > 6:
+        return False
+
+    after_date = window[date_end:date_end + 28]
+    if re.match(r'^\s*(?:至|到|—|-|~|～)\s*(?:20[2-3]\s*\d|[01]?\s*\d\s*月|[二两][〇零oO0-9一二三四五六七八九]{3}\s*年|[正一二三四五六七八九十冬腊]{1,3}\s*月)', after_date):
+        return False
+    return True
+
+
+def extract_open_date_with_evidence(text: str) -> Optional[dict[str, Any]]:
+    """E23 §2.1：从招标文件全文提取开标/投标截止日期，并返回带原文片段与偏移的证据对象。
+
+    通用泛化设计与明确规则边界说明：
+    1. 不针对特定样本硬编码，基于全国政采/国企标准招标锚点同义词族提取；
+    2. 允许锚点与日期之间跨换行（\\n）、列表序号（1./（1））、时间标签与 PDF 短页码；
+    3. 排除前接'截止/截至'后接'前/内/止'的资格回顾期句式，以及'YYYY年MM月DD日至...'发售区间；
+    4. 同时兼容阿拉伯数字日期（2026-10-16 / 2026年10月16日）与中文大写日期（二〇二六年十一月五日）；
+    5. 已知规则层边界：若招标正文之后另附延期/更正公告修改开标日、表格双栏隔断超过 120 字符，
+       或扫描件 OCR 将年份数字损毁（如 2O26），需依赖人工手填/修正开标日（支持手填优先与冲突告警）。
+
+    Returns:
+        {'open_date': 'YYYY-MM-DD', 'quote': 原文逐字片段, 'offset': int} 或 None
+    """
+    if not text:
+        return None
+
+    for m_anchor in _OPEN_DATE_ANCHOR_RE.finditer(text):
+        a_start, a_end = m_anchor.start(), m_anchor.end()
+
+        # 护栏 1：排除资格要求中的相对时间描述（如 "截止提交投标文件截止时间前..." / "...截止时间前三年内"）
+        prefix_4 = text[max(0, a_start - 4):a_start]
+        suffix_10 = text[a_end:min(len(text), a_end + 10)]
+        if re.search(r'^\s*(?:前|以前|之前|内|止|起)', suffix_10):
+            continue
+        if ('截止' in prefix_4 or '截至' in prefix_4) and not re.search(r'^\s*[：:\n1-9（(]', suffix_10):
+            continue
+
+        window = text[a_end:min(len(text), a_end + 120)]
+        m_stop = _NON_OPEN_SECTION_STOP_RE.search(window)
+        if m_stop:
+            window = window[:m_stop.start()]
+
+        for m_date in _OPEN_DATE_VALUE_RE.finditer(window):
+            if not _is_valid_gap_and_not_range(window, m_date.start(), m_date.end()):
+                continue
+            y_str = re.sub(r'\s+', '', m_date.group(1))
+            m_str = re.sub(r'\s+', '', m_date.group(2))
+            d_str = re.sub(r'\s+', '', m_date.group(3))
+            try:
+                dt = datetime(int(y_str), int(m_str), int(d_str))
+                quote = text[a_start:a_end + m_date.end()]
+                return {
+                    'open_date': dt.strftime('%Y-%m-%d'),
+                    'quote': quote,
+                    'offset': a_start,
+                }
+            except ValueError:
+                continue
+
+        # 次级回退：同窗口内匹配中文大写年月日（如 "二〇二六年十一月五日"）
+        for m_cn in _OPEN_DATE_CN_VALUE_RE.finditer(window):
+            if not _is_valid_gap_and_not_range(window, m_cn.start(), m_cn.end()):
+                continue
+            year = _parse_cn_numeral_int(m_cn.group(1), is_year=True)
+            month = _parse_cn_numeral_int(m_cn.group(2), is_year=False)
+            day = _parse_cn_numeral_int(m_cn.group(3), is_year=False)
+            if year is None or month is None or day is None:
+                continue
+            try:
+                dt = datetime(year, month, day)
+                quote = text[a_start:a_end + m_cn.end()]
+                return {
+                    'open_date': dt.strftime('%Y-%m-%d'),
+                    'quote': quote,
+                    'offset': a_start,
+                }
+            except ValueError:
+                continue
+
+    return None
+
+
+def extract_open_date_from_tender_text(text: str) -> Optional[str]:
+    """E23 §2.1：从招标文件全文提取开标日期或投标截止日期（返回 YYYY-MM-DD，未识别返回 None）。"""
+    ev = extract_open_date_with_evidence(text)
+    return ev['open_date'] if ev else None
 
 
 def load_document(file_path: str) -> ParsedDoc:
@@ -298,11 +482,15 @@ def build_review_checklist(file_path: str) -> dict:
     real = [ch for ch in eval_candidates
             if '…' not in ch['title'] and not re.search(r'[.·\t]*\d+\s*$', ch['title'])]
     eval_chapter = real[-1] if real else (eval_candidates[-1] if eval_candidates else None)
+    open_date_ev = extract_open_date_with_evidence(text)
     return {
         'file': file_path,
         'source_type': doc.source_type,
         'pages': doc.pages,
         'chars': len(text),
+        'open_date': open_date_ev['open_date'] if open_date_ev else None,
+        'open_date_source': 'tender_extracted' if open_date_ev else None,
+        'open_date_quote': open_date_ev['quote'] if open_date_ev else None,
         'chapters': chapters,
         'marked_clauses': _attach_pages(extract_marked_clauses(text)),
         'invalid_bid_clauses': _attach_pages(extract_invalid_bid_clauses(text)),
