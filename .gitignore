@@ -19,3 +19,4 @@ data/*.db-wal
 .slidep/
 *.media.ocr.json
 data/corpus/sim_bids/
+data/corpus/truebids/

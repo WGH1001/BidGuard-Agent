@@ -133,12 +133,13 @@ def test_rigging_radar_llm_layer_discards_hallucinated_quote():
         tender_p.unlink(missing_ok=True)
 
 
-# ── 3. 11 份真实语料 0 Token 扫描统计报告验证 ────────────────────────────
+# ── 13 份真实语料 0 Token 扫描统计报告验证 ────────────────────────────
+# （2026-11-12 语料扩容 11→13：北交大 02/04 包两份招标入库，按 AGENTS §二.5 回补断言）
 
-def test_corpus_11_samples_zero_token_radar_scan():
+def test_corpus_13_samples_zero_token_radar_scan():
     report = dry_run_corpus_radar('data/corpus/m0_samples')
     if report:
-        assert len(report) == 11
+        assert len(report) == 13
         for row in report:
             assert row['recommendation'] in ('值得投', '谨慎投', '疑似控标高')
             assert isinstance(row['suspicious_count'], int)
