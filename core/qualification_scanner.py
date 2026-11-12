@@ -24,8 +24,11 @@ from __future__ import annotations
 import re
 from datetime import date
 
+from typing import Any, Optional
+
 __all__ = ['scan_qualifications', 'parse_cn_date', 'parse_month',
-           'collect_covered_months', 'PLACEHOLDER_RE']
+           'collect_covered_months', 'match_required_certificates_with_ledger',
+           'PLACEHOLDER_RE']
 
 _DAYS_NEAR_WARN = 30
 _CTX = 30                       # 串名命中上下文半径
@@ -279,3 +282,195 @@ def scan_qualifications(text: str,
     findings += _scan_forbidden(text, forbidden_names or [], target_buyer or '')
     findings += _scan_placeholder(text)
     return findings
+
+
+# ── E26：招标所需证照与企业台账保守对账（0 Token）────────────────────────
+_CERT_FAMILY_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ('iso9001', ('ISO9001', 'GB/T19001', 'GBT19001', '质量管理体系')),
+    ('iso14001', ('ISO14001', 'GB/T24001', 'GBT24001', '环境管理体系')),
+    ('iso45001', ('ISO45001', 'OHSAS18001', '职业健康安全')),
+    ('iso27001', ('ISO27001', 'ISO/IEC27001', '信息安全管理体系')),
+    ('iso20000', ('ISO20000', 'ISO/IEC20000', '信息技术服务管理体系')),
+    ('cmmi', ('CMMI',)),
+    ('itss', ('ITSS', '信息技术服务标准')),
+    ('cs', ('信息系统建设和服务能力', 'CS1', 'CS2', 'CS3', 'CS4', 'CS5')),
+    ('ccrc', ('CCRC', '信息安全服务资质')),
+    ('business_license', ('营业执照',)),
+    ('tax_social', ('完税证明', '纳税证明', '依法缴纳税收', '社会保障资金', '社保证明')),
+    ('high_tech', ('高新技术企业',)),
+    ('software_copyright', ('软件著作权', '软著')),
+    ('patent', ('专利证书', '发明专利', '实用新型专利')),
+    ('energy_saving', ('节能产品认证',)),
+    ('env_label', ('环境标志产品', '十环')),
+    ('3c', ('3C认证', 'CCC认证', '强制性产品认证')),
+    ('xinchuang', ('互认证书', '兼容性认证', '兼容性测试', '符合性测试', '银河麒麟', '统信', '达梦', '人大金仓', '鲲鹏')),
+    ('ca', ('CA数字证书', '数字证书及电子签章')),
+    ('pm_high', ('信息系统项目管理师',)),
+    ('pm_mid', ('系统集成项目管理工程师',)),
+    ('arch', ('系统架构设计师',)),
+    ('sys_plan', ('系统规划与管理师',)),
+    ('sys_analyst', ('系统分析师',)),
+    ('net_plan', ('网络规划设计师',)),
+    ('sw_designer', ('软件设计师',)),
+    ('sw_tester', ('软件评测师',)),
+    ('net_eng', ('网络工程师',)),
+    ('db_eng', ('数据库系统工程师',)),
+    ('sec_eng', ('信息安全工程师', 'CISP')),
+    ('title_eng', ('高级工程师', '中级工程师', '工程师职称', '人工智能应用工程师')),
+    ('constructor', ('建造师',)),
+)
+
+
+def _norm_cert_text(raw: str) -> str:
+    return re.sub(r'[\s\-_（）()【】\[\]/／、,，.。:：]+', '', (raw or '').upper())
+
+
+def _extract_cert_families(raw: str) -> set[str]:
+    norm = _norm_cert_text(raw)
+    if not norm:
+        return set()
+    families: set[str] = set()
+    for fam, keys in _CERT_FAMILY_ALIASES:
+        if any(_norm_cert_text(k) in norm for k in keys):
+            families.add(fam)
+    return families
+
+
+def _strip_cert_generic_words(raw: str) -> str:
+    norm = _norm_cert_text(raw)
+    for w in ('登记证书', '认证证书', '资质证书', '资格证书', '证书', '认证', '资质', '证明', '复印件', '有效'):
+        norm = norm.replace(w, '')
+    return norm
+
+
+def _is_cert_match(req_name: str, cert_name: str) -> bool:
+    req_fams = _extract_cert_families(req_name)
+    cert_fams = _extract_cert_families(cert_name)
+    if req_fams and cert_fams:
+        return bool(req_fams & cert_fams)
+    if req_fams or cert_fams:
+        # 仅单侧命中明确标准家族时，仍允许核心中文名完全包含（防别名表遗漏特例）
+        pass
+    core_req = _strip_cert_generic_words(req_name)
+    core_cert = _strip_cert_generic_words(cert_name)
+    if len(core_req) >= 4 and len(core_cert) >= 4:
+        return core_req in core_cert or core_cert in core_req
+    return False
+
+
+def _field(obj: Any, name: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def match_required_certificates_with_ledger(
+    required_certs: list[dict[str, Any]],
+    ledger_certs: list[Any],
+    reference_date: Optional[str] = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """将 F1 提取出的招标所需证照与租户企业证照台账进行 0-Token 保守对账。
+
+    Args:
+        required_certs: extract_required_certificates() 返回的清单。
+        ledger_certs: 租户自身的 CompanyCertificate ORM 列表或字典列表。
+        reference_date: 基准日期（优先传招标文件开标日 'YYYY-MM-DD'，缺省回退今天）。
+
+    Returns:
+        (enriched_items, cert_ledger_summary)
+    """
+    ref_d = parse_cn_date(reference_date or '') if reference_date else None
+    ref_source = 'open_date' if ref_d is not None else 'today'
+    if ref_d is None:
+        ref_d = date.today()
+
+    status_rank = {'valid': 3, 'expiring_soon': 2, 'expired': 1, 'not_in_ledger': 0}
+    enriched: list[dict[str, Any]] = []
+
+    valid_cnt = 0
+    expiring_cnt = 0
+    expired_cnt = 0
+    missing_cnt = 0
+    mandatory_cnt = 0
+    bonus_cnt = 0
+
+    for item in required_certs or []:
+        req_name = str(item.get('cert_name') or '').strip()
+        req_level = str(item.get('requirement_level') or 'bonus')
+        if req_level == 'mandatory':
+            mandatory_cnt += 1
+        else:
+            bonus_cnt += 1
+
+        candidates: list[dict[str, Any]] = []
+        for cert in ledger_certs or []:
+            c_name = str(_field(cert, 'cert_name', '') or '').strip()
+            if not c_name or not _is_cert_match(req_name, c_name):
+                continue
+
+            raw_vu = _field(cert, 'valid_until')
+            if isinstance(raw_vu, date):
+                vu_date = raw_vu
+            else:
+                vu_date = parse_cn_date(str(raw_vu or ''))
+            if vu_date is None:
+                continue
+
+            warn_days = int(_field(cert, 'warn_days', 30) or 30)
+            days_left = (vu_date - ref_d).days
+            if days_left < 0:
+                c_status = 'expired'
+            elif days_left <= warn_days:
+                c_status = 'expiring_soon'
+            else:
+                c_status = 'valid'
+
+            att_name = _field(cert, 'attachment_name')
+            att_path = _field(cert, 'attachment_path')
+            has_att = bool(_field(cert, 'has_attachment', False) or att_path)
+            candidates.append({
+                'id': int(_field(cert, 'id', 0) or 0),
+                'cert_name': c_name,
+                'cert_no': _field(cert, 'cert_no'),
+                'valid_until': vu_date.isoformat(),
+                'days_remaining': days_left,
+                'status': c_status,
+                'has_attachment': has_att,
+                'attachment_name': att_name,
+            })
+
+        candidates.sort(
+            key=lambda c: (status_rank.get(c['status'], 0), c['days_remaining']),
+            reverse=True,
+        )
+        best = candidates[0] if candidates else None
+        ledger_status = best['status'] if best else 'not_in_ledger'
+
+        if ledger_status == 'valid':
+            valid_cnt += 1
+        elif ledger_status == 'expiring_soon':
+            expiring_cnt += 1
+        elif ledger_status == 'expired':
+            expired_cnt += 1
+        else:
+            missing_cnt += 1
+
+        row_out = dict(item)
+        row_out['ledger_status'] = ledger_status
+        row_out['matched_cert'] = best
+        row_out['matched_count'] = len(candidates)
+        enriched.append(row_out)
+
+    summary = {
+        'total': len(enriched),
+        'mandatory_count': mandatory_cnt,
+        'bonus_count': bonus_cnt,
+        'valid_count': valid_cnt,
+        'expiring_soon_count': expiring_cnt,
+        'expired_count': expired_cnt,
+        'not_in_ledger_count': missing_cnt,
+        'reference_date': ref_d.isoformat(),
+        'reference_date_source': ref_source,
+    }
+    return enriched, summary
+

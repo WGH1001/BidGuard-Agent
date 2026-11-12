@@ -23,7 +23,10 @@ build_review_checklist(file_path: str) -> dict
 # 返回：{'file','source_type','pages','chars','open_date','open_date_source',
 #        'open_date_quote','chapters','marked_clauses','invalid_bid_clauses',
 #        'qualification_hits','compliance_hits','eval_chapter','scoring_hits',
-#        'scoring_tables'}
+#        'scoring_tables','required_certificates'}
+extract_required_certificates(text: str, *, qualification_hits=None, compliance_hits=None,
+                                marked_clauses=None, invalid_bid_clauses=None,
+                                scoring_tables=None, scoring_prose=None, page_ctx=None) -> list[dict]
 extract_open_date_from_tender_text(text: str) -> Optional[str]
 extract_open_date_with_evidence(text: str) -> Optional[dict[str, Any]]
 # 返回：{'open_date': 'YYYY-MM-DD', 'quote': 原文逐字片段, 'offset': int} 或 None
@@ -72,6 +75,9 @@ scan_qualifications(text: str, open_date: str,
 # text = 投标文件全文（parse_document(...).text）；open_date 形如 "2026-11-04"
 # 返回 findings 列表（格式同 F2）；开标日不可解析时返回
 # [{'code': 'INVALID_OPEN_DATE', 'severity': 'error', 'message': ...}]
+match_required_certificates_with_ledger(required_certs: list[dict], ledger_certs: list,
+                                        reference_date: Optional[str] = None) -> tuple[list[dict], dict]
+# E26：0-Token 将招标所需证照清单与租户 CompanyCertificate 台账保守对账，返回 (enriched_items, cert_ledger_summary)
 ```
 
 ### 1.4 F4 双书勾稽核验（CheckDetail 主流程）
@@ -219,7 +225,7 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 | 3 | `bid_check_tasks` | 体检/控标任务主表 | `tenant_id`、`user_id`、`task_type`(pre_check/radar)、`title`、`status`、`progress`、`stage_detail`、`tender_filename`、`bid_filename`、`tender_path`、`bid_path`、`error_msg`、`stats_json`、`price_manual_json`、`config_json`、`llm_usage_json`、`started_at`、`finished_at`、`duration_json`、`delivered_at` |
 | 4 | `bid_findings` | 检出风险明细 | `task_id` FK(级联删除)、`source_module`、`code`、`severity`、`category`、`clause_no`、`quote`、`bid_quote`、`quote_offset`、`quote_verified`、`page`、`message`、`suggestion`、`consequence`、`detail_json`、`feedback`、`feedback_note` |
 | 5 | `bid_rule_configs` | 核查参数与自定义红线 | `tenant_id`、`name`、`price_cap`(Numeric 14,2)、`open_date`(Date)、`buyer_name`、`required_social_months_json`、`custom_redlines_json`、`is_default` |
-| 6 | `company_certificates` | 企业证照效期台账 | `tenant_id`、`cert_name`、`cert_no`、`valid_until`(Date)、`warn_days`(默认 30)、`remark` |
+| 6 | `company_certificates` | 企业证照效期台账 | `tenant_id`、`cert_name`、`cert_no`、`valid_until`(Date)、`warn_days`(默认 30)、`remark`、`attachment_name`、`attachment_path`、`attachment_size` |
 | 7 | `qa_sessions` | F7 追问会话持久化 | `tenant_id`、`user_id`、`task_id`(可空 FK)、`title`、`tender_path`、`bid_path`、`messages_json`、`attachments_json` |
 | 8 | `audit_logs` | 安全审计留痕 | `tenant_id`、`user_id`、`action`、`target`、`detail_json`、`ip` |
 | 9 | `user_model_configs` | 用户级自定义模型配置 | `user_id`(唯一 FK)、`base_url`、`api_key_encrypted`、`model_flash`、`model_flagship`、`supports_reasoning_effort`(bool)、`supports_vision`(bool) |
@@ -254,3 +260,5 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 | 2026-11-11 | E22 LLM 网关思考参数防御加固：`LLMClient` 新增 `translate_reasoning_effort(value)`，`_is_thinking_reject` 升级为组合条件识别，`_build_extra_body()` 强制隔离 `reasoning_effort_map`，`chat()` 与 `chat_stream()` 共用剥参重试与单实例内存熔断（`_mark_effort_unsupported`）；`bid_react_agent._resolve_effort_and_rounds(..., client=None)` 向后兼容新增可选 `client` 形参 | 实现侧 + 验收 |
 | 2026-11-12 | E23 开标日期全链路与工作区/工具修复：`core/tender_extractor.py` 新增通用 `extract_open_date_from_tender_text` / `extract_open_date_with_evidence` 并纳入 `build_review_checklist` 返回 `'open_date'` / `'open_date_source'` / `'open_date_quote'`；`core/tender_llm.py` 新增局部窗兜底 `extract_open_date_fallback_with_llm`（严格过 `verify_quote` + 日期一致性校验）与 `extract_tender_with_llm(..., *, open_date_fallback=False)`；`/api/extract`（`ExtractChecklistOut`）与 `/api/radar`（`RadarScanOut`）透出 `open_date` / `open_date_source` / `open_date_quote`；`POST /api/checks` 新增手填开标日严格 `YYYY-MM-DD` 日历校验（`HTTP 422 INVALID_OPEN_DATE`）；`backend/worker.py` 持久化 `open_date_source` 并在手填≠标书识别日时发出 `OPEN_DATE_MISMATCH` 预警；`core/bid_react_agent.py` 新增 `_coerce_action_input` 自动解包字符串化 JSON 并完善 `recalc_price` 缺失 `total_price` 校验提示 | 架构侧 + 验收 |
 | 2026-11-12 | E24 F7 多文件与图片附件问答：`core/parser.py` 新增 `parse_qa_attachment` 低门槛解析入口（取消 `OCR_MIN_CHARS` 报错，`.ocr.txt` 缓存，保留 `parse_document` 不变）；`core/llm_gateway.py` 新增 `encode_image_for_vlm`（PyMuPDF `Pixmap` 真实像素探测 + 缩放降字节）、`supports_vision` 传参/单实例拒图熔断（`_is_vision_reject` / `_strip_image_blocks` / `_mark_vision_unsupported`）及图像占位 token 估算；`backend/models.py` 扩展 `qa_sessions.attachments_json` 与 `user_model_configs.supports_vision` 及方言感知迁移守卫（含 SQLite PRAGMA 启动自动检测）；`backend/routers/qa.py` + `schemas.py` 新增 `/attachments` 上传删除与配额校验（20MB/10个/100MB/单轮≤4图/INVALID_ATTACHMENT_ID）、级联删盘、`QaAttachmentOut`/`QaAskRequest`/`QaQuoteOut` 扩展；`backend/routers/model_config.py` + `worker.py` 全链路透传 `supports_vision`；`core/bid_react_agent.py` 扩至 7 工具（新增 `search_attachment`）、仅当轮附 `image_url`、`_verify_and_locate_quotes` 附件强制溯源/纯图降级、`_parse_llm_json(strict=False)` 容错、禁吐工具 JSON 与 `after_offset` 续检 | 实现侧 + 验收 |
+| 2026-11-12 | E25 全链路工作流与台账运维补强：`backend/models.py` 为 `company_certificates` 新增 `attachment_name`/`attachment_path`/`attachment_size` 三列及 `ensure_company_certificates_columns` 方言迁移守卫；`backend/routers/deviation.py` 增加运行中任务 `409 CHECK_TASK_RUNNING` 拦截，`checks.py`/`worker.py` 重跑清理旧偏离表 sidecar；`radar.py` 新增 `POST /api/radar/{task_id}/rescan`；`qa.py` + `QaSessionOut` 新增 0-Token 上下文动态 `suggested_questions`；`regulations.py` 新增 `DELETE /api/regulations/articles/{article_id}`；`reports.py` 新增 `GET /api/reports/audit-logs/export`（UTF-8 BOM CSV + 公式注入转义）；`rules.py` 新增 `parse-file` OCR 预填与 `{cert_id}/attachment` 上传下载删除闭环 | 架构侧 + 验收 |
+| 2026-11-12 | E26 招标所需证照清单与台账联动：`core/tender_extractor.py` 新增 0-Token `extract_required_certificates` 并纳入 `build_review_checklist` 返回 `'required_certificates'`；`core/qualification_scanner.py` 新增 `match_required_certificates_with_ledger`；`backend/schemas.py` 新增 `MatchedLedgerCertOut`/`RequiredCertItemOut`/`CertLedgerSummaryOut` 并扩展 `ExtractChecklistOut`；`backend/routers/extract.py` 按当前租户查询 `CompanyCertificate` 执行四态对账并返回台账匹配汇总 | 架构侧 + 验收 |

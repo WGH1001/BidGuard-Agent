@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { extractApi, validateUploadFile } from '@/api'
@@ -7,16 +8,19 @@ import {
   formatPageOrOffset,
   type ExtractChecklistOut,
   type MarkedClauseItem,
+  type RequiredCertItemOut,
 } from '@/api/types'
 import { EXTRACT_CACHE_KEY, useAuthStore } from '@/stores/auth'
 
 defineOptions({ name: 'ExtractView' })
 
 const authStore = useAuthStore()
+const router = useRouter()
 
 const loading = ref(false)
-const activeTab = ref<'marked' | 'wording' | 'qual_comp' | 'scoring'>('marked')
+const activeTab = ref<'marked' | 'wording' | 'qual_comp' | 'scoring' | 'certs'>('marked')
 const kindFilter = ref<'ALL' | 'requirement' | 'non_req'>('ALL')
+const certFilter = ref<'ALL' | 'mandatory' | 'bonus' | 'gap'>('ALL')
 const result = ref<ExtractChecklistOut | null>(null)
 
 // E19：支持点击/拖拽多文件排队依次提取
@@ -361,6 +365,67 @@ function itemPage(item: unknown): number | null {
   return null
 }
 
+const requiredCertsList = computed<RequiredCertItemOut[]>(
+  () => result.value?.required_certificates || [],
+)
+
+const mandatoryCertCount = computed(
+  () => requiredCertsList.value.filter((c) => c.requirement_level === 'mandatory').length,
+)
+
+const bonusCertCount = computed(
+  () => requiredCertsList.value.filter((c) => c.requirement_level !== 'mandatory').length,
+)
+
+const gapCertCount = computed(
+  () => requiredCertsList.value.filter((c) => c.ledger_status !== 'valid').length,
+)
+
+const filteredRequiredCerts = computed<RequiredCertItemOut[]>(() => {
+  return requiredCertsList.value.filter((c) => {
+    if (certFilter.value === 'mandatory') return c.requirement_level === 'mandatory'
+    if (certFilter.value === 'bonus') return c.requirement_level !== 'mandatory'
+    if (certFilter.value === 'gap') return c.ledger_status !== 'valid'
+    return true
+  })
+})
+
+function certCategoryLabel(cat: string): string {
+  if (cat === 'enterprise_qualification') return '企业资质与主体证明'
+  if (cat === 'product_cert') return '产品与强制认证'
+  if (cat === 'staff_cert') return '人员证书与职称'
+  if (cat === 'bid_bond_or_ca') return '投标程序 / CA'
+  return cat
+}
+
+function ledgerStatusMeta(item: RequiredCertItemOut): { label: string; cls: string } {
+  const st = item.ledger_status
+  const mc = item.matched_cert
+  if (st === 'valid') {
+    return {
+      label: mc ? `台账有效 · 剩 ${mc.days_remaining} 天` : '台账有效',
+      cls: 'ok',
+    }
+  }
+  if (st === 'expiring_soon') {
+    return {
+      label: mc ? `临期预警 · 剩 ${mc.days_remaining} 天` : '临期预警',
+      cls: 'warning',
+    }
+  }
+  if (st === 'expired') {
+    return {
+      label: mc ? `台账已过期 ${Math.abs(mc.days_remaining)} 天` : '台账已过期',
+      cls: 'error',
+    }
+  }
+  return { label: '台账未收录', cls: 'neutral' }
+}
+
+function goCertLedger(): void {
+  void router.push({ path: '/rules', query: { tab: 'certs' } })
+}
+
 onMounted(() => {
   restoreFromSessionStorage()
   window.addEventListener('bidguard-auth-changed', handleAuthChanged)
@@ -543,6 +608,13 @@ onBeforeUnmount(() => {
             {{ result.scoring_tables.length + result.scoring_prose.length }} 项
           </span>
         </div>
+        <div>
+          <b>所需证照：</b>
+          <span class="sev-pill" :class="gapCertCount > 0 ? 'warning' : 'ok'">
+            {{ requiredCertsList.length }} 项
+          </span>
+          <span class="muted-note">（门槛 {{ mandatoryCertCount }} / 缺口或临期 {{ gapCertCount }}）</span>
+        </div>
       </div>
 
       <!-- 四张清单切换 Tabs -->
@@ -708,6 +780,86 @@ onBeforeUnmount(() => {
             </div>
 
             <el-empty v-else description="当前文档未包含结构化评分表格" />
+          </el-tab-pane>
+
+          <!-- Tab 5：E26 所需证照清单与企业台账自动对账 -->
+          <el-tab-pane
+            :label="`⑤ 所需证照与台账对账 (${requiredCertsList.length})`"
+            name="certs"
+          >
+            <div v-if="result.cert_ledger_summary" class="cert-summary-bar">
+              <div class="csb-metrics">
+                <span class="sev-pill error">门槛必交 {{ result.cert_ledger_summary.mandatory_count }}</span>
+                <span class="sev-pill info">评分加分 {{ result.cert_ledger_summary.bonus_count }}</span>
+                <span class="sev-pill ok">台账有效 {{ result.cert_ledger_summary.valid_count }}</span>
+                <span class="sev-pill warning">临期 {{ result.cert_ledger_summary.expiring_soon_count }}</span>
+                <span class="sev-pill error">已过期 {{ result.cert_ledger_summary.expired_count }}</span>
+                <span class="sev-pill neutral">未收录 {{ result.cert_ledger_summary.not_in_ledger_count }}</span>
+                <span class="cc-loc mono-num">
+                  效期参照日：{{ result.cert_ledger_summary.reference_date }}
+                  （{{ result.cert_ledger_summary.reference_date_source === 'open_date' ? '标书开标日' : '今日' }}）
+                </span>
+              </div>
+              <el-button size="small" type="primary" plain @click="goCertLedger">
+                去企业证照台账补录 →
+              </el-button>
+            </div>
+
+            <div class="tab-toolbar">
+              <span>筛选视图：</span>
+              <el-radio-group v-model="certFilter" size="small">
+                <el-radio-button value="ALL">全部 ({{ requiredCertsList.length }})</el-radio-button>
+                <el-radio-button value="mandatory">资格·废标门槛 ({{ mandatoryCertCount }})</el-radio-button>
+                <el-radio-button value="bonus">评分加分项 ({{ bonusCertCount }})</el-radio-button>
+                <el-radio-button value="gap">缺口与异常 ({{ gapCertCount }})</el-radio-button>
+              </el-radio-group>
+            </div>
+
+            <div v-if="filteredRequiredCerts.length > 0" class="clause-cards">
+              <div
+                v-for="(item, idx) in filteredRequiredCerts"
+                :key="`${item.cert_name}_${item.requirement_level}_${idx}`"
+                class="c-card"
+              >
+                <div class="cc-head">
+                  <span
+                    class="sev-pill"
+                    :class="item.requirement_level === 'mandatory' ? 'error' : 'info'"
+                  >
+                    {{ item.requirement_level === 'mandatory' ? '资格 / 废标门槛' : '评分加分 / 一般要求' }}
+                  </span>
+                  <span class="sev-pill neutral">{{ certCategoryLabel(item.category) }}</span>
+                  <span class="cc-no">{{ item.cert_name }}</span>
+                  <span class="sev-pill" :class="ledgerStatusMeta(item).cls">
+                    {{ ledgerStatusMeta(item).label }}
+                  </span>
+                  <span class="cc-loc mono-num">
+                    来源：{{ item.source_section }} ·
+                    {{ formatPageOrOffset(item.page ?? null, item.offset ?? undefined) }}
+                  </span>
+                  <span v-if="item.quote_verified" class="verified-badge">✓ 原文溯源通过</span>
+                </div>
+
+                <div class="cc-body">{{ item.quote }}</div>
+
+                <div v-if="item.matched_cert" class="cert-match-foot">
+                  <b>匹配台账证照：</b>
+                  <span>{{ item.matched_cert.cert_name }}</span>
+                  <span v-if="item.matched_cert.cert_no" class="mono-num">
+                    （编号：{{ item.matched_cert.cert_no }}）
+                  </span>
+                  <span class="mono-num">有效期至 {{ item.matched_cert.valid_until }}</span>
+                  <span v-if="item.matched_cert.has_attachment" class="sev-pill ok">
+                    已留档原件{{ item.matched_cert.attachment_name ? `：${item.matched_cert.attachment_name}` : '' }}
+                  </span>
+                  <span v-if="item.matched_count > 1" class="muted-note">
+                    （共匹配台账 {{ item.matched_count }} 条同类证照，已择优展示）
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <el-empty v-else description="当前筛选条件下暂无所需证照记录" />
           </el-tab-pane>
         </el-tabs>
       </div>
@@ -1073,4 +1225,37 @@ onBeforeUnmount(() => {
   color: var(--txt-strong);
   margin-bottom: 10px;
 }
+
+.cert-summary-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-line);
+  margin-bottom: 12px;
+}
+
+.csb-metrics {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cert-match-foot {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-line);
+  font-size: 12px;
+  color: var(--txt-sec);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 </style>
+

@@ -66,6 +66,7 @@ _USAGE_NOTE_RE = re.compile(
     r'|每有一项不满足扣'                       # 扣分规则：标"▲"项每有一项不满足扣0.5分
     r'|项加\d+分'                              # 加分规则：每1个"▲"项加2分
     r'|未标\s*[“"]?\s*[★▲]\s*[”"]?\s*的'      # 一般参数说明：未标"▲"的为一般参数
+    r'|中星号\s*[“"]?\s*[★▲]\s*[”"]?\s*指标'   # 标记说明：采购需求中星号"★"指标和要求（北交大 2026-11-12 新增）
 )
 
 # 表格行标记碎片（kind=table_marker，2026-11-04 用户终审芜湖实测定案）：
@@ -81,8 +82,14 @@ _FRAGMENT_WORD_BLACKLIST = frozenset({'值回'})
 
 
 def _is_meaningless_short_fragment(merged_text: str) -> bool:
-    """E3 §2.3：判断是否为单字/双字无动宾语义的表格断行残词（如 '▲值回'）。
-    若命中则降级为 usage_note（不进 requirement 清单，同时保持 ★/▲ 符号总数守恒）。
+    """判断是否为无动宾语义的表格断行残词。若命中则降级为 usage_note
+    （不进 requirement 清单，同时保持 ★/▲ 符号总数守恒）。
+
+    2026-11-12 修订：移除"剥离标记后 ≤2 纯汉字即判碎片"的硬判分支。
+    依据 GT 人工终审口径（README 滁州物业 14 条维持 requirement）：
+    滁州物业功能表中 '▲制单'/'▲查询' 为真功能项（行内有"须提供功能页面
+    截图"佐证），与真功能项语法同构的残词一律不硬判、留人工定稿。
+    全 13 份语料实测该分支仅命中这 2 行且均与 GT 相悖，砍掉即零回归。
     """
     stripped = re.sub(r'[★▲\s]+', '', merged_text or '')
     if not stripped:
@@ -92,9 +99,6 @@ def _is_meaningless_short_fragment(merged_text: str) -> bool:
     # 若含编号、括号、数字、标点，说明是带结构短要求（如 "（1）常规制片"），绝不判定为碎片
     if re.search(r'[0-9（()）、.．：:，,。；;≥≤%]', stripped):
         return False
-    # 剥离标记后仅 1~2 个纯汉字的孤立残片（如 "值回"），无完整动宾或技术指标语义
-    if len(stripped) <= 2:
-        return True
     return False
 
 
@@ -463,8 +467,388 @@ def locate_keyword_sections(text: str, keywords: tuple[str, ...],
     return hits
 
 
+# ── E26：招标所需证照清单 0-Token 确定性提取（资格门槛 + 强制产品 + 评分资质/人员）──
+_CERT_RULES: tuple[tuple[str, str, str, re.Pattern[str]], ...] = tuple(
+    (
+        name,
+        category,
+        default_level,
+        re.compile(pattern, re.IGNORECASE),
+    )
+    for name, category, default_level, pattern in (
+        ('营业执照 / 法人身份证明', 'enterprise_qualification', 'mandatory',
+         r'(?:企业)?营业执照|三证合一|多证合一|事业单位法人证书|社会团体法人登记证书'),
+        ('财务状况报告 / 审计报告', 'enterprise_qualification', 'mandatory',
+         r'财务状况报告|财务审计报告|经审计的财务报告|会计师事务所出具的财务'),
+        ('依法缴纳税收证明', 'enterprise_qualification', 'mandatory',
+         r'依法缴纳税收(?:和|及)?|纳税证明|完税证明|税务缴纳凭证'),
+        ('社会保障资金缴纳证明', 'enterprise_qualification', 'mandatory',
+         r'社会保障资金(?:的)?(?:相关)?证明|依法缴纳.{0,6}社保|社保证明|社保缴纳证明'),
+        ('信用承诺函', 'enterprise_qualification', 'mandatory',
+         r'《?信用承诺函》?|基本信用信息承诺书|守信承诺书'),
+        ('法定代表人身份证明书', 'enterprise_qualification', 'mandatory',
+         r'法定代表人身份证明(?:书)?'),
+        ('法定代表人授权委托书', 'enterprise_qualification', 'mandatory',
+         r'法定代表人授权委托书|法人授权委托书|授权委托书'),
+        ('基本账户开户证明 / 保证金凭证', 'enterprise_qualification', 'mandatory',
+         r'基本存款?账户?开户许可证|基本账户信息|投标保证金缴纳证明|电子保函'),
+        ('中小企业声明函', 'enterprise_qualification', 'mandatory',
+         r'《?中小企业声明函》?'),
+        ('ISO 9001 质量管理体系认证', 'enterprise_qualification', 'bonus',
+         r'ISO\s*9001|GB/T\s*19001|质量管理体系认证(?:证书)?'),
+        ('ISO 14001 环境管理体系认证', 'enterprise_qualification', 'bonus',
+         r'ISO\s*14001|GB/T\s*24001|环境管理体系认证(?:证书)?'),
+        ('ISO 45001 职业健康安全管理体系认证', 'enterprise_qualification', 'bonus',
+         r'ISO\s*45001|OHSAS\s*18001|职业健康安全管理体系认证(?:证书)?'),
+        ('ISO/IEC 27001 信息安全管理体系认证', 'enterprise_qualification', 'bonus',
+         r'ISO(?:/IEC)?\s*27001|信息安全管理体系认证(?:证书)?'),
+        ('ISO/IEC 20000 信息技术服务管理体系认证', 'enterprise_qualification', 'bonus',
+         r'ISO(?:/IEC)?\s*20000|信息技术服务管理体系认证(?:证书)?'),
+        ('CMMI 软件能力成熟度认证', 'enterprise_qualification', 'bonus',
+         r'CMMI\s*[345]?级?(?:及以上)?(?:资质)?(?:认证)?证书?'),
+        ('ITSS 信息技术服务标准认证', 'enterprise_qualification', 'bonus',
+         r'ITSS\s*(?:运维|咨询|设计)?(?:[一二三四]级)?(?:符合性)?(?:认证|资质)?证书?'),
+        ('CS 信息系统建设和服务能力等级', 'enterprise_qualification', 'bonus',
+         r'信息系统建设和服务能力(?:评估|等级)?[（(]?CS\d?[)）]?|CS[1-5]级?(?:及以上)?证书'),
+        ('信息安全服务资质（CCRC）', 'enterprise_qualification', 'bonus',
+         r'信息安全服务资质(?:认证)?|CCRC'),
+        ('高新技术企业证书', 'enterprise_qualification', 'bonus',
+         r'高新技术企业(?:认定)?证书'),
+        ('软件著作权登记证书（软著）', 'enterprise_qualification', 'bonus',
+         r'(?:计算机)?软件著作权(?:登记)?证书|自研软件著作权证书|软著证书'),
+        ('专利证书（发明 / 实用新型）', 'enterprise_qualification', 'bonus',
+         r'(?:发明|实用新型)专利证书'),
+        ('涉密信息系统集成资质', 'enterprise_qualification', 'mandatory',
+         r'涉密信息系统集成资质'),
+        ('电子与智能化工程专业承包资质', 'enterprise_qualification', 'mandatory',
+         r'电子与智能化工程专业承包.{0,8}资质'),
+        ('安防工程设计施工维护能力证书', 'enterprise_qualification', 'mandatory',
+         r'安防工程(?:企业)?(?:设计施工维护能力)?(?:资质|证书)'),
+        ('节能产品认证证书', 'product_cert', 'mandatory',
+         r'节能产品认证证书|国家确定的认证机构出具的.{0,24}节能产品认证证书'),
+        ('环境标志产品认证证书', 'product_cert', 'bonus',
+         r'环境标志产品认证证书|中国环境标志(?:产品)?认证证书?'),
+        ('国家强制性产品认证（3C / CCC）', 'product_cert', 'mandatory',
+         r'(?:国家)?强制性产品认证(?:证书)?|3C\s*认证|CCC\s*认证'),
+        ('信创互认 / 兼容性测试证书', 'product_cert', 'bonus',
+         r'信息技术应用创新符合性测试|互认证书|兼容性(?:测试|认证)证书|适配(?:证明|认证)证书'),
+        ('电信设备进网许可证', 'product_cert', 'mandatory',
+         r'电信设备进网许可证'),
+        ('医疗器械注册 / 经营许可证', 'product_cert', 'mandatory',
+         r'医疗器械(?:注册证|生产许可证|经营许可证)'),
+        ('信息系统项目管理师证书', 'staff_cert', 'bonus',
+         r'信息系统项目管理师(?:证书)?'),
+        ('系统集成项目管理工程师证书', 'staff_cert', 'bonus',
+         r'系统集成项目管理工程师(?:证书)?'),
+        ('系统架构设计师证书', 'staff_cert', 'bonus',
+         r'系统架构设计师(?:证书)?'),
+        ('系统规划与管理师证书', 'staff_cert', 'bonus',
+         r'系统规划与管理师(?:（高级）|\(高级\))?(?:证书)?'),
+        ('系统分析师证书', 'staff_cert', 'bonus',
+         r'系统分析师(?:证书)?'),
+        ('网络规划设计师证书', 'staff_cert', 'bonus',
+         r'网络规划设计师(?:证书)?'),
+        ('软件设计师证书', 'staff_cert', 'bonus',
+         r'(?:高级|中级及以上|中级)?软件设计师(?:证书)?'),
+        ('软件评测师证书', 'staff_cert', 'bonus',
+         r'软件评测师(?:（中级）及以上|\(中级\)及以上)?(?:证书)?'),
+        ('网络工程师证书', 'staff_cert', 'bonus',
+         r'网络工程师(?:证书)?'),
+        ('数据库系统工程师证书', 'staff_cert', 'bonus',
+         r'数据库系统工程师(?:证书)?'),
+        ('信息安全工程师 / CISP 证书', 'staff_cert', 'bonus',
+         r'(?:高级)?网络与信息安全工程师(?:证书)?|信息安全工程师(?:证书)?|\bCISP\b'),
+        ('工程 / 人工智能职称证书', 'staff_cert', 'bonus',
+         r'(?:高级|中级及以上)工程师(?:职称)?证书|人工智能应用工程师(?:证书)?'),
+        ('注册建造师证书', 'staff_cert', 'bonus',
+         r'[一二]级注册?建造师(?:证书)?'),
+        ('CA 数字证书与电子签章', 'bid_bond_or_ca', 'mandatory',
+         r'CA\s*数字证书|数字证书及电子签章'),
+        ('开标人员身份证原件', 'bid_bond_or_ca', 'mandatory',
+         r'(?:法定代表人|委托代理人).{0,16}身份证[（(]原件[)）]'),
+    )
+)
+
+_GLOBAL_CERT_ANCHOR_RE = re.compile(
+    r'(?:企业)?营业执照|财务状况报告|财务审计报告|依法缴纳税收|社会保障资金|《?信用承诺函》?'
+    r'|法定代表人身份证明|法定代表人授权委托书|《?中小企业声明函》?'
+    r'|节能产品认证证书|环境标志产品认证证书|强制性产品认证|3C\s*认证|CCC\s*认证'
+    r'|CA\s*数字证书|数字证书及电子签章|涉密信息系统集成资质|电信设备进网许可证|医疗器械(?:注册证|生产许可证|经营许可证)'
+    r'|ISO(?:/IEC)?\s*(?:9001|14001|45001|27001|20000)|CMMI|ITSS|软件著作权|信息系统项目管理师|系统集成项目管理工程师',
+    re.IGNORECASE,
+)
+
+_CERT_EXEMPT_RE = re.compile(
+    r'无需提供(?:证明材料|相关证明|任何证明)?'
+    r'|不(?:需要|必)提供(?:证明材料)?'
+    r'|特定资格要求[：:]\s*无\b'
+    r'|资格要求[：:]\s*无\b'
+    r'|不作为资格审查依据'
+    r'|目录\.{3,}'
+)
+
+_CERT_MANDATORY_CUE_RE = re.compile(
+    r'必须|须提供|应当提供|应提供|不得偏离|无效投标|投标无效|废标|否决|一票否决'
+    r'|政府强制采购|强制采购|只能选择|缺一不可|资格(?:性)?审查|符合性(?:审查|检查)'
+)
+
+_CERT_SCORE_CUE_RE = re.compile(
+    r'每提供\s*\d+|得\s*\d+(?:\.\d+)?\s*分|加\s*\d+(?:\.\d+)?\s*分|满分\s*\d+|最高(?:得)?\s*\d+(?:\.\d+)?\s*分|扣\s*\d+'
+)
+
+
+def _sentence_window_in_text(text: str, pos: int, span_end: int) -> tuple[int, int, str]:
+    """按换行或句末标点截出完整且紧凑的原文片段，保证 text[lo:hi] 原文连续可溯源。"""
+    n = len(text)
+    lo = pos
+    while lo > 0 and text[lo - 1] not in '\n。；;!！':
+        if pos - lo >= 120:
+            break
+        lo -= 1
+    hi = span_end
+    while hi < n and text[hi] not in '\n。；;!！':
+        if hi - lo >= 220:
+            break
+        hi += 1
+    if hi < n and text[hi] in '。；;':
+        hi += 1
+    while lo < hi and text[lo].isspace():
+        lo += 1
+    while hi > lo and text[hi - 1].isspace():
+        hi -= 1
+    return lo, hi, text[lo:hi]
+
+
+def _is_toc_line(segment: str) -> bool:
+    return bool(re.search(r'[…·\.]{4,}\s*\d+\s*$', segment or ''))
+
+
+def extract_required_certificates(
+    text: str,
+    *,
+    qualification_hits: Optional[list[dict]] = None,
+    compliance_hits: Optional[list[dict]] = None,
+    marked_clauses: Optional[list[dict]] = None,
+    invalid_bid_clauses: Optional[list[dict]] = None,
+    scoring_tables: Optional[list[dict]] = None,
+    scoring_prose: Optional[list[dict]] = None,
+    page_ctx: Any = None,
+) -> list[dict[str, Any]]:
+    """0-Token 确定性提取招标文件要求投标人提供的全部证照/资质/人员证书清单。
+
+    严格遵守：
+    - 每条必附原文 quote、verify_quote() 核验标志、offset 与双轨页码；
+    - 显式拦截"投标文件中无需提供证明材料"与目录点线误报；
+    - 区分 'mandatory'（资格/符合性/废标红线/强制产品）与 'bonus'（评分加分/非废标响应）。
+    """
+    from core.quote_verifier import verify_quote
+    from core.response_checker import resolve_unified_page
+
+    text = text or ''
+    if not text.strip() and not scoring_tables and not scoring_prose:
+        return []
+
+    def _resolve_page(off: Optional[int]) -> Optional[int]:
+        if off is None or page_ctx is None:
+            return None
+        return resolve_unified_page(off, page_ctx)[0]
+
+    def _locate_in_text(snippet: str) -> Optional[int]:
+        clean = (snippet or '').strip()
+        if not clean or not text:
+            return None
+        for cand in (clean, clean[:60], clean[:30], clean[:18]):
+            cand = cand.strip()
+            if len(cand) < 4:
+                continue
+            idx = text.find(cand)
+            if idx >= 0:
+                return idx
+        return None
+
+    # 定位评标章起点，避免资格/符合性 2600 字切片跨章渗入评分细则表
+    eval_start = None
+    eval_ch_list = [ch for ch in locate_chapters(text) if any(k in ch['title'] for k in _EVAL_CHAPTER_KEYS)]
+    if eval_ch_list:
+        real_eval = [
+            ch for ch in eval_ch_list
+            if '…' not in ch['title'] and not re.search(r'[.·\t]*\d+\s*$', ch['title'])
+        ]
+        eval_start = (real_eval[-1] if real_eval else eval_ch_list[-1]).get('start')
+
+    # 待扫片段列表：(section_label, level_hint, chunk_text, base_offset, score_hint, force_product_note)
+    regions: list[tuple[str, str, str, int, Optional[str], bool]] = []
+
+    for h in qualification_hits or []:
+        s = int(h.get('start') or 0)
+        hi_limit = s + 2600
+        if eval_start is not None and eval_start > s:
+            hi_limit = min(hi_limit, eval_start)
+        end = min(len(text), hi_limit) if text else s + len(h.get('excerpt') or '')
+        seg = text[s:end] if text else str(h.get('excerpt') or '')
+        regions.append(('资格审查', 'mandatory', seg, s, None, False))
+
+    for h in compliance_hits or []:
+        s = int(h.get('start') or 0)
+        hi_limit = s + 2000
+        if eval_start is not None and eval_start > s:
+            hi_limit = min(hi_limit, eval_start)
+        end = min(len(text), hi_limit) if text else s + len(h.get('excerpt') or '')
+        seg = text[s:end] if text else str(h.get('excerpt') or '')
+        regions.append(('符合性审查', 'mandatory', seg, s, None, False))
+
+    for mc in invalid_bid_clauses or []:
+        s = int(mc.get('start') or 0)
+        seg = str(mc.get('full_text') or mc.get('text') or '')
+        regions.append(('无效投标条款', 'mandatory', seg, s, None, False))
+
+    for mc in marked_clauses or []:
+        kind = mc.get('kind', 'requirement')
+        s = int(mc.get('start') or 0)
+        seg = str(mc.get('full_text') or mc.get('text') or '')
+        if kind == 'table_marker':
+            continue
+        if kind == 'usage_note':
+            # 例外：如第七十七条节能清单说明虽然在★计数口径属于 usage_note，但其文本明确要求节能/环境/3C证书
+            regions.append(('★/▲强制采购条款', 'mandatory', seg, s, None, True))
+        else:
+            lvl = 'mandatory' if mc.get('mark') == '★' else 'bonus'
+            regions.append(('★/▲强制条款', lvl, seg, s, None, False))
+
+    for st in scoring_tables or []:
+        factor = str(st.get('factor') or '').strip()
+        detail = str(st.get('detail') or '').strip()
+        score_hint = str(st.get('score') or '').strip() or None
+        combined = f'{factor}：{detail}' if (factor and detail) else (detail or factor)
+        if combined:
+            off = _locate_in_text(detail or factor)
+            regions.append(('评分细则表', 'bonus', combined, off if off is not None else -1, score_hint, False))
+
+    for sp in scoring_prose or []:
+        factor = str(sp.get('factor') or '').strip()
+        detail = str(sp.get('detail') or sp.get('detail_raw') or '').strip()
+        score_hint = str(sp.get('score') or '').strip() or None
+        combined = f'{factor}：{detail}' if (factor and detail) else (detail or factor)
+        if combined:
+            off = _locate_in_text(detail or factor)
+            regions.append(('评分细则正文', 'bonus', combined, off if off is not None else -1, score_hint, False))
+
+    # 全文轻量兜底窗（捕获未落入 2600 字截断区段的营业执照/CA数字证书/节能产品证书/ISO等）
+    seen_windows: set[tuple[int, int]] = set()
+    for m in _GLOBAL_CERT_ANCHOR_RE.finditer(text):
+        lo, hi, seg = _sentence_window_in_text(text, m.start(), m.end())
+        if (lo, hi) in seen_windows or _is_toc_line(seg):
+            continue
+        seen_windows.add((lo, hi))
+        in_eval = eval_start is not None and m.start() >= eval_start
+        default_lvl = 'bonus' if in_eval else 'fallback'
+        sec_lbl = '评标/评分条款' if in_eval else '招标正文要求'
+        regions.append((sec_lbl, default_lvl, seg, lo, None, False))
+
+    dedup: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def _scan_region(
+        sec_lbl: str,
+        level_hint: str,
+        seg: str,
+        base_off: int,
+        score_hint: Optional[str],
+        only_product_rules: bool,
+    ) -> None:
+        if not seg or _is_toc_line(seg):
+            return
+        for cert_name, category, default_level, pat in _CERT_RULES:
+            if only_product_rules and category != 'product_cert':
+                continue
+            for m in pat.finditer(seg):
+                # 仅以命中所处单行/单句作为免交护栏和引用边界，避免整段误杀或跨句污染
+                if base_off >= 0 and text:
+                    abs_pos = min(len(text) - 1, base_off + m.start())
+                    abs_end = min(len(text), base_off + m.end())
+                    q_lo, q_hi, quote_raw = _sentence_window_in_text(text, abs_pos, abs_end)
+                    actual_offset: Optional[int] = q_lo
+                else:
+                    s_lo, s_hi, quote_raw = _sentence_window_in_text(seg, m.start(), m.end())
+                    found_off = _locate_in_text(quote_raw)
+                    actual_offset = found_off
+                    if found_off is not None and text:
+                        q_lo, q_hi, quote_raw = _sentence_window_in_text(
+                            text, found_off, min(len(text), found_off + max(1, s_hi - s_lo)),
+                        )
+                        actual_offset = q_lo
+
+                if not quote_raw or _is_toc_line(quote_raw):
+                    continue
+                if _CERT_EXEMPT_RE.search(quote_raw) and not re.search(
+                    r'(?:成立|注册|开业|运营)(?:不满|不足|未满)', quote_raw
+                ):
+                    continue
+
+                # 计算最终门槛等级：先识别纯加分评分句（如"具有...得3分"），避免资格切片尾部表格串判；
+                # 其余按所属区段与强制句式判定 mandatory / bonus
+                effective_sec = sec_lbl
+                if _CERT_SCORE_CUE_RE.search(quote_raw) and not _CERT_MANDATORY_CUE_RE.search(quote_raw):
+                    req_level = 'bonus'
+                    if effective_sec in ('资格审查', '符合性审查'):
+                        effective_sec = '评分细则'
+                elif sec_lbl in ('评分细则表', '评分细则正文'):
+                    req_level = 'bonus'
+                elif sec_lbl in ('资格审查', '符合性审查', '无效投标条款', '★/▲强制采购条款'):
+                    req_level = 'mandatory'
+                elif _CERT_MANDATORY_CUE_RE.search(quote_raw):
+                    req_level = 'mandatory'
+                else:
+                    req_level = level_hint if level_hint in ('mandatory', 'bonus') else default_level
+
+                verified = verify_quote(quote_raw, text) if text else False
+                page = _resolve_page(actual_offset)
+
+                key = (cert_name, req_level)
+                existing = dedup.get(key)
+                if existing is not None:
+                    # 若原有未拿到页码/高优先级来源而新命中更好，则替换
+                    better_src = (
+                        (not existing.get('quote_verified') and verified)
+                        or (existing.get('page') is None and page is not None)
+                        or (existing.get('source_section') in ('招标正文要求', '评标/评分条款')
+                            and effective_sec in ('资格审查', '符合性审查', '评分细则表'))
+                    )
+                    if not better_src:
+                        continue
+
+                dedup[key] = {
+                    'cert_name': cert_name,
+                    'category': category,
+                    'requirement_level': req_level,
+                    'source_section': effective_sec,
+                    'quote': quote_raw,
+                    'quote_verified': verified,
+                    'offset': actual_offset,
+                    'page': page,
+                    'score_hint': score_hint,
+                }
+
+    for reg in regions:
+        _scan_region(*reg)
+
+    # 若同一证书已在 mandatory 中捕获，过滤尾部"投标文件格式/评标正文"全局锚点重出的冗余 bonus 副本
+    mandatory_names = {c for c, lvl in dedup if lvl == 'mandatory'}
+    items = [
+        v for (c, lvl), v in dedup.items()
+        if not (lvl == 'bonus' and c in mandatory_names and v.get('source_section') == '评标/评分条款')
+    ]
+    items.sort(
+        key=lambda x: (
+            0 if x['requirement_level'] == 'mandatory' else 1,
+            x['offset'] if x['offset'] is not None else 10**9,
+            x['cert_name'],
+        )
+    )
+    return items
+
+
 def build_review_checklist(file_path: str) -> dict:
-    """对一份招标文件跑确定性层全流程，汇总四类候选并附带双轨页码（PDF 印刷/物理页码 + docx 估算页码）。"""
+    """对一份招标文件跑确定性层全流程，汇总四类候选及 E26 所需证照清单并附带双轨页码。"""
     from core.response_checker import build_unified_page_context, resolve_unified_page
 
     doc = load_document(file_path)
@@ -483,6 +867,20 @@ def build_review_checklist(file_path: str) -> dict:
             if '…' not in ch['title'] and not re.search(r'[.·\t]*\d+\s*$', ch['title'])]
     eval_chapter = real[-1] if real else (eval_candidates[-1] if eval_candidates else None)
     open_date_ev = extract_open_date_with_evidence(text)
+    marked_clauses = _attach_pages(extract_marked_clauses(text))
+    invalid_bid_clauses = _attach_pages(extract_invalid_bid_clauses(text))
+    qualification_hits = _attach_pages(locate_keyword_sections(text, _QUALIFY_KEYS))
+    compliance_hits = _attach_pages(locate_keyword_sections(text, _COMPLIANCE_KEYS))
+    scoring_tables = extract_scoring_tables(file_path)
+    required_certificates = extract_required_certificates(
+        text,
+        qualification_hits=qualification_hits,
+        compliance_hits=compliance_hits,
+        marked_clauses=marked_clauses,
+        invalid_bid_clauses=invalid_bid_clauses,
+        scoring_tables=scoring_tables,
+        page_ctx=page_ctx,
+    )
     return {
         'file': file_path,
         'source_type': doc.source_type,
@@ -492,13 +890,14 @@ def build_review_checklist(file_path: str) -> dict:
         'open_date_source': 'tender_extracted' if open_date_ev else None,
         'open_date_quote': open_date_ev['quote'] if open_date_ev else None,
         'chapters': chapters,
-        'marked_clauses': _attach_pages(extract_marked_clauses(text)),
-        'invalid_bid_clauses': _attach_pages(extract_invalid_bid_clauses(text)),
-        'qualification_hits': _attach_pages(locate_keyword_sections(text, _QUALIFY_KEYS)),
-        'compliance_hits': _attach_pages(locate_keyword_sections(text, _COMPLIANCE_KEYS)),
+        'marked_clauses': marked_clauses,
+        'invalid_bid_clauses': invalid_bid_clauses,
+        'qualification_hits': qualification_hits,
+        'compliance_hits': compliance_hits,
         'eval_chapter': eval_chapter,
         'scoring_hits': _attach_pages(locate_keyword_sections(text, ('评分细则', '评分标准', '评分办法'))),
-        'scoring_tables': extract_scoring_tables(file_path),
+        'scoring_tables': scoring_tables,
+        'required_certificates': required_certificates,
     }
 
 

@@ -15,9 +15,13 @@ from sqlalchemy.orm import Session
 
 from backend.auth import AuthUser, get_current_user, record_audit
 from backend.database import get_db
+from backend.models import CompanyCertificate
 from backend.schemas import ExtractChecklistOut
 from backend.worker import resolve_effective_llm_client
-from core.tender_extractor import build_review_checklist
+from core.parser import parse_document
+from core.qualification_scanner import match_required_certificates_with_ledger
+from core.response_checker import build_unified_page_context
+from core.tender_extractor import build_review_checklist, extract_required_certificates
 from core.tender_llm import extract_scoring_with_llm, extract_tender_with_llm
 
 router = APIRouter(prefix='/api/extract', tags=['extract'])
@@ -81,6 +85,42 @@ def extract_tender_checklists(
         invalid_list = list(res.get('invalid_bid_clauses') or [])
         qual_list = list(res.get('qualification_hits') or [])
         comp_list = list(res.get('compliance_hits') or [])
+        req_certs_raw = list(res.get('required_certificates') or [])
+        if scoring_prose:
+            parsed_prose_doc = parse_document(str(tmp_path))
+            prose_certs = extract_required_certificates(
+                parsed_prose_doc.text,
+                scoring_prose=scoring_prose,
+                page_ctx=build_unified_page_context(str(tmp_path)),
+            )
+            seen_cert_keys = {
+                (c.get('cert_name'), c.get('requirement_level'))
+                for c in req_certs_raw
+            }
+            for pc in prose_certs:
+                k = (pc.get('cert_name'), pc.get('requirement_level'))
+                if k not in seen_cert_keys:
+                    seen_cert_keys.add(k)
+                    req_certs_raw.append(pc)
+            req_certs_raw.sort(
+                key=lambda x: (
+                    0 if x.get('requirement_level') == 'mandatory' else 1,
+                    x.get('offset') if x.get('offset') is not None else 10**9,
+                    str(x.get('cert_name') or ''),
+                )
+            )
+
+        ledger_rows = (
+            db.query(CompanyCertificate)
+            .filter(CompanyCertificate.tenant_id == current_user.tenant_id)
+            .order_by(CompanyCertificate.id.asc())
+            .all()
+        )
+        matched_certs, cert_summary = match_required_certificates_with_ledger(
+            req_certs_raw,
+            ledger_rows,
+            reference_date=res.get('open_date'),
+        )
 
         record_audit(
             db,
@@ -92,6 +132,7 @@ def extract_tender_checklists(
                 'llm_status': llm_status,
                 'marked_count': len(marked_list),
                 'invalid_count': len(invalid_list),
+                'required_certs_count': len(matched_certs),
                 'total_extracted': len(marked_list) + len(invalid_list) + len(qual_list) + len(comp_list),
             },
         )
@@ -114,6 +155,8 @@ def extract_tender_checklists(
             scoring_tables=list(res.get('scoring_tables') or []),
             scoring_prose=scoring_prose,
             llm_structured=llm_structured,
+            required_certificates=matched_certs,
+            cert_ledger_summary=cert_summary,
         )
     finally:
         tmp_path.unlink(missing_ok=True)
