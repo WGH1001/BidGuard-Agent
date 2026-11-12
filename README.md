@@ -2,7 +2,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Version-v1.0.0-blue?style=flat-square" alt="Version" />
-  <img src="https://img.shields.io/badge/Tests-131%20Passed-success?style=flat-square&logo=pytest" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-227%20Passed-success?style=flat-square&logo=pytest" alt="Tests" />
   <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python" />
   <img src="https://img.shields.io/badge/FastAPI-0.115+-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Vue-3.5-4FC08D?style=flat-square&logo=vuedotjs&logoColor=white" alt="Vue3" />
@@ -11,9 +11,9 @@
 </p>
 
 > **卖方投标团队的「封标前最后一道安全锁 + 投前控标雷达」**
-> 上传甲方招标文件与我方投标书正本，几分钟内完成全量废标项体检（资格/符合性/`★▲` 强制条款/报价算术/证照效期/串名穿帮/前后承诺矛盾），在投标书原位标红批注（附 PDF 总览跳转页），并一键生成带真实页码的《技术与商务偏离表.docx》；同时支持立项前扫描排他性控标参数、权威法规库法条三态真伪核验与标书专家多轮追问。
+> 上传甲方招标文件与我方投标书正本，几分钟内完成全量废标项体检（资格/符合性/`★▲` 强制条款/报价算术/证照效期/串名穿帮/前后承诺矛盾），在投标书原位标红批注（附 PDF 总览跳转页），并一键生成带真实页码的《技术与商务偏离表.docx》；同时支持立项前扫描排他性控标参数、权威法规库法条三态真伪核验、标书专家多轮追问及招标文件所需证照清单自动提取与企业台账对账。
 
-**V1.0.0 · 131 项全链路自动化测试全绿 · Docker 四容器生产部署（Nginx 入口 80 + app + PostgreSQL 16 + Redis 7）· 0-Token 确定性沙盒双轨引擎**
+**V1.0.0 · 227 项全链路自动化测试全绿 · Docker 四容器生产部署（Nginx 入口 80 + app + PostgreSQL 16 + Redis 7）· 0-Token 确定性沙盒双轨引擎**
 
 ---
 
@@ -33,15 +33,16 @@
 | 能力模块 | 名称 | 核心能力与技术实现 |
 | :--- | :--- | :--- |
 | 📊 **大盘态势** | **防废标体检总览** | 实时聚合部门在途项目、拦截一票否决硬伤数、已生成偏离表数、`★/▲` 召回率、企业证照临期预警与截标倒计时看板（ECharts 动态可视化）。 |
-| 🚩 **F1** | **招标红线与 `★/▲` 提取器** | 100% 确定性抽取 `★/▲` 强制条款（自动区分 `requirement` 实质要求 / `usage_note` 说明语 / `table_marker` 表格碎片）、无标记废标措辞（模式 A/B）、资格与符合性审查项、表格型与段落型评分细则（含 100 分守恒校验）。 |
+| 🚩 **F1** | **招标红线与 `★/▲` 提取器** | 100% 确定性抽取 `★/▲` 强制条款（自动区分 `requirement` 实质要求 / `usage_note` 说明语 / `table_marker` 表格碎片）、无标记废标措辞（模式 A/B）、资格与符合性审查项、表格型与段落型评分细则（含 100 分守恒校验）；**E23/E26 升级**：集成标书开标日期通用精准提取 + **招标所需证照清单 0-Token 确定性提取**（四大类分类、门槛/加分分层、逐条 `verify_quote` 溯源与免交护栏）。 |
 | 💰 **F2** | **报价算术与大小写沙盒** | **100% 确定性 Python（0 Token）**：全程 `Decimal`（`ROUND_HALF_UP` 量化 `0.01` 元，严禁 `float`），自动识别开标一览表、多明细表小计聚合与分项汇总表，校验 `单价 × 数量 = 合价`、大小写金额一致性及是否突破最高投标限价（差 1 分钱必报警）；复杂版式自动触发 `NEED_MANUAL` 人工回填弹窗。 |
-| 📜 **F3** | **证照效期与串名穿帮扫描** | **100% 确定性 Python（0 Token）**：对比项目开标日核查标书内证照有效期、社保缴纳月份连续区间、跨项目采购人串名自伤、`XXX/待填` 占位符残留及部门自定义禁用红线词；联动 Word 内嵌图片离线 RapidOCR 识别。 |
-| 🔍 **F4** | **`★/▲` 双书勾稽与自洽核验** | 四阶段条款对齐底座（`bid_aligner`）+ **三级自适应混合检索门控**（条款号/标题直通 → 45 组招投标同义词扩展 + BM25 → 向量语义精排）+ `MISSING_EVIDENCE` 截图/证明材料探针 + 标书内部质保期/工期前后承诺矛盾扫描。 |
-| 📑 **F5** | **标准 Word 偏离表一键生成** | 严格消费 F4 逐条勾稽结果（同序对位、零二次篡改），一键生成符合政采规范的六列《技术与商务偏离表.docx》，支持 PDF 真实页码与 Word 双轨页码（印刷页码 / 物理页估算 / `@字符偏移` 诚实回退），负偏离与漏应答行自动红色加粗高亮。 |
-| 📡 **F6** | **投前控标雷达（立项决策流）** | 30 秒扫描招标书中的疑似品牌型号绑定、原厂唯一授权函、特定软著全称、毫米级非标尺寸等排他性参数（合法国产化/信创要求自动免检），输出带置信度与原文摘录的立项参考意见（强制标注“疑似”，辅助发起标前澄清提疑）。 |
-| 💬 **F7** | **标书专家多轮追问（ReAct）** | 绑定双书上下文与 6 大受控工具（含 `cite_regulation` 权威法条检索工具），支持自然语言追问标书细节；无大模型网关时自动无缝降级为 `keyword_fallback` 确定性检索并附带原文逐字引文。 |
-| ⚖️ **E4** | **招投标法规库与真伪核验** | 内置《招标投标法》《政府采购法》《87号令》等权威法规底表，支持法条三态核验（`exact_match` 逐字一致 / `fuzzy_hint` 近似或条号错位 / `unverifiable` 未收录，**大模型对法条真伪零裁决权**），支持管理员上传 `json/txt/docx/pdf` 导入新规及官网更新检查。 |
-| 📦 **交付中心** | **原位标红批注 + 三件套打包** | 支持一键导出：① 投标书原件、② Word OOXML 批注气泡件 / PDF 原位高亮批注件（首部自动插入 A4 风险总览页并带 `LINK_GOTO` 点击跳转锚点，内置五级降级定位链与置信护栏）、③ 完整封标交付包 `.zip`（含偏离表与《人工终核签字确认单.docx》）。 |
+| 📜 **F3** | **证照效期与串名穿帮扫描** | **100% 确定性 Python（0 Token）**：对比项目开标日核查标书内证照有效期、社保缴纳月份连续区间、跨项目采购人串名自伤、`XXX/待填` 占位符残留及部门自定义禁用红线词；联动 Word 内嵌图片离线 RapidOCR 识别；**E26 升级**：与租户企业证照台账做四态保守对账（有效/临期/过期/未收录）。 |
+| 🔍 **F4** | **`★/▲` 双书勾稽与自洽核验** | 四阶段条款对齐底座（`bid_aligner`）+ **三级自适应混合检索门控**（条款号/标题直通 → 45 组招投标同义词扩展 + BM25 → 向量语义精排）+ `MISSING_EVIDENCE` 截图/证明材料探针 + 标书内部质保期/工期前后承诺矛盾扫描；两阶段高并发提速（默认 4 路线程并发）。 |
+| 📑 **F5** | **标准 Word 偏离表一键生成** | 严格消费 F4 逐条勾稽结果（同序对位、零二次篡改），一键生成符合政采规范的六列《技术与商务偏离表.docx》，支持 PDF 真实页码与 Word 双轨页码（印刷页码 / 物理页估算 / `@字符偏移` 诚实回退），负偏离与漏应答行自动红色加粗高亮；支持五维分类联动筛选与在途并发防锁死。 |
+| 📡 **F6** | **投前控标雷达（立项决策流）** | 30 秒扫描招标书中的疑似品牌型号绑定、原厂唯一授权函、特定软著全称、毫米级非标尺寸等排他性参数（合法国产化/信创要求自动免检），输出带置信度与原文摘录的立项参考意见（强制标注“疑似”，辅助发起标前澄清提疑）；支持单条记录重新扫描与全站开标日期透出。 |
+| 💬 **F7** | **标书专家多轮追问（ReAct）** | 绑定双书上下文与 **7 大受控工具**（含 `search_attachment` 附件检索与 `cite_regulation` 权威法条），支持**多文件与图片附件问答**（VLM 真实像素缩图与单实例拒图熔断）、SSE 思考轨迹流式直播与思考深度调节、0-Token 上下文动态快捷追问。 |
+| ⚖️ **E4** | **招投标法规库与真伪核验** | 内置《招标投标法》《政府采购法》《87号令》等 8 部权威法规底表，支持法条三态核验（`exact_match` 逐字一致 / `fuzzy_hint` 近似或条号错位 / `unverifiable` 未收录，**大模型对法条真伪零裁决权**），支持管理员单条删除重算哈希、导入新规及官网更新检查。 |
+| 🗂️ **规则与台账** | **企业投标证照与对账底表** | 支持企业证照效期台账管理，支持上传证照扫描件（PDF/图片）通过离线 OCR 自动预填证书名称、编号与到期日，原件安全留档与解绑；F1 提取结果一键自动四态对账并引导补录。 |
+| 📦 **交付与审计** | **原位标红批注 + 三件套打包 + 审计 CSV** | 支持一键导出：① 投标书原件、② Word OOXML 批注气泡件 / PDF 原位高亮批注件（首部自动插入 A4 风险总览页并带 `LINK_GOTO` 点击跳转锚点，内置五级降级定位链与置信护栏）、③ 完整封标交付包 `.zip`（含偏离表与《人工终核签字确认单.docx》）；支持管理员带条件导出 UTF-8 BOM 安全审计日志 CSV（防公式注入转义）。 |
 
 ---
 
@@ -57,20 +58,21 @@
 
 ## 🧠 F7 六大工具与三级混合检索（Rerank）原理
 
-### F7 追问引擎的六大受控工具（`core/bid_react_agent.py`）
+### F7 追问引擎的七大受控工具（`core/bid_react_agent.py`）
 
 工具层为**确定性函数**（老项目独立 `core/tools.py` 注册表模式的内嵌版），LLM 只决定"何时调哪个、怎么解读结果"，工具本身零幻觉、可单测：
 
 | # | 工具 | 职责 | 底层实现 |
 |---|---|---|---|
-| 1 | `search_tender` | 招标文件关键词检索 → ±200 字原文窗口 + 字符偏移 + PDF 页码 | `_search_text_windows` 确定性定位 |
+| 1 | `search_tender` | 招标文件关键词检索 → ±200 字原文窗口 + 字符偏移 + 双轨页码 | `_search_text_windows` 确定性定位 |
 | 2 | `search_bid` | 投标文件关键词检索（同上） | 同上 |
 | 3 | `locate_chapter` | 章节标题定位 | `tender_extractor.locate_chapters` |
 | 4 | `recalc_price` | 报价算术复算 → 沙盒 findings | F2 `PriceSandbox`（Decimal，0 Token） |
 | 5 | `check_cert_expiry` | 证照效期/串名核验 | F3 `scan_qualifications`（0 Token） |
 | 6 | `cite_regulation` | 权威法条检索 → 条文原文 + 法律名 + 条号（库空诚实报"法规库为空"） | E4 法规库（大模型对法条真伪零裁决权） |
+| 7 | `search_attachment` | 上传附件（文档/图片）关键词/文本定位 | E24 附件检索（带 `INVALID_ATTACHMENT_ID` 守卫与溯源） |
 
-ReAct 循环最多 6 轮；`final` 回答中的引文强制过 `verify_quote()` 原文逐字核验，杜绝编造；无模型网关时自动降级 `keyword_fallback` 确定性检索。
+ReAct 循环支持 1~8 轮（默认 7 轮，覆盖 6 工具+1 收口）；`final` 回答中的引文强制过 `verify_quote()` 原文逐字核验，杜绝编造；无模型网关时自动降级 `keyword_fallback` 确定性检索；支持单轮携带图片经 VLM 多模态识图问答与单实例拒图熔断。
 
 ### 三级自适应混合检索与 Rerank 原理（`core/hybrid_retriever.py`，E2 交付 / E12 激活）
 
@@ -115,28 +117,28 @@ BidGuard-Agent/
 │   └── regulation_sources.yaml          # 招投标权威法规官方源配置
 ├── core/                                # 核心算法与智能体引擎（19 个模块，零 Web 框架耦合）
 │   ├── parser.py                        # Word/PDF/TXT 解析、vMerge 去重、双轨页码、RapidOCR 缓存
-│   ├── tender_extractor.py / tender_llm.py  # F1 招标红线与四张必审清单提取（确定性 + LLM 层）
+│   ├── tender_extractor.py / tender_llm.py  # F1 招标红线、必审清单与所需证照提取（确定性 + LLM 层）
 │   ├── price_extractor.py / price_sandbox.py # F2 报价表结构提取与 Decimal 算术核验沙盒
-│   ├── qualification_scanner.py         # F3 证照效期、社保区间、串名穿帮与自定义红线扫描
+│   ├── qualification_scanner.py         # F3 证照效期/串名扫描 + E26 企业证照台账四态对账
 │   ├── bid_aligner.py                   # 双书四阶段条款对齐底座与五类关键要素暗改探针
 │   ├── hybrid_retriever.py              # E2 三级门控混合检索（BM25 + 45 组招投标同义词 + 向量）
-│   ├── response_checker.py              # F4 ★/▲ 逐条响应勾稽、截图探针与书内承诺自洽核验
+│   ├── response_checker.py              # F4 ★/▲ 逐条响应勾稽、截图探针与两阶段并发核验
 │   ├── deviation_exporter.py            # F5 标准六列《技术与商务偏离表.docx》生成器
-│   ├── rigging_radar.py                 # F6 投前排他性/倾向性控标参数雷达
-│   ├── bid_react_agent.py               # F7 标书专家多轮 ReAct 追问智能体（6 工具）
-│   ├── regulation_library.py / regulation_crawler.py # E4 法规库三态真伪核验与静态源同步
+│   ├── rigging_radar.py                 # F6 投前排他性/倾向性控标参数雷达（支持单条重扫）
+│   ├── bid_react_agent.py               # F7 标书专家多轮 ReAct 追问智能体（7 大工具 + 多文件/图片问答）
+│   ├── regulation_library.py / regulation_crawler.py # E4 法规库三态真伪核验、单条维护与官网爬虫
 │   ├── redline.py                       # Word OOXML 批注气泡 + PDF 总览跳转页与五级定位高亮
-│   └── quote_verifier.py / llm_gateway.py # 原文逐字溯源守门员与多环境 OpenAI 兼容网关
+│   └── quote_verifier.py / llm_gateway.py # 原文逐字溯源守门员与多环境 OpenAI 兼容网关（含 VLM 缩图熔断）
 ├── backend/                             # FastAPI 服务端（main.py / models.py 11表 / worker.py / 11 组路由）
 ├── frontend/                            # Vue 3 + TypeScript + Vite 前端工程
 ├── data/
-│   ├── corpus/m0_samples/               # 11 份真实政采招标书语料 + baseline / ground_truth / llm_eval 三本账
+│   ├── corpus/m0_samples/               # 13 份真实政采招标书语料 + baseline / ground_truth / llm_eval 三本账
 │   ├── corpus/sim_bids/                 # 10 万字级高仿真投标书语料
-│   └── corpus/regulations/              # 招投标法律法规 JSON 种子与官方原文
-├── tests/                               # 20 个测试文件、131 项全链路自动化测试
+│   └── corpus/regulations/              # 招投标法律法规 JSON 种子与官方原文（8 部法律）
+├── tests/                               # 31 个测试文件、227 项全链路自动化测试
 └── docs/
     ├── DEPLOY.md                        # Docker 四容器部署、备份与故障排查手册
-    └── cards/                           # 历次迭代任务卡归档（B1 ~ E10）
+    └── cards/                           # 历次迭代任务卡归档（B1 ~ E26，共 33 份）
 ```
 
 ---

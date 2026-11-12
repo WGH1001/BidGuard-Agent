@@ -21,33 +21,41 @@
 - **登录响应**（POST /api/auth/login，入参 `{username, password}`）：
   `{"token": "...", "user": {"id","username","display_name","role","tenant_id"}}`。
 
-## 2. 端点总清单（10 组，路径即真实路径）
+## 2. 端点总清单（11 组，路径即真实路径）
 
 | 视图消费方 | 端点 | 说明 |
 |---|---|---|
 | 登录 | `GET /api/auth/health`、`POST /api/auth/login`、`GET /api/auth/me`、`POST /api/auth/change_password`（入参 `{old_password,new_password}`） | me 返回 `{id,username,display_name,role,tenant_id,is_active,last_login_at}` |
 | Dashboard | `GET /api/dashboard` | 返回 `DashboardStatsOut`，含 `total_projects`、`defense_matrix`（**6 元素数组**，对应封标前六大一票否决防线健康度）、近期任务与截标倒计时数据 |
-| F1 提取 | `POST /api/extract`（multipart `file`，docx/pdf/txt） | 返回四张清单：`marked_clauses`（含 `kind` 字段：requirement/usage_note/table_marker）、`invalid_bid_clauses`、`scoring_tables`、`scoring_prose` + `llm_status`（'done'/'skipped'）；**usage_note/table_marker 要原样展示但打"非要求"标签**供人工核对 |
-| 体检任务 | `POST /api/checks`（multipart：`tender_file`+`bid_file` 必传，`title`/`open_date`/`buyer_name`/`auto_run` 可选 Form） | 返回 `BidTaskOut`，含 `tender_url`/`bid_url`（下载链接） |
+| F1 提取 | `POST /api/extract`（multipart `file`，docx/pdf/txt） | 返回五张清单：`marked_clauses`（含 `kind` 字段：requirement/usage_note/table_marker）、`invalid_bid_clauses`、`scoring_tables`、`scoring_prose`、`required_certificates`（E26 所需证照清单与台账四态对账）+ `cert_ledger_summary` + `open_date` + `llm_status` |
+| 体检任务 | `POST /api/checks`（multipart：`tender_file`+`bid_file` 必传，`title`/`open_date`/`buyer_name`/`auto_run` 可选 Form） | 返回 `BidTaskOut`，含 `tender_url`/`bid_url`（下载链接），任务卡片展示开标日 |
 | | `GET /api/checks?status=&task_type=&page=&page_size=` | 分页 `{total, items}` |
 | | `GET /api/checks/{id}` | `{task: BidTaskOut, findings: BidFindingOut[]}` |
-| | `POST /api/checks/{id}/run?sync=false` | 触发流水线；前端一律用异步 + SSE |
+| | `POST /api/checks/{id}/run?sync=false` | 触发流水线；前端一律用异步 + SSE；重跑时自动清理旧偏离表缓存 |
 | | `GET /api/checks/{id}/stream` | **SSE**，见 §3 |
 | | `GET /api/checks/{id}/findings?source_module=&severity=` | `{total, items}` |
 | | `POST /api/checks/{id}/findings/{fid}/feedback`（`{feedback:'accepted'/'rejected', feedback_note}`） | 采纳/驳回回写 |
 | | `POST /api/checks/{id}/price-manual`（`{items:[{name,qty,unit_price,total_price}], table_total, bid_total, bid_total_upper, price_cap}`，金额全字符串） | NEED_MANUAL 回填：后端 PriceSandbox 复算并**替换全部 F2 findings**，返回 `findings`（有算术错时非空） |
-| | `DELETE /api/checks/{id}` | — |
-| 偏离表 | `POST /api/deviation/{task_id}`（重复调用重新生成） | 返回 `{output_filename, download_url, total_rows, no_deviation_count, negative_deviation_count, missing_count, contradiction_count}` |
+| | `DELETE /api/checks/{id}` | 校验运行中任务并级联清理落盘文件 |
+| 偏离表 | `GET/POST /api/deviation/{task_id}`（在途核验时返回 `409 CHECK_TASK_RUNNING`） | 返回 `{output_filename, download_url, total_rows, no_deviation_count, negative_deviation_count, missing_count, contradiction_count}` |
 | | `GET /api/deviation/{task_id}/download` | docx 文件流 |
-| 控标雷达 | `POST /api/radar`（multipart `tender_file`） | 返回 `{suspicious_params:[{quote,offset,exclusive_type,confidence,reason,quote_verified,llm_status}], conclusion:{recommendation,summary}}`；recommendation ∈ 值得投/谨慎投/疑似控标高，**UI 必须标"疑似"、不替用户拍板** |
-| F7 问答 | `POST /api/qa/sessions`（`{task_id?}`）、`GET /api/qa/sessions`、`GET/DELETE /api/qa/sessions/{id}` | 会话含 `messages_json: [{role:'user'/'assistant', content, quotes, steps}]` |
-| | `POST /api/qa/sessions/{id}/ask`（`{question}`，非流式，等待可达 1-2 分钟） | 返回 `{mode:'react'/'keyword_fallback', answer, quotes:[{source,quote,offset,page,quote_verified}], steps, rounds_used}`；**page 仅 PDF 有值，docx 为 null，UI 显示"字符偏移 X"** |
-| 规则与证照 | `GET/POST /api/rules`、`PUT /api/rules`（规则配置，字段含 `price_cap`(字符串金额)/`open_date`/`buyer_name`/`required_social_months`/`custom_redlines:[{keyword,severity,consequence}]`） | 每租户多条，`is_default` 标默认 |
-| | `GET/POST /api/rules/certificates`、`PUT/DELETE /api/rules/certificates/{cert_id}` | 证照台账 `{cert_name,cert_no,valid_until,warn_days,remark}`；前端按 `valid_until - today <= warn_days` 做到期预警高亮 |
+| 控标雷达 | `POST /api/radar`（multipart `tender_file`）、`GET /api/radar`（历史）、`DELETE /api/radar/{task_id}` | 返回 `{suspicious_params:[{quote,offset,exclusive_type,confidence,reason,quote_verified,llm_status}], conclusion:{recommendation,summary}, open_date}`；recommendation ∈ 值得投/谨慎投/疑似控标高，**UI 必须标"疑似"、不替用户拍板** |
+| | `POST /api/radar/{task_id}/rescan` | 单条记录重新扫描并刷新开标日 |
+| F7 问答 | `POST /api/qa/sessions`（`{task_id?}`）、`GET /api/qa/sessions`、`GET/DELETE /api/qa/sessions/{id}` | 会话含 `messages_json`、`attachments` 及 0-Token 动态 `suggested_questions` |
+| | `POST /api/qa/sessions/{id}/attachments`、`DELETE /api/qa/sessions/{id}/attachments/{att_id}` | 附件上传（支持 PDF/DOCX/图片）与清理 |
+| | `POST /api/qa/sessions/{id}/ask`（同步）/ `POST /api/qa/sessions/{id}/ask/stream`（**SSE 流式**） | 支持自然语言多轮问答、图片多模态识图、7 大受控工具调用轨迹回显与思考深度调节 |
+| 规则与证照 | `GET/POST /api/rules`、`PUT /api/rules`（规则配置，字段含 `price_cap`/`open_date`/`buyer_name`/`required_social_months`/`custom_redlines`） | 每租户多条，`is_default` 标默认 |
+| | `GET/POST /api/rules/certificates`、`PUT/DELETE /api/rules/certificates/{cert_id}` | 证照台账 `{cert_name,cert_no,valid_until,warn_days,remark,has_attachment,attachment_name}` |
+| | `POST /api/rules/certificates/parse-file` | 上传证照 PDF/图片扫件通过 RapidOCR 自动预填证书名称、编号与有效期 |
+| | `POST/GET/DELETE /api/rules/certificates/{cert_id}/attachment` | 证照原件上传留档、安全下载与解绑 |
+| 法规库 (E4) | `GET /api/regulations/laws`、`GET /api/regulations/laws/{id}/articles`、`POST /api/regulations/verify-article`、`POST /api/regulations/crawl`、`DELETE /api/regulations/articles/{id}` | 法条真伪三态核验、官网源更新检查与管理员单条条文删除 |
 | 交付与审计 | `GET /api/reports/{task_id}/redline` | 标红批注原件（docx/pdf 文件流） |
 | | `GET /api/reports/{task_id}/deliver.zip` | 交付包 ZIP（标红原件+偏离表+签字单） |
-| | `GET /api/reports/audit-logs`（admin，403 拦 member） | `{total, items:[{action,target,ip,created_at,...}]}` |
-| 模型配置 | `GET/PUT /api/model-config`、`DELETE /api/model-config`、`POST /api/model-config/test` | PUT 入参 `{base_url,api_key,model_flash,model_flagship,supports_reasoning_effort}`；**响应永不回显明文 Key**，只回 `{configured:true, api_key_last4:"abcd", ...}`；test 为连通性测试 |
+| | `GET /api/reports/{task_id}/signoff` | 《人工终核签字确认单.docx》单独下载 |
+| | `POST /api/reports/batch-zip` | 多任务自选内容批量打包 |
+| | `GET /api/reports/audit-logs`（admin，403 拦 member） | 安全操作审计留痕列表 |
+| | `GET /api/reports/audit-logs/export`（admin） | 导出 UTF-8 BOM CSV 审计日志（带公式注入转义） |
+| 模型配置 | `GET/PUT /api/model-config`、`DELETE /api/model-config`、`POST /api/model-config/test` | PUT 入参 `{base_url,api_key,model_flash,model_flagship,supports_reasoning_effort,supports_vision}`；**响应永不回显明文 Key** |
 
 文件下载统一走 `GET /api/files/{相对路径}`（已做租户归属校验，跨租户 404）。
 
@@ -65,17 +73,17 @@ event: error      data: {"task_id":1,"status":"failed","error_msg":"..."}
 - **断线重连后重订阅会先收到终态/当前进度帧**，UI 按 status 幂等处理；
 - `stats.price_status == 'NEED_MANUAL'` 时弹出报价人工回填弹窗（调 price-manual 接口）。
 
-## 4. 视图 ↔ 端点映射（8 业务视图 + 3 辅助视图）
+## 4. 视图 ↔ 端点映射（8 业务视图 + 1 法规视图 + 3 辅助视图）
 
 1. `DashboardView`：/api/dashboard（ECharts：4 统计卡 + 六大防线矩阵热力/仪表 + 截标倒计时列表 + 在途任务台账）；
-2. `ExtractView`：/api/extract 上传 → 四张清单四 Tab 核对（kind 标签区分）；
+2. `ExtractView`：/api/extract 上传 → 五张清单五 Tab 核对（★/▲ 标记条款、无标记措辞模式 A/B、审查区定位、评分细则表、**所需证照与台账对账**，含多文件排队与 localStorage LRU 缓存）；
 3. `CheckDetailView`（最重）：/api/checks 全组 + SSE——6 步流水线进度条、风险卡列表（按 severity 分级配色，采纳/驳回按钮）、报价回填弹窗、投标书原件下载与标红预览入口；
-4. `DeviationView`：/api/deviation 预览统计 + 一键导出下载；
-5. `RadarView`：/api/radar 上传 → 疑似参数卡片流 + 结论横幅（"疑似"标注）；
-6. `QaChatView`：/api/qa 全组——会话侧栏（KeepAlive 切页防丢）+ 消息流（ReAct steps 折叠面板 + quotes 溯源卡）；
-7. `RulesAndCertsView`：/api/rules + certificates 两页签 CRUD；
-8. `ReportsAndAuditView`：交付中心（按任务列 redline/deliver.zip 下载）+ 审计日志表（admin）；
-9. 辅助：`LoginView` / `ChangePasswordView` / `ModelSettingsView`（/api/model-config + test 连通性按钮）。
+4. `DeviationView`：/api/deviation 预览统计 + 偏离表五维指标卡筛选 + 在途 409 防锁死与一键导出下载；
+5. `RadarView`：/api/radar 上传 → 疑似参数卡片流 + 结论横幅（"疑似"标注）+ 单条重扫与开标日期显化；
+6. `QaChatView`：/api/qa 全组——会话侧栏（KeepAlive 切页防丢）+ 多文件/图片附件上传 + 消息流（ReAct 思考轨迹 SSE 流式直播 + 7 工具折叠面板 + quotes 溯源卡 + 0-Token 动态快捷追问）；
+7. `RulesAndCertsView`：规则配置 + 企业证照台账（支持 PDF/图片扫件 OCR 预填与原件留档）+ 法规库（法条三态核验与单条条文删除维护）；
+8. `ReportsAndAuditView`：交付中心（按任务列 redline/deliver.zip/signoff 下载 + 批量打包）+ 安全操作审计日志表（admin，支持 UTF-8 BOM CSV 导出）；
+9. 辅助：`LoginView` / `ChangePasswordView` / `ModelSettingsView`（/api/model-config + test 连通性测试 + 思考参数防御与多模态视觉开关）。
 
 ## 5. 工程约定
 
