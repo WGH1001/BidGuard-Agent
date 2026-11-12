@@ -36,11 +36,17 @@ from backend.database import Base, get_engine, get_session_factory, init_db, see
 from backend.main import create_app
 from backend.models import RegulationArticle, RegulationLaw
 from core.bid_react_agent import ALLOWED_REACT_TOOLS, cite_regulation
-from core.regulation_crawler import crawl_all_configured_sources, crawl_single_source
+from core.regulation_crawler import (
+    _extract_plain_text_from_html,
+    _regex_strip_plain_text,
+    crawl_all_configured_sources,
+    crawl_single_source,
+)
 from core.regulation_library import (
     import_regulation_file,
     normalize_article_no,
     normalize_article_text,
+    split_text_into_articles,
     verify_article,
 )
 
@@ -229,6 +235,56 @@ def test_regulation_crawler_four_states(reg_session):
     )
     assert res_js['status'] == 'manual_required'
     assert '该源需手动导入' in res_js['message']
+
+
+# ── 4b. gov.cn 公报页树解析截断 -> 正则剥标签回退通道回归测试（离线 fixture）──
+# 背景（2026-11-12 实弹诊断）：gov.cn 公报/政策库 4 个源全部因 lxml 树解析截断
+# 误报 manual_required；回退通道修复后离线复验 84 条恢复。
+_FIXTURE_GONGBAO = os.path.join(
+    os.path.dirname(__file__), 'fixtures', 'regulation',
+    'gov_cn_gongbao_2019_content_5468831.html',
+)
+
+
+def test_regulation_crawler_regex_fallback_on_truncated_gov_page(reg_session):
+    raw_html = open(_FIXTURE_GONGBAO, 'rb').read().decode('utf-8', errors='replace')
+
+    # (1) 主路（lxml 树）在该页面上确定性截断：仅提取出导航壳、切不出条文
+    tree_text = _extract_plain_text_from_html(raw_html)
+    assert len(split_text_into_articles(tree_text)) < 2
+
+    # (2) 回退通道（正则剥标签）对同一 HTML 恢复完整 84 条
+    fallback_arts = split_text_into_articles(_regex_strip_plain_text(raw_html))
+    assert len(fallback_arts) == 84
+    assert fallback_arts[0]['article'] == '第一条'
+    assert fallback_arts[-1]['article'] == '第八十四条'
+
+    # (3) 端到端：crawl_single_source 走回退链后应成功入库（不再是 manual_required）
+    class _GovResp:
+        status_code = 200
+        encoding = 'utf-8'
+        apparent_encoding = 'utf-8'
+        text = raw_html
+
+    res = crawl_single_source(
+        reg_session,
+        {'name': '中华人民共和国招标投标法实施条例', 'url': 'https://example.gov.cn/gongbao_2019.html', 'adapter': 'static_html'},
+        http_get=lambda *a, **kw: _GovResp(),
+    )
+    assert res['status'] == 'updated'
+    assert res['article_count'] == 84
+    assert res['added_count'] == 84
+
+    # (4) 库内末条内容完整性抽验（2019 第三次修订说明随末条入库）
+    law_row = reg_session.query(RegulationLaw).filter_by(name='《中华人民共和国招标投标法实施条例》').first()
+    assert law_row is not None
+    last = (
+        reg_session.query(RegulationArticle)
+        .filter_by(law_id=law_row.id, article_no='第八十四条')
+        .first()
+    )
+    assert last is not None
+    assert '第三次修订' in last.content
 
 
 # ── 5. 四格式导入（json/txt/docx/pdf）与 F7 六工具白名单及 cite_regulation 测试 ──

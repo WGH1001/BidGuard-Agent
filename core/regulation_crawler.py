@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import hashlib
+import html as _html_mod
+import re
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -102,6 +104,27 @@ def _extract_plain_text_from_html(html_str: str) -> str:
         return ''
 
 
+def _regex_strip_plain_text(html_str: str) -> str:
+    """正则剥标签提取纯文本（libxml2 树解析截断时的回退通道，不建树）。
+
+    背景（2026-11-12 实弹诊断）：gov.cn 公报/政策库部分静态页（如
+    gongbao/content/2019/content_5468831.htm）的 HTML 会使 lxml 树解析
+    中途截断——正文 <p> 在解析树中丢失，text_content() 只剩导航壳，
+    但原始 HTML 字节里条文俱在且不在 script/注释内。
+    本通道按标签语义直接纯文本化：去 script/style/注释 -> 块级标签转换行
+    -> 剥残留标签 -> 实体反转义。
+    """
+    if not html_str:
+        return ''
+    text = re.sub(r'<script[^>]*>.*?</script>', ' ', html_str, flags=re.S | re.I)
+    text = re.sub(r'<style[^>]*>.*?</style>', ' ', text, flags=re.S | re.I)
+    text = re.sub(r'<!--.*?-->', ' ', text, flags=re.S)
+    text = re.sub(r'<br[^>]*>', '\n', text, flags=re.I)
+    text = re.sub(r'</(?:p|div|li|tr|h[1-6])>', '\n', text, flags=re.I)
+    text = re.sub(r'<[^>]+>', '', text)
+    return _html_mod.unescape(text).strip()
+
+
 def crawl_single_source(
     session: Session,
     source: dict[str, str],
@@ -157,9 +180,14 @@ def crawl_single_source(
             'message': f"官网拉取失败（{exc}），该源需手动导入",
         }
 
-    # 3. lxml 提取正文并按"第X条"切条
+    # 3. lxml 提取正文并按"第X条"切条；树解析截断（切条 <2）时回退正则剥标签通道
     plain_text = _extract_plain_text_from_html(html_str)
     articles = split_text_into_articles(plain_text)
+    if len(articles) < 2:
+        fallback_text = _regex_strip_plain_text(html_str)
+        fallback_articles = split_text_into_articles(fallback_text)
+        if len(fallback_articles) >= 2:
+            plain_text, articles = fallback_text, fallback_articles
     if len(articles) < 2:
         return {
             'name': law_title,
@@ -170,7 +198,7 @@ def crawl_single_source(
             'added_count': 0,
             'modified_count': 0,
             'unchanged_count': 0,
-            'message': '该源需手动导入（页面为 JS 动态渲染或未解析出有效法条正文）',
+            'message': '该源需手动导入（树解析与正则剥标签双通道均未解析出有效法条正文，可能为 JS 动态渲染）',
         }
 
     # 4. 计算整部法规 content_hash 并与库内比对
