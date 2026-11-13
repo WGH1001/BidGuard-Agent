@@ -34,6 +34,7 @@ from core.parser import (
 )
 from core.quote_verifier import normalize_zh, verify_quote
 from core.tender_extractor import (
+    _classify_invalid_clause_role,
     build_review_checklist,
     extract_invalid_bid_clauses,
     extract_marked_clauses,
@@ -489,7 +490,7 @@ def _extract_sentence_around(text: str, start: int, end: int) -> tuple[str, int,
 
 
 def _extract_warranty_mentions(text: str) -> list[dict]:
-    mentions = []
+    raw_mentions = []
     consumed = []
     for regex in (_WARRANTY_RE, _WARRANTY_REV_RE):
         for m in regex.finditer(text or ''):
@@ -502,7 +503,7 @@ def _extract_warranty_mentions(text: str) -> list[dict]:
             months = num * 12 if '年' in unit else num
             quote, s_pos, e_pos = _extract_sentence_around(text, m.start(), m.end())
             consumed.append((m.start(), m.end()))
-            mentions.append({
+            raw_mentions.append({
                 'param': 'warranty_months',
                 'label': '质保期',
                 'value': months,
@@ -511,7 +512,25 @@ def _extract_warranty_mentions(text: str) -> list[dict]:
                 'start': s_pos,
                 'end': e_pos,
             })
-    mentions.sort(key=lambda x: x['start'])
+    raw_mentions.sort(key=lambda x: x['start'])
+
+    # 合并同句分项质保表述（如「硬件1年质保，软件2年质保」），防止同句多品类质保被拆成单值误判
+    mentions: list[dict] = []
+    for item in raw_mentions:
+        if mentions and item['start'] == mentions[-1]['start']:
+            prev = mentions[-1]
+            prev_vals = prev.get('_vals', [prev['value']])
+            if item['value'] not in prev_vals:
+                prev_vals.append(item['value'])
+            prev['_vals'] = prev_vals
+            if len(prev_vals) > 1:
+                prev['value'] = tuple(prev_vals)
+                prev['display'] = ' / '.join(f"{v}个月" for v in prev_vals) + '（分项复合质保）'
+        else:
+            item['_vals'] = [item['value']]
+            mentions.append(item)
+    for m_item in mentions:
+        m_item.pop('_vals', None)
     return mentions
 
 
@@ -609,6 +628,11 @@ def check_bid_self_contradictions(
                 q_ok = bool(q1 and q2)
                 p1, fp1, is_dx1 = _resolve_unified_page(first['start'], bid_ctx)
                 p2, fp2, is_dx2 = _resolve_unified_page(other['start'], bid_ctx)
+                blank_hint = (
+                    '（注：前文含未填写的空白下划线，疑似残留招标合同模板条款）'
+                    if '_' in q1
+                    else ''
+                )
                 findings.append({
                     'code': 'CONTRADICTION',
                     'severity': 'error',
@@ -616,7 +640,7 @@ def check_bid_self_contradictions(
                     'param': first['param'],
                     'message': (
                         f"标书前后{first['label']}承诺矛盾：前文为 {first['display']}"
-                        f"（「{q1}」），后文为 {other['display']}（「{q2}」）"
+                        f"（「{q1}」），后文为 {other['display']}（「{q2}」）{blank_hint}"
                     ),
                     'tender_quote': q1,
                     'bid_quote': q2,
@@ -648,8 +672,12 @@ def check_bid_self_contradictions(
                 prompt = _SELF_CONTRADICTION_PROMPT.format(
                     topic='质保与售后服务承诺', text_a=txt_a, text_b=txt_b
                 )
-                resp = client.chat([{'role': 'user', 'content': prompt}], model_tier='flash')
-                parsed = _parse_llm_json(getattr(resp, 'content', '') or '')
+                try:
+                    resp = client.chat([{'role': 'user', 'content': prompt}], model_tier='flash')
+                    parsed = _parse_llm_json(getattr(resp, 'content', '') or '')
+                except Exception:
+                    # 照搬 L732-772 单条降级范式（llm_status='error_fallback'），严禁炸断 F4 整条流水线
+                    parsed = None
                 if parsed and parsed.get('is_contradiction') is True:
                     raw_qa = str(parsed.get('quote_a', '')).strip()
                     raw_qb = str(parsed.get('quote_b', '')).strip()
@@ -683,8 +711,12 @@ def check_bid_self_contradictions(
     return findings
 
 
-def _filter_valid_requirements(raw_reqs: list[dict]) -> list[dict]:
-    """过滤掉 usage_note 与 table_marker，仅保留须逐条响应的 requirement 及模式 A/B 条款。"""
+def _filter_valid_requirements(
+    raw_reqs: list[dict],
+    *,
+    include_submission_rules: bool = True,
+) -> list[dict]:
+    """过滤掉 usage_note、table_marker 与评标委员会规程（eval_rule），按需过滤线下递交形式规范（submission_rule）。"""
     valid = []
     for r in raw_reqs or []:
         kind = r.get('kind')
@@ -692,6 +724,14 @@ def _filter_valid_requirements(raw_reqs: list[dict]) -> list[dict]:
             continue
         structured = r.get('structured')
         if isinstance(structured, dict) and structured.get('is_requirement') is False:
+            continue
+        role = r.get('clause_role') or _classify_invalid_clause_role(
+            r.get('full_text') or r.get('text') or '',
+            r.get('clause_no') or '',
+        )
+        if role == 'eval_rule':
+            continue
+        if not include_submission_rules and role == 'submission_rule':
             continue
         valid.append(r)
     return valid
@@ -994,10 +1034,50 @@ def check_star_responses(
         if tender_text and not verify_quote(raw_req_quote, tender_text):
             raw_req_quote = expanded_req_text if verify_quote(expanded_req_text, tender_text) else ''
 
+        role = req.get('clause_role') or _classify_invalid_clause_role(
+            expanded_req_text, req.get('clause_no') or ''
+        )
+        if role == 'submission_rule':
+            finding_sub = {
+                'code': 'MISSING_RESPONSE',
+                'severity': 'info',
+                'consequence': 'none',
+                'clause_role': 'submission_rule',
+                'req_index': idx,
+                'mark': req.get('mark', ''),
+                'clause_no': req.get('clause_no', ''),
+                'message': (
+                    f"封标递交与形式自检提醒：「{raw_req_quote[:60]}」属线下印刷封装与递交规范，"
+                    f"无需在标书正文专章文字应答，请于封标递交前人工核对份数、电子版介质与字迹清晰度"
+                ),
+                'tender_quote': raw_req_quote,
+                'bid_quote': '',
+                'quote_verified': bool(raw_req_quote),
+                'tender_start': r_start,
+                'tender_end': r_end,
+                'tender_page': t_page,
+                'tender_footer_page': t_footer,
+                'tender_is_docx': t_is_docx,
+                'bid_start': None,
+                'bid_end': None,
+                'bid_page': None,
+                'bid_footer_page': None,
+                'bid_is_docx': False,
+                'footer_page': t_footer,
+                'is_docx_page': t_is_docx if t_page is not None else False,
+                'llm_status': 'skipped',
+            }
+            findings_by_idx[idx] = finding_sub
+            results_by_idx[idx] = {**finding_sub, 'status': 'RESPONSE_OK'}
+            hit_count += 1
+            continue
+
         if not loc['hit']:
+            miss_sev = 'warning' if role == 'technical_or_commercial' else 'error'
             finding = {
                 'code': 'MISSING_RESPONSE',
-                'severity': 'error',
+                'severity': miss_sev,
+                'clause_role': role,
                 'req_index': idx,
                 'mark': req.get('mark', ''),
                 'clause_no': req.get('clause_no', ''),
@@ -1275,10 +1355,13 @@ def run_response_check(
     bid_path: str | Path,
     requirements: Optional[list[dict]] = None,
     client=None,
+    *,
+    tender_parsed_doc: Any = None,
+    bid_parsed_doc: Any = None,
 ) -> dict[str, Any]:
     """F4 端到端主入口：双书 ★/▲ 条款逐条响应核验 + 投标书内部前后矛盾检测。"""
-    tender_doc = parse_document(str(tender_path))
-    bid_doc = parse_document(str(bid_path))
+    tender_doc = tender_parsed_doc if tender_parsed_doc is not None else parse_document(str(tender_path))
+    bid_doc = bid_parsed_doc if bid_parsed_doc is not None else parse_document(str(bid_path))
 
     if requirements is None:
         checklist = build_review_checklist(str(tender_path))

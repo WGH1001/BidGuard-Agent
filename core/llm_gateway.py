@@ -13,6 +13,7 @@
 import base64
 import os
 from pathlib import Path
+import re
 import threading
 import time
 from typing import Any, Iterator, Optional
@@ -361,6 +362,23 @@ def _strip_thinking_params(extra_body: dict) -> dict:
     }
 
 
+def _format_gateway_error_hint(base_url: Optional[str], err: Exception) -> str:
+    """E27 §2.2.1：当内网私有 IP 网关发生连接中断或超时时，附带可读的 TUN/路由排查提示。"""
+    msg = str(err)
+    url_str = str(base_url or '')
+    is_private_ip = bool(
+        re.search(r'https?://(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)', url_str)
+    )
+    if is_private_ip and any(
+        k in msg.lower() for k in ('connection', 'timed out', 'timeout', 'connect', 'unreachable')
+    ):
+        return (
+            f"{msg}（内网模型网关 {url_str} 连接不可达或超时，请排查是否开启了代理软件 TUN 模式拦截内网路由，"
+            f"或在「私有模型服务配置」切换至外网/兜底网关）"
+        )
+    return msg
+
+
 class LLMClient:
     def __init__(self, env_config: dict, api_key: str):
         self.env_config = env_config
@@ -369,6 +387,11 @@ class LLMClient:
         self.models = env_config.get('models', {})
         self.pricing = env_config.get('pricing', {})
         self.chat_options = env_config.get('chat_options', {}) or {}
+        raw_timeout = env_config.get('timeout', self.chat_options.get('timeout', 60.0))
+        try:
+            self.timeout = float(raw_timeout) if raw_timeout is not None else 60.0
+        except (TypeError, ValueError):
+            self.timeout = 60.0
         self.supports_vision = bool(
             env_config.get('supports_vision', False)
             or (self.models.get('supports_vision', False) if isinstance(self.models, dict) else False)
@@ -384,7 +407,15 @@ class LLMClient:
 
         try:
             from openai import OpenAI
-            self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+            try:
+                self.client = OpenAI(
+                    api_key=self.api_key,
+                    base_url=self.base_url,
+                    timeout=self.timeout,
+                    max_retries=0,
+                )
+            except TypeError:
+                self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
             self.use_openai = True
         except ImportError:
             import requests
@@ -551,7 +582,7 @@ class LLMClient:
 
             except Exception as e:
                 if attempt == max_retries:
-                    raise RuntimeError(f"API 请求失败重试耗尽: {e}")
+                    raise RuntimeError(f"API 请求失败重试耗尽: {_format_gateway_error_hint(self.base_url, e)}")
                 if _is_vision_reject(e) and _messages_have_image_blocks(active_messages):
                     self._mark_vision_unsupported()
                     active_messages = _strip_image_blocks(active_messages)

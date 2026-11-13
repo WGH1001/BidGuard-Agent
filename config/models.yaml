@@ -1,5 +1,5 @@
 # 模型网关配置 —— 换部署形态只改这个文件，业务代码零改动
-default_env: demo
+default_env: prod
 
 envs:
   # 演示环境：智谱开放平台（OpenAI 兼容协议）
@@ -7,6 +7,7 @@ envs:
     provider: cloud
     base_url: https://open.bigmodel.cn/api/paas/v4
     api_key_env: ZHIPU_API_KEY
+    timeout: 60
     models:
       flagship: glm-5.3-flash        # 统一使用极速 flash 模型，大幅提速语义审查与 ReAct 问答
       flash: glm-5.3-flash           # 全局定义提取、分类、轻量质检
@@ -28,6 +29,7 @@ envs:
     provider: private
     base_url: http://10.0.2.81:3000/v1
     api_key_env: PRIVATE_API_KEY
+    timeout: 60
     models:
       flagship: GLM-5.3-Flash
       flash: GLM-5.3-Flash

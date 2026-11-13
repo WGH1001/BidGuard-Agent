@@ -352,6 +352,13 @@ class QaSessionOut(BaseModel):
     updated_at: Optional[str] = None
 
 
+class QaLastTurnWithdrawOut(BaseModel):
+    session_id: int
+    withdrawn_question: str = ''
+    withdrawn_attachment_ids: list[str] = Field(default_factory=list)
+    remaining_messages: int = 0
+
+
 # ── 8. /api/rules 契约 ───────────────────────────────────────────────────
 class CustomRedlineItem(BaseModel):
     keyword: str = Field(min_length=1, max_length=128)

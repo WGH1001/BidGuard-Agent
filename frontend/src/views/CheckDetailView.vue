@@ -22,6 +22,7 @@ defineOptions({ name: 'CheckDetailView' })
 
 interface TaskDurationRecord {
   f1_ms?: number | null
+  f_parse_ms?: number | null
   f2_ms?: number | null
   f3_ms?: number | null
   f4_ms?: number | null
@@ -180,14 +181,19 @@ const openDateMeta = computed(() => {
   }
 })
 
+const railCollapsed = ref(false)
+
 const stageDurationItems = computed<StageDurationItem[]>(() => {
   const dur = currentTaskExt.value?.duration
   if (!dur) return []
 
   const rawStages = [
     { key: 'f1_ms', code: 'F1', label: '招标红线与★提取', ms: dur.f1_ms ?? null, color: '#2563eb' },
+    ...(dur.f_parse_ms !== undefined && dur.f_parse_ms !== null
+      ? [{ key: 'f_parse_ms', code: '解析', label: '投标书解析与冷OCR', ms: dur.f_parse_ms ?? null, color: '#7c3aed' }]
+      : []),
     { key: 'f2_ms', code: 'F2', label: '报价算术沙盒', ms: dur.f2_ms ?? null, color: '#0891b2' },
-    { key: 'f3_ms', code: 'F3', label: '投标书解析与证照', ms: dur.f3_ms ?? null, color: '#059669' },
+    { key: 'f3_ms', code: 'F3', label: '证照效期与串名', ms: dur.f3_ms ?? null, color: '#059669' },
     { key: 'f4_ms', code: 'F4', label: '★逐条勾稽与矛盾', ms: dur.f4_ms ?? null, color: '#d97706' },
     { key: 'grading_ms', code: '汇总', label: '风险分级落库', ms: dur.grading_ms ?? null, color: '#64748b' },
   ]
@@ -398,9 +404,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="check-workbench">
+  <div class="check-workbench" :class="{ 'rail-collapsed': railCollapsed }">
     <!-- 左栏：任务台账与新建弹窗 -->
     <CheckTaskList
+      v-show="!railCollapsed"
       ref="taskListRef"
       :tasks="tasks"
       :total="total"
@@ -422,6 +429,14 @@ onBeforeUnmount(() => {
         <section class="bg-panel cw-top-card">
           <div class="cwt-left">
             <div class="cwt-meta">
+              <button
+                type="button"
+                class="rail-toggle-btn"
+                :title="railCollapsed ? '展开左侧封标体检任务台账' : '收起左侧任务台账以专注审阅右侧风险清单'"
+                @click="railCollapsed = !railCollapsed"
+              >
+                {{ railCollapsed ? '» 展开任务台账' : '« 收起台账' }}
+              </button>
               <span class="mono-num cwt-id">TASK #{{ currentTask.id }}</span>
               <span
                 v-if="currentTask.stats_json?.llm_status"
@@ -620,9 +635,31 @@ onBeforeUnmount(() => {
 <style scoped>
 .check-workbench {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: 300px 1fr;
   gap: 18px;
   align-items: start;
+}
+
+.check-workbench.rail-collapsed {
+  grid-template-columns: 1fr;
+}
+
+.rail-toggle-btn {
+  padding: 2px 9px;
+  border-radius: 5px;
+  border: 1px solid var(--border-line);
+  background: var(--bg-subtle);
+  color: var(--txt-sec);
+  font-size: 11.5px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.rail-toggle-btn:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+  background: #ffffff;
 }
 
 .cw-main {
@@ -740,7 +777,7 @@ onBeforeUnmount(() => {
 
 .dbc-stages-grid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
   gap: 10px;
 }
 

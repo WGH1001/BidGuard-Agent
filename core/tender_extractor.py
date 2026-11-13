@@ -336,19 +336,27 @@ def _expand_enclosing_clause(text: str, hit_start: int, hit_end: int,
     return start, end, clause_no
 
 
+_CHAPTER_SPLIT_RE = re.compile(r'^(第[一二三四五六七八九十百零两]+章)\s*(.*)$')
+
+
 def locate_chapters(text: str) -> list[dict]:
-    """定位全部"第X章 标题"。"""
+    """扫描招标书"第X章 标题"锚点，返回 [{index, title, start}, ...]。"""
     chapters = []
-    seen_spans = set()
+    seen_spans: set[tuple[int, int]] = set()
     for m in _CHAPTER_RE.finditer(text):
         key = (m.start(), m.end())
         if key in seen_spans:
             continue
         seen_spans.add(key)
-        raw = m.group(0)
-        parts = raw.split(None, 1)
-        index = parts[0]
-        title = parts[1].strip() if len(parts) > 1 else ''
+        raw = m.group(0).strip()
+        sm = _CHAPTER_SPLIT_RE.match(raw)
+        if sm:
+            index = sm.group(1)
+            title = sm.group(2).strip()
+        else:
+            parts = raw.split(None, 1)
+            index = parts[0]
+            title = parts[1].strip() if len(parts) > 1 else ''
         chapters.append({'index': index, 'title': title, 'start': m.start()})
     return chapters
 
@@ -415,6 +423,125 @@ def extract_marked_clauses(text: str) -> list[dict]:
     return hits
 
 
+_EVAL_BLOCK_HEADER_RE = re.compile(
+    r'^(?:[一二三四五六七八九十]+、|\([一二三四五六七八九十]+\)|（[一二三四五六七八九十]+）)?\s*'
+    r'(?:评标办法|评标方法|评标标准|评标程序|评审办法)'
+)
+_SUB_ITEM_NUM_RE = re.compile(r'(?:^|\n)[ \t]*(\d{1,2}[、.．])[ \t]*')
+_EVAL_COMMITTEE_RULE_RE = re.compile(
+    r'^(?:[一二三四五六七八九十]+、\s*)?评标办法'
+    r'|评标委员会(?:根据评分标准|认为投标人的报价明显低于|应当将其作为无效投标)'
+    r'|按照评审因素的量化指标评审得分最高'
+)
+_SUBMISSION_RULE_RE = re.compile(
+    r'投标文件份数|正本.*副本|副本.*份|未按规定递交电子版投标文件'
+    r'|字迹模糊|辨认不清'
+    r'|密封(?:和|及|与)?标记|外层包装|封口处|装订要求|胶装'
+)
+
+
+def classify_invalid_clause_role(clause_text: str, clause_no: str = '') -> str:
+    """区分实质性响应条款、评标委员会规程与线下递交/排版形式要求。"""
+    stripped = (clause_text or '').strip()
+    if _EVAL_COMMITTEE_RULE_RE.search(stripped):
+        return 'eval_rule'
+    if _SUBMISSION_RULE_RE.search(stripped):
+        return 'submission_rule'
+    return 'requirement'
+
+
+_classify_invalid_clause_role = classify_invalid_clause_role
+
+
+def extract_chapter4_procurement_requirements(text: str) -> list[dict]:
+    """当招标文件无 ★/▲ 标记时，从第四章/采购需求章节确定性提取核心技术与商务条款。"""
+    if not text:
+        return []
+    chapters = locate_chapters(text)
+    real_chapters = [
+        ch for ch in chapters
+        if '…' not in ch['title'] and '...' not in ch['title']
+        and not re.search(r'[.·\t]{2,}\s*\d+\s*$', ch['title'])
+    ]
+    target_ch = None
+    target_idx = -1
+    for idx, ch in enumerate(real_chapters):
+        if any(k in ch['title'] for k in ('采购需求', '技术要求', '项目需求', '技术标准')):
+            target_ch = ch
+            target_idx = idx
+            break
+    if target_ch is None:
+        return []
+
+    ch_start = target_ch['start']
+    ch_end = real_chapters[target_idx + 1]['start'] if target_idx + 1 < len(real_chapters) else len(text)
+    seg = text[ch_start:ch_end]
+    if not seg.strip():
+        return []
+
+    items: list[dict] = []
+    # 1. 提取符号列表项（如 Word 项目符号 \uf06c / ● / ■）
+    bullet_re = re.compile(r'[\uf06c\uf0d8\uf0a7●■◆]\s*([^\n\uf06c\uf0d8\uf0a7●■◆]+)')
+    bullet_matches = list(bullet_re.finditer(seg))
+    for i, bm in enumerate(bullet_matches):
+        b_start = bm.start()
+        b_end = bullet_matches[i + 1].start() if i + 1 < len(bullet_matches) else len(seg)
+        # 截停在大节标题（如 三、 四、 五、 六、）之前
+        sec_stop = re.search(r'\n\s*[三四五六七八九十]+、', seg[bm.end():b_end])
+        if sec_stop:
+            b_end = bm.end() + sec_stop.start()
+        raw_block = seg[b_start:b_end].strip()
+        clean_block = re.sub(r'^[\uf06c\uf0d8\uf0a7●■◆]\s*', '', raw_block).strip()
+        if len(clean_block) < 6:
+            continue
+        title_line = bm.group(1).strip()
+        clause_label = f"采购需求-{title_line[:12]}"
+        abs_start = ch_start + b_start + (raw_block.find(clean_block))
+        abs_end = abs_start + len(clean_block)
+        items.append({
+            'pattern': 'C',
+            'mark': '',
+            'kind': 'requirement',
+            'clause_role': 'technical_or_commercial',
+            'clause_no': clause_label,
+            'text': text[abs_start:abs_end],
+            'start': abs_start,
+            'end': abs_end,
+            'promise_doc': '',
+        })
+
+    # 2. 提取关键商务小节（交付/实施、售后服务、验收标准、质保期要求）
+    comm_re = re.compile(
+        r'(?:^|\n)[ \t]*([二三四五六七八九十]+、\s*(?:交付或者实施的时间和地点|交付(?:时间|期|地点)|包装和运输[^\n]*|售后服务[^\n]*|验收标准[^\n]*|质保期要求[^\n]*))'
+    )
+    comm_matches = list(comm_re.finditer(seg))
+    for i, cm in enumerate(comm_matches):
+        c_start = cm.start(1)
+        # 取该小节直至下一个汉字大序号标题
+        next_sec = re.search(r'\n[ \t]*[二三四五六七八九十]+、', seg[cm.end(1):])
+        c_end = cm.end(1) + next_sec.start() if next_sec else len(seg)
+        block = seg[c_start:c_end].strip()
+        if len(block) < 8:
+            continue
+        no_match = re.match(r'^([二三四五六七八九十]+、)', block)
+        c_no = no_match.group(1) if no_match else '第四章'
+        abs_start = ch_start + c_start
+        abs_end = abs_start + len(block)
+        items.append({
+            'pattern': 'C',
+            'mark': '',
+            'kind': 'requirement',
+            'clause_role': 'technical_or_commercial',
+            'clause_no': c_no,
+            'text': text[abs_start:abs_end],
+            'start': abs_start,
+            'end': abs_end,
+            'promise_doc': '',
+        })
+
+    return items
+
+
 def extract_invalid_bid_clauses(text: str) -> list[dict]:
     """提取无标记措辞型强制条款（全文无任何 ★/▲ 标记）（徐州份核验沉淀的模式 A / 模式 B）。"""
     records = []
@@ -426,16 +553,29 @@ def extract_invalid_bid_clauses(text: str) -> list[dict]:
         pm = _PROMISE_DOC_RE.search(segment)
         if pm:
             promise = pm.group(1)
+        clause_txt = text[start:end]
         records.append({
-            'pattern': 'A', 'text': text[start:end], 'start': start, 'end': end,
+            'pattern': 'A', 'text': clause_txt, 'start': start, 'end': end,
             'clause_no': clause_no, 'promise_doc': promise,
+            'clause_role': _classify_invalid_clause_role(clause_txt, clause_no),
         })
 
     for m in _PATTERN_B_RE.finditer(text):
         start, end, clause_no = _expand_enclosing_clause(text, m.start(), m.end())
+        clause_txt = text[start:end]
+        # 防整段吸附：若向后吸附到了「三、评标办法」大节标题，收缩到触发词所在的数字子项
+        if _EVAL_BLOCK_HEADER_RE.search(clause_txt.lstrip()) and m.start() > start:
+            sub_matches = list(_SUB_ITEM_NUM_RE.finditer(text, start, m.start()))
+            if sub_matches:
+                last_sub = sub_matches[-1]
+                sub_offset = last_sub.start(1)
+                start = sub_offset
+                clause_no = last_sub.group(1).strip()
+                clause_txt = text[start:end]
         records.append({
-            'pattern': 'B', 'text': text[start:end], 'start': start, 'end': end,
+            'pattern': 'B', 'text': clause_txt, 'start': start, 'end': end,
             'clause_no': clause_no, 'promise_doc': '',
+            'clause_role': _classify_invalid_clause_role(clause_txt, clause_no),
         })
 
     records.sort(key=lambda r: (r['start'], 0 if r['pattern'] == 'A' else 1))
@@ -444,6 +584,22 @@ def extract_invalid_bid_clauses(text: str) -> list[dict]:
         if deduped and r['start'] < deduped[-1]['end']:
             continue
         deduped.append(r)
+
+    # 若全文无 ★/▲ 实质性标记条款，从第四章采购需求补充技术/商务条款供 F4/F5 逐条对位
+    marked_reqs = [
+        h for h in extract_marked_clauses(text)
+        if h.get('kind') == 'requirement'
+    ]
+    if not marked_reqs:
+        ch4_items = extract_chapter4_procurement_requirements(text)
+        for item in ch4_items:
+            if not any(
+                not (item['end'] <= r['start'] or item['start'] >= r['end'])
+                for r in deduped
+            ):
+                deduped.append(item)
+        deduped.sort(key=lambda r: r['start'])
+
     return deduped
 
 

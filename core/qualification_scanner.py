@@ -21,14 +21,17 @@
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import date
 
 from typing import Any, Optional
 
+from core.quote_verifier import verify_quote
+
 __all__ = ['scan_qualifications', 'parse_cn_date', 'parse_month',
-           'collect_covered_months', 'match_required_certificates_with_ledger',
-           'PLACEHOLDER_RE']
+           'collect_covered_months', 'resolve_effective_social_requirement',
+           'match_required_certificates_with_ledger', 'PLACEHOLDER_RE']
 
 _DAYS_NEAR_WARN = 30
 _CTX = 30                       # 串名命中上下文半径
@@ -117,7 +120,7 @@ _MONTH_RANGE_RE = re.compile(
 # 单月：2026年08月 / 2026-08 / 202608（排除 2026-10-28 完整年月日及 202610-014 项目编号）
 _MONTH_SINGLE_RE = re.compile(
     r'(?:'
-    r'(?<!\d)((?:19|20)\d{2})\s*(?:年\s*(\d{1,2})\s*月?(?!\s*\d+\s*日)|[\-\/\.]\s*(\d{1,2})(?!\s*[\-\/\.\d日]))'
+    r'(?<!\d)((?:19|20)\d{2})\s*(?:年\s*(\d{1,2})\s*月(?!\s*\d+\s*日)|[\-\/\.]\s*(\d{1,2})(?!\s*[\-\/\.\d日]))'
     r'|(?<!\d)((?:19|20)\d{2})(0[1-9]|1[0-2])(?!\s*[\-\/\.\d日])'
     r')'
 )
@@ -165,28 +168,281 @@ def collect_covered_months(text: str) -> set:
     return covered
 
 
-def _scan_social(text: str, required: list) -> list:
+# 会计附注/非社保凭证噪声特征与非社保日期行过滤
+_ACCOUNTING_NOTE_NOISE_RE = re.compile(
+    r'设定提存计划|离职后福利|会计期间|当期损益|短期薪酬|辞退福利|准则规定|财务报表附注'
+)
+_TENDER_REQ_ECHO_RE = re.compile(
+    r'投标人须提供参加本次政府采购|依法不需要缴纳社会保障资金的投标人|资格证明文件.*目录'
+)
+_NON_SOCIAL_LINE_NOISE_RE = re.compile(
+    r'出生(?:日期|年月)?|身份证|公民身份号码|证书有效期|有效期[至：:]|发证日期|注册日期|成立日期|营业期限|审计报告'
+)
+_SOCIAL_PROOF_ANCHOR_RE = re.compile(
+    r'社会保险基金管理|社保权益|参保缴费|社保缴纳|社保证明|社会保险费|缴费人数|缴费情况|费款所属期|所属期|社会保险|养老保险|社会保障资金|社保'
+)
+_STRONG_SOCIAL_PROOF_RE = re.compile(
+    r'社会保险基金管理|社保权益|参保缴费|社保缴纳|社保证明|缴费人数|缴费情况|费款所属期|所属期'
+)
+
+
+def _prev_year_months(ref_d: date, count: int) -> list[str]:
+    """以开标日所在月的前一个月为起点，向前推算 count 个连续月份（升序返回 YYYY-MM）。"""
+    y, m = ref_d.year, ref_d.month
+    out: list[str] = []
+    for _ in range(max(0, count)):
+        m -= 1
+        if m <= 0:
+            y -= 1
+            m = 12
+        out.append(parse_month(y, m))
+    out.sort()
+    return out
+
+
+def resolve_effective_social_requirement(
+    tender_text: str,
+    open_date_str: str,
+    manual_months: Optional[list[str]] = None,
+    rule_months: Optional[list[str]] = None,
+    rule_open_date: Optional[str] = None,
+    *,
+    configured_months: Optional[list[str]] = None,
+    is_user_explicit: bool = False,
+) -> tuple[list[str], Optional[int]]:
+    """根据任务手填配置、招标书原文要求与有效开标日，解析本次应核验的社保月份列表及最少覆盖月数。
+
+    Returns:
+        (required_months, social_min_count)
+        - social_min_count 为 None 时表示 required_months 需全部覆盖；
+        - 为正整数 k（如 1）时表示在 required_months 候选窗口内至少覆盖 k 个月即可（对应“近半年任意一个月”）。
+    """
+    if configured_months is not None:
+        if is_user_explicit:
+            manual_months = configured_months
+        else:
+            rule_months = configured_months
+    elif manual_months and rule_months is None and not is_user_explicit:
+        if list(manual_months) == ['2026-08', '2026-09', '2026-10']:
+            rule_months = manual_months
+            manual_months = None
+
+    if manual_months:
+        return list(manual_months), None
+
+    open_d = parse_cn_date(open_date_str or '')
+    t_txt = tender_text or ''
+
+    if open_d is not None and t_txt:
+        # 1) “最近半年任意一个月” / “近六个月内任意一个月” / “近半年内任一个月”
+        if re.search(
+            r'(?:最近|近)\s*(?:半年|六个月|6\s*个月)[^\n。；]{0,25}?(?:任意\s*[一1]\s*个月|任\s*[一1]\s*个月)'
+            r'[^\n。；]{0,30}?(?:社会保障|社会保险|社保)',
+            t_txt,
+        ):
+            return _prev_year_months(open_d, 6), 1
+
+        # 2) “近三个月” / “最近3个月” / “连续三个月” 社保
+        m_n = re.search(
+            r'(?:最近|近|连续)\s*([一二三四五六1-6])\s*个月[^\n。；]{0,25}?(?:社会保障|社会保险|社保)',
+            t_txt,
+        )
+        if m_n:
+            cn_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6}
+            tok = m_n.group(1)
+            n_val = cn_map.get(tok) if tok in cn_map else int(tok)
+            return _prev_year_months(open_d, n_val), None
+
+    # 3) 若未手动指定，仅当规则默认月份与当前有效开标日同属一个年份窗口时才采用 rule_months
+    if rule_months:
+        if open_d is None:
+            return list(rule_months), None
+        rule_d = parse_cn_date(rule_open_date or '')
+        rule_years = {str(m)[:4] for m in rule_months if isinstance(m, str) and len(m) >= 4}
+        if (rule_d is not None and abs((open_d - rule_d).days) <= 120) or (
+            str(open_d.year) in rule_years
+        ):
+            return list(rule_months), None
+
+    return [], None
+
+
+def _sanitize_window_lines(window_text: str) -> str:
+    """剔除局部窗口中的身份证出生年月、证书有效期、打印填发日期、会计准则附注等非社保日期干扰行。"""
+    clean_lines: list[str] = []
+    for ln in (window_text or '').splitlines():
+        if _ACCOUNTING_NOTE_NOISE_RE.search(ln):
+            continue
+        if _NON_SOCIAL_LINE_NOISE_RE.search(ln) and not _STRONG_SOCIAL_PROOF_RE.search(ln):
+            continue
+        # 剔除同行内的“有效期至 YYYY-MM-DD”、“出生 YYYY-MM”、“填发日期/打印日期 YYYY年MM月DD日”及具体到“日”的完整日期
+        ln_clean = re.sub(
+            r'(?:有效期[至到：:\s]*|出生(?:日期|年月)?[：:\s]*|填发日期[：:\s]*|打印日期[：:\s]*)\d{4}\s*[年\-\/\.]\s*\d{1,2}(?:\s*[月\-\/\.]\s*\d{1,2}\s*日?)?',
+            ' ',
+            ln,
+        )
+        ln_clean = re.sub(
+            r'\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日',
+            ' ',
+            ln_clean,
+        )
+        clean_lines.append(ln_clean)
+    return '\n'.join(clean_lines)
+
+
+def _extract_social_context_windows(text: str) -> list[tuple[int, int, str, bool]]:
+    """提取投标书中与社保证明相关的局部语境窗口列表：[(start, end, window_text, is_strong)]。"""
+    if not text:
+        return []
+    # 短文本（如单测直接传入 '所属期：2026年08月至2026年09月'）直接作为单窗口处理
+    if len(text) <= 400 and not _ACCOUNTING_NOTE_NOISE_RE.search(text):
+        sanitized = _sanitize_window_lines(text)
+        if sanitized.strip():
+            return [(0, len(text), sanitized, True)]
+        return []
+
+    raw_spans: list[tuple[int, int]] = []
+    for m in _SOCIAL_PROOF_ANCHOR_RE.finditer(text):
+        lo = max(0, m.start() - 160)
+        hi = min(len(text), m.end() + 240)
+        if raw_spans and lo <= raw_spans[-1][1]:
+            raw_spans[-1] = (raw_spans[-1][0], max(raw_spans[-1][1], hi))
+        else:
+            raw_spans.append((lo, hi))
+
+    windows: list[tuple[int, int, str, bool]] = []
+    for lo, hi in raw_spans:
+        win_raw = text[lo:hi]
+        # 若窗口纯属财务审计报告附注（离职后福利/设定提存计划/会计期间）且无真实社保经办/缴费表特征，直接排除
+        if _ACCOUNTING_NOTE_NOISE_RE.search(win_raw) and not _STRONG_SOCIAL_PROOF_RE.search(win_raw):
+            continue
+        is_strong = bool(_STRONG_SOCIAL_PROOF_RE.search(win_raw)) and not bool(
+            _TENDER_REQ_ECHO_RE.search(win_raw)
+        )
+        sanitized = _sanitize_window_lines(win_raw)
+        if sanitized.strip():
+            windows.append((lo, hi, sanitized, is_strong))
+    return windows
+
+
+def _llm_verify_social_window(client: Any, win_text: str, full_text: str) -> Optional[set[str]]:
+    """受控大模型局部窗语义鉴别：仅判断 200~400 字窗口是否为真实社保缴费证明并提取原文月份片段（强制过 verify_quote）。"""
+    if client is None or not win_text.strip():
+        return None
+    snippet = win_text.strip()[:400]
+    prompt = (
+        "请判断以下投标文件局部片段是否属于【真实的社保参保/缴费证明凭证】（排除财务审计报告会计附注、"
+        "离职后福利设定提存计划说明、招标要求复述、身份证出生日期或ISO证书有效期）。\n"
+        "若是真实社保证明，请提取其中载明的社保缴费/所属期原文子串 quotes；若不是，is_social_proof 返回 false。\n"
+        "严格输出 JSON：{\"is_social_proof\": true/false, \"quotes\": [\"原文连续子串\"]}\n\n"
+        f"【局部片段】：\n{snippet}"
+    )
+    try:
+        resp = client.chat([{'role': 'user', 'content': prompt}], model_tier='flash')
+        raw = getattr(resp, 'content', '') or ''
+        m_json = re.search(r'\{[\s\S]*\}', raw)
+        if not m_json:
+            return None
+        parsed = json.loads(m_json.group(0))
+        if not isinstance(parsed, dict):
+            return None
+        if parsed.get('is_social_proof') is False:
+            return set()
+        quotes = parsed.get('quotes') or []
+        verified_months: set[str] = set()
+        for q in quotes:
+            q_str = str(q or '').strip()
+            if q_str and verify_quote(q_str, full_text):
+                verified_months |= collect_covered_months(q_str)
+        return verified_months if verified_months else None
+    except Exception:
+        return None
+
+
+def _collect_social_covered_months(
+    text: str,
+    client: Any = None,
+) -> tuple[set[str], str, Optional[int]]:
+    """从社保证明局部语境窗口收集覆盖月份（绝不裸抓全书生日/证书到期日），返回 (covered_months, excerpt, offset)。"""
+    windows = _extract_social_context_windows(text)
+    if not windows:
+        return set(), '', None
+
+    strong_wins = [w for w in windows if w[3]]
+    target_wins = strong_wins if strong_wins else windows
+
+    covered: set[str] = set()
+    best_excerpt = ''
+    best_offset: Optional[int] = None
+
+    for lo, hi, sanitized_win, is_strong in target_wins:
+        win_months = collect_covered_months(sanitized_win)
+        if client is not None and win_months and not is_strong:
+            llm_months = _llm_verify_social_window(client, text[lo:hi], text)
+            if llm_months is not None:
+                win_months = llm_months
+        covered |= win_months
+        if best_offset is None and (win_months or is_strong):
+            raw_win = text[lo:hi]
+            m_anchor = _STRONG_SOCIAL_PROOF_RE.search(raw_win) or _SOCIAL_PROOF_ANCHOR_RE.search(raw_win)
+            anchor_rel = max(0, m_anchor.start() - 20) if m_anchor else 0
+            best_offset = lo + (m_anchor.start() if m_anchor else 0)
+            raw_slice = raw_win[anchor_rel:min(len(raw_win), anchor_rel + 120)].replace('\n', ' ').strip()
+            best_excerpt = raw_slice
+
+    if best_offset is None and target_wins:
+        lo, hi, _, _ = target_wins[0]
+        raw_win = text[lo:hi]
+        m_anchor = _STRONG_SOCIAL_PROOF_RE.search(raw_win) or _SOCIAL_PROOF_ANCHOR_RE.search(raw_win)
+        anchor_rel = max(0, m_anchor.start() - 20) if m_anchor else 0
+        best_offset = lo + (m_anchor.start() if m_anchor else 0)
+        best_excerpt = raw_win[anchor_rel:min(len(raw_win), anchor_rel + 120)].replace('\n', ' ').strip()
+
+    return covered, best_excerpt, best_offset
+
+
+def _scan_social(
+    text: str,
+    required: list,
+    client: Any = None,
+    social_min_count: Optional[int] = None,
+) -> list:
     if not required:
         return []
-    covered = collect_covered_months(text)
-    missing = [mo for mo in required if mo not in covered]
-    if not missing:
-        return []
-    m_soc = re.search(r'社会保险|社保证明|社保缴纳|养老保险|社保', text or '')
-    soc_offset = m_soc.start() if m_soc else None
-    if m_soc:
-        lo = max(0, m_soc.start() - 10)
-        hi = min(len(text), m_soc.end() + 60)
-        raw_excerpt = text[lo:hi].replace('\n', ' ').strip()
-        quote_str = f'{raw_excerpt}（检出月份：{",".join(sorted(covered)) or "无"}）'
+    req_set = set(required)
+    covered, raw_excerpt, soc_offset = _collect_social_covered_months(text or '', client=client)
+    matched_req = covered & req_set
+
+    if social_min_count is not None and social_min_count > 0:
+        if len(matched_req) >= social_min_count:
+            return []
+        missing = sorted(req_set - covered)
     else:
-        quote_str = f'标书社保月份覆盖：{",".join(sorted(covered)) or "（全文未检出社保证明所属期月份）"}'
+        missing = [mo for mo in required if mo not in covered]
+        if not missing:
+            return []
+
+    if raw_excerpt:
+        quote_str = f'{raw_excerpt}（社保证明窗检出月份：{",".join(sorted(covered)) or "无"}）'
+    else:
+        quote_str = '全文未检出有效社保证明缴费记录窗（已排除审计报告会计附注与证件效期干扰）'
+
+    if social_min_count is not None and social_min_count > 0:
+        msg = (
+            f'社保证明月份不满足要求：要求在近半年窗口（{",".join(sorted(required))}）内至少提供 '
+            f'{social_min_count} 个月社保证明，标书社保证明窗仅检出 {len(matched_req)} 个月'
+        )
+    else:
+        msg = (
+            f'社保证明月份不全：要求 {len(required)} 个月'
+            f'（{",".join(sorted(required))}），标书仅覆盖要求中的 '
+            f'{len(matched_req)} 个月，缺失 '
+            f'{len(missing)} 个月：{",".join(sorted(missing))}'
+        )
+
     return [{
         'code': 'SOCIAL_MONTH_MISSING', 'severity': 'error',
-        'message': f'社保证明月份不全：要求 {len(required)} 个月'
-                   f'（{",".join(sorted(required))}），标书仅覆盖要求中的 '
-                   f'{len(covered & set(required))} 个月，缺失 '
-                   f'{len(missing)} 个月：{",".join(sorted(missing))}',
+        'message': msg,
         'required_months': sorted(required), 'missing_months': sorted(missing),
         'covered_months': sorted(covered),
         'quote': quote_str,
@@ -258,8 +514,11 @@ def scan_qualifications(text: str,
                         open_date: str,
                         required_social_months: list = None,
                         forbidden_names: list = None,
-                        target_buyer: str = '') -> list:
-    """F3 四大防线主入口（0 Token）。
+                        target_buyer: str = '',
+                        *,
+                        client: Any = None,
+                        social_min_count: Optional[int] = None) -> list:
+    """F3 四大防线主入口（默认 0 Token 确定性局部窗，可选传入 client 对模糊社保窗做受控语义鉴别）。
 
     Args:
         text: 投标文件全文（parser 展平文本）。
@@ -267,6 +526,8 @@ def scan_qualifications(text: str,
         required_social_months: 要求的社保月份，如 ["2026-08", "2026-09", "2026-10"]。
         forbidden_names: 绝对不该出现的历史名称列表。
         target_buyer: 本次真实招标方名称（可选，防禁用词配置自伤）。
+        client: 可选 LLM 客户端（仅对模糊候选窗口做语义核实并强制过 verify_quote，日期差与集合覆盖 100% Python 计算）。
+        social_min_count: 可选，候选月份窗口内最少需覆盖的月数（如“近半年任意一个月”传 1）。
 
     Returns:
         findings 列表（格式同 F2），空列表 = 全部通过。
@@ -278,7 +539,12 @@ def scan_qualifications(text: str,
     text = text or ''
     findings = []
     findings += _scan_expiry(text, open_d)
-    findings += _scan_social(text, required_social_months or [], )
+    findings += _scan_social(
+        text,
+        required_social_months or [],
+        client=client,
+        social_min_count=social_min_count,
+    )
     findings += _scan_forbidden(text, forbidden_names or [], target_buyer or '')
     findings += _scan_placeholder(text)
     return findings

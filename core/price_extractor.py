@@ -470,14 +470,223 @@ def _parse_duration_factor(
     return _parse_qty_str(s)
 
 
-def extract_price_cap(text: str) -> str | None:
+_CN_PKG_NUM_MAP = {
+    '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+    '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+}
+
+_PKG_TOKEN_RE = re.compile(
+    r'(?:(?:第|采购|分)?\s*0*([1-9][0-9]?)\s*包'
+    r'|(?:采购包|分包|标段|包号)[：:\s]*0*([1-9][0-9]?)(?:\s*包)?'
+    r'|(?:第|采购|分)([一二三四五六七八九十])包'
+    r'|(?:采购包|分包|标段|包号)[：:\s]*([一二三四五六七八九十])(?:\s*包)?)',
+    re.IGNORECASE,
+)
+
+
+def _parse_pkg_token_to_int(m: re.Match) -> int | None:
+    for idx in (1, 2):
+        g = m.group(idx)
+        if g:
+            try:
+                return int(g)
+            except ValueError:
+                pass
+    for idx in (3, 4):
+        g = m.group(idx)
+        if g and g in _CN_PKG_NUM_MAP:
+            return _CN_PKG_NUM_MAP[g]
+    return None
+
+
+def _detect_target_package_no(
+    file_path: str | Path | None = None,
+    tender_path: str | Path | None = None,
+    bid_text: str = '',
+    tender_text: str = '',
+) -> int | None:
+    """从投标/招标文件名或标书前部包号声明中识别当前所属分包号（如 04包 -> 4, 02包 -> 2）。"""
+    for p in (file_path, tender_path):
+        if p is None:
+            continue
+        name = Path(p).name
+        m = _PKG_TOKEN_RE.search(name)
+        if m:
+            pkg_no = _parse_pkg_token_to_int(m)
+            if pkg_no is not None:
+                return pkg_no
+
+    for txt in (bid_text[:4000] if bid_text else '', tender_text[:2500] if tender_text else ''):
+        if not txt:
+            continue
+        m_explicit = re.search(
+            r'包\s*号\s*[：:]\s*(?:第)?\s*0*([1-9][0-9]?|[一二三四五六七八九十])\s*包?',
+            txt,
+        )
+        if m_explicit:
+            raw_tok = m_explicit.group(1)
+            if raw_tok in _CN_PKG_NUM_MAP:
+                return _CN_PKG_NUM_MAP[raw_tok]
+            try:
+                return int(raw_tok)
+            except ValueError:
+                pass
+    return None
+
+
+def _extract_package_specific_cap(text: str, pkg_no: int) -> str | None:
+    """当明确归属某分包（pkg_no）时，从多包招标文件中精准提取该分包的预算/最高限价（单位：元）。"""
+    if not text or pkg_no <= 0:
+        return None
+
+    cn_reverse = {v: k for k, v in _CN_PKG_NUM_MAP.items()}
+    cn_tok = cn_reverse.get(pkg_no, '')
+    pkg_num_pat = f"(?:0*{pkg_no}" + (f"|{re.escape(cn_tok)}" if cn_tok else "") + ")"
+
+    # 1. 行内/短跨行明确分包预算或限价（如 "04包预算 50万元" / "分包四：采购预算 50 万元" / "包号：04 ... 50万元"）
+    inline_re = re.compile(
+        rf'(?:(?:第|采购|分)?\s*{pkg_num_pat}\s*包|(?:采购包|分包|标段|包号)[：:\s]*{pkg_num_pat}\b)'
+        r'[^\n。；]{0,45}?'
+        r'(?:最高(?:投标)?限价|采购预算|预算金额|项目预算|分包预算|预算|限价)?'
+        r'[^0-9\n]{0,20}?'
+        r'([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|万|元)',
+        re.IGNORECASE,
+    )
+    for m in inline_re.finditer(text):
+        num_s, unit = m.group(1), m.group(2)
+        try:
+            val = Decimal(num_s.replace(',', ''))
+        except InvalidOperation:
+            continue
+        if val <= 0:
+            continue
+        if '万' in unit:
+            val = val * WAN
+        if val >= Decimal('100'):
+            return _fmt_yuan(val)
+
+    # 2. 多包一览表结构（如 BJTU 招标书：表头含 "包号 ... 分包预算（万元）"，数据行按 01/02/03/04 纵向或横向排列）
+    hdr_m = re.search(
+        r'包\s*号[\s\S]{0,80}?(?:分包预算|包预算|采购预算|预算金额|最高限价)\s*(?:[（(]\s*(万元|万|元)\s*[)）])?',
+        text,
+    )
+    if hdr_m:
+        hdr_unit = hdr_m.group(1) or '万元'
+        is_wan = ('万' in hdr_unit)
+        table_window = text[hdr_m.end():hdr_m.end() + 2500]
+        # 截断到表格结束标志
+        stop_m = re.search(r'(?:合同履行期限|本项目[（(]?不?接受|二、申请人的资格要求|三、获取招标文件)', table_window)
+        if stop_m:
+            table_window = table_window[:stop_m.start()]
+
+        lines = [ln.strip() for ln in table_window.splitlines() if ln.strip()]
+        target_exact = {str(pkg_no), f"{pkg_no:02d}", f"{pkg_no}包", f"{pkg_no:02d}包"}
+        if cn_tok:
+            target_exact.update({cn_tok, f"{cn_tok}包", f"分包{cn_tok}"})
+
+        for i, ln in enumerate(lines):
+            # 情况 A：单行包含包号与后续数值（如 "04 工业物性数据应用开发平台 1 套 50 否"）
+            m_row = re.match(
+                rf'^(?:0*{pkg_no}(?:包)?)\s+\S+.*?\s+([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|万|元)?(?:\s+(?:是|否))?\s*$',
+                ln,
+            )
+            if m_row:
+                try:
+                    val = Decimal(m_row.group(1).replace(',', ''))
+                    u_row = m_row.group(2) or hdr_unit
+                    if '万' in u_row:
+                        val = val * WAN
+                    if val >= Decimal('100'):
+                        return _fmt_yuan(val)
+                except InvalidOperation:
+                    pass
+
+            # 情况 B：PDF 纵向拆行单元格（独立一行 "04"，随后几行依次为 分包名称、数量 "1 套"、预算 "50"）
+            if ln in target_exact:
+                for sub_ln in lines[i + 1:i + 7]:
+                    if re.match(r'^0*[1-9][0-9]?$', sub_ln) and sub_ln not in target_exact:
+                        # 已经进入下一个包号
+                        break
+                    # 跳过数量行（如 "1 套"、"1项"）
+                    if re.match(r'^[0-9]+(?:\.[0-9]+)?\s*[套项台个批年人月次份系统]+\s*$', sub_ln):
+                        continue
+                    m_num = re.match(r'^([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|万|元)?$', sub_ln)
+                    if m_num:
+                        try:
+                            val = Decimal(m_num.group(1).replace(',', ''))
+                        except InvalidOperation:
+                            continue
+                        u_sub = m_num.group(2) or ('万元' if is_wan else '元')
+                        if '万' in u_sub:
+                            val = val * WAN
+                        if val >= Decimal('100'):
+                            return _fmt_yuan(val)
+
+    return None
+
+
+def _extract_bid_letter_reference(text: str) -> tuple[str | None, str | None]:
+    """从《投标函》或正文中提取参考投标总价（小写元、大写原文），供扫描/空白一览表场景辅助提示。"""
+    if not text:
+        return None, None
+
+    # 匹配形如 "投标总价为人民币（肆拾柒万元470000）" / "投标总价为人民币 470000 元（大写：肆拾柒万元整）"
+    patterns = (
+        re.compile(
+            r'投标(?:总)?(?:价|报价)(?:[^\n。；]{0,25}?)'
+            r'([零壹贰叁肆伍陆柒捌玖拾佰仟万亿]{2,}(?:万元|万|元|圆)(?:整|正|[零壹贰叁肆伍陆柒捌玖拾佰仟万角分]*))'
+            r'[\s，,（(：:￥¥]*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|元)?',
+        ),
+        re.compile(
+            r'投标(?:总)?(?:价|报价)(?:为|是)?(?:人民币)?[（(\s：:￥¥]*'
+            r'([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|元)'
+            r'(?:[^。\n]{0,30}?([零壹贰叁肆伍陆柒捌玖拾佰仟万亿]{2,}(?:万元|万|元|圆)(?:整|正)?))?',
+        ),
+    )
+    m1 = patterns[0].search(text)
+    if m1:
+        upper_raw = m1.group(1).strip()
+        num_s = m1.group(2).replace(',', '')
+        unit = m1.group(3) or '元'
+        try:
+            d = Decimal(num_s)
+            if unit == '万元' or (not m1.group(3) and d < Decimal('1000') and '万' in upper_raw):
+                d = d * WAN
+            if d > 0:
+                return _fmt_yuan(d), upper_raw
+        except InvalidOperation:
+            pass
+
+    m2 = patterns[1].search(text)
+    if m2:
+        num_s = m2.group(1).replace(',', '')
+        unit = m2.group(2) or '元'
+        upper_raw = (m2.group(3) or '').strip() or None
+        try:
+            d = Decimal(num_s)
+            if '万' in unit:
+                d = d * WAN
+            if d > 0:
+                return _fmt_yuan(d), upper_raw
+        except InvalidOperation:
+            pass
+
+    return None, None
+
+
+def extract_price_cap(text: str, package_no: int | None = None) -> str | None:
     """从招标/投标文件全文中提取最高限价或采购预算（统一折算为元）。
 
     依据《政府采购法实施条例》第 33 条：未单独设定最高限价时，以采购预算作为法定上限。
-    优先级：最高限价 / 控制价（同行 -> 跨行） > 表头带单位限价/预算 > 采购预算 / 预算金额（同行 -> 跨行 -> 分包）。
+    优先级：明确分包号时的对应分包预算/限价 > 最高限价 / 控制价（同行 -> 跨行） > 表头带单位限价/预算 > 采购预算 / 预算金额（同行 -> 跨行 -> 分包）。
     """
     if not text:
         return None
+
+    if package_no is not None:
+        pkg_cap = _extract_package_specific_cap(text, package_no)
+        if pkg_cap is not None:
+            return pkg_cap
 
     for regex in (
         _CAP_HIGH_RE,
@@ -1872,11 +2081,17 @@ def extract_price_from_text(text: str) -> dict:
     }
 
 
-def extract_price_data(file_path: str | Path, tender_path: str | Path | None = None) -> dict:
+def extract_price_data(
+    file_path: str | Path,
+    tender_path: str | Path | None = None,
+    parsed_doc=None,
+    tender_parsed_doc=None,
+) -> dict:
     """从投标文件（或招标文件）提取 PriceSandbox 所需的全部结构化字段。"""
     path = Path(file_path)
-    parsed = parse_document(str(path))
+    parsed = parsed_doc if parsed_doc is not None else parse_document(str(path))
     text_res = extract_price_from_text(parsed.text)
+    ref_total, ref_upper = _extract_bid_letter_reference(parsed.text)
 
     res = {
         'status': text_res['status'],
@@ -1886,6 +2101,8 @@ def extract_price_data(file_path: str | Path, tender_path: str | Path | None = N
         'bid_total': text_res['bid_total'],
         'bid_total_upper': text_res['bid_total_upper'],
         'price_cap': text_res['price_cap'],
+        'reference_bid_total': ref_total or text_res['bid_total'],
+        'reference_bid_total_upper': ref_upper or text_res['bid_total_upper'],
         'has_price_table_skeleton': False,
         'has_subtotal_summary_mismatch': False,
         'warnings': list(text_res.get('warnings') or []),
@@ -1919,25 +2136,42 @@ def extract_price_data(file_path: str | Path, tender_path: str | Path | None = N
         if res['price_cap'] is None and tbl_res['price_cap'] is not None:
             res['price_cap'] = tbl_res['price_cap']
 
+    tender_text = ''
     if tender_path is not None:
-        tender_parsed = parse_document(str(tender_path))
-        t_cap = extract_price_cap(tender_parsed.text)
+        tender_parsed = tender_parsed_doc if tender_parsed_doc is not None else parse_document(str(tender_path))
+        tender_text = tender_parsed.text
+        pkg_no = _detect_target_package_no(
+            file_path=path,
+            tender_path=tender_path,
+            bid_text=parsed.text,
+            tender_text=tender_text,
+        )
+        t_cap = extract_price_cap(tender_text, package_no=pkg_no)
         if t_cap is None and Path(tender_path).suffix.lower() == '.docx':
             from docx import Document
             t_doc = Document(str(tender_path))
             t_cap = _extract_from_docx_tables(t_doc).get('price_cap')
         if t_cap is not None:
             res['price_cap'] = t_cap
+    else:
+        pkg_no = _detect_target_package_no(file_path=path, bid_text=parsed.text)
+        if pkg_no is not None:
+            pkg_cap = _extract_package_specific_cap(parsed.text, pkg_no)
+            if pkg_cap is not None:
+                res['price_cap'] = pkg_cap
 
     if res['items'] or res['bid_total'] is not None:
         res['status'] = 'OK'
         res['reason'] = ''
     else:
         res['status'] = 'NEED_MANUAL'
+        ref_hint = ''
+        if res.get('reference_bid_total'):
+            ref_hint = f"（投标函检出参考总价 {res['reference_bid_total']} 元，可核对回填）"
         if res['has_price_table_skeleton']:
-            res['reason'] = '已定位到报价表结构，但金额单元格为空白模板或未填报，请人工框选或确认'
+            res['reason'] = f"已定位到报价表结构，但金额单元格为空白模板或未填报，请人工框选或确认{ref_hint}"
         else:
-            res['reason'] = '未定位到结构化报价表或有效投标报价金额，请人工框选报价区域'
+            res['reason'] = f"未定位到结构化报价表或有效投标报价金额，请人工框选报价区域{ref_hint}"
 
     return res
 
@@ -1990,9 +2224,19 @@ def _attach_f2_anchor_texts(extracted: dict) -> None:
                 f['anchor_text'] = m_amt.group(1)
 
 
-def run_price_check(bid_path: str | Path, tender_path: str | Path | None = None) -> dict:
+def run_price_check(
+    bid_path: str | Path,
+    tender_path: str | Path | None = None,
+    parsed_doc=None,
+    tender_parsed_doc=None,
+) -> dict:
     """端到端辅助入口：提取报价结构 -> 若 status=='OK' 则送入 PriceSandbox 核验，并合并提取层 warning。"""
-    extracted = extract_price_data(bid_path, tender_path=tender_path)
+    extracted = extract_price_data(
+        bid_path,
+        tender_path=tender_path,
+        parsed_doc=parsed_doc,
+        tender_parsed_doc=tender_parsed_doc,
+    )
     extractor_warnings = list(extracted.get('warnings') or [])
     if extracted['status'] != 'OK':
         extracted['findings'] = extractor_warnings

@@ -30,6 +30,7 @@ import type {
   PriceManualBackfillRequest,
   QaAskRequest,
   QaAskResponseOut,
+  QaLastTurnWithdrawOut,
   QaSessionCreatePayload,
   QaSessionOut,
   RadarScanOut,
@@ -351,6 +352,9 @@ export const qaApi = {
     return () => {
       controller.abort()
     }
+  },
+  deleteLastTurn(sessionId: number): Promise<QaLastTurnWithdrawOut> {
+    return del<QaLastTurnWithdrawOut>(`/qa/sessions/${sessionId}/last-turn`)
   },
 }
 

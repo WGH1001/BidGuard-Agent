@@ -64,6 +64,7 @@ const authStore = useAuthStore()
 const loadingInit = localRef(false)
 const creatingSession = localRef(false)
 const uploadingAttachment = localRef(false)
+const lastTurnPersisted = localRef(true)
 const msgListRef = localRef<InstanceType<typeof QaMessageList> | null>(null)
 
 const tasks = cachedTasks
@@ -345,6 +346,7 @@ async function handleSendQuestion(question: string, attachmentIds: string[] = []
   const assistantMsgIdx = messages.value.length - 1
 
   asking.value = true
+  lastTurnPersisted.value = false
   stopActiveQaStream()
 
   const payload = {
@@ -369,6 +371,7 @@ async function handleSendQuestion(question: string, attachmentIds: string[] = []
     },
     async onDone(finalRes) {
       cancelActiveStreamFn = null
+      lastTurnPersisted.value = true
       const msg = messages.value[assistantMsgIdx]
       if (msg && msg.role === 'assistant') {
         messages.value[assistantMsgIdx] = {
@@ -386,11 +389,31 @@ async function handleSendQuestion(question: string, attachmentIds: string[] = []
       const updatedList = await qaApi.listSessions(selectedTaskId.value ?? undefined)
       sessions.value = updatedList || []
     },
-    async onError() {
+    async onError(errMsg) {
       cancelActiveStreamFn = null
-      // 流式连接失败时优雅降级调用同步 qaApi.ask 兜底
+      const msg = messages.value[assistantMsgIdx]
+      const completedSteps = msg?.steps ? msg.steps.length : 0
+      const hasPartialAnswer = Boolean(msg?.content && msg.content.trim().length > 0)
+
+      // E27 §2.2.3：若流式中途已产出多步工具轨迹或部分回答，保留已有轨迹并提示重试/撤回，严禁盲调同步接口用 0-Token 覆盖
+      if (msg && msg.role === 'assistant' && (completedSteps > 0 || hasPartialAnswer)) {
+        msg.loading = false
+        msg.streaming = false
+        msg.mode = 'react'
+        if (!hasPartialAnswer) {
+          msg.content = `⚠️ 模型网关响应超时或连接中断（已完成 ${completedSteps} 步工具检索：${errMsg || 'Connection timeout'}）。已为您保留上方检索到的工具轨迹，可点击下方「重新生成回答」重试或「撤回本轮回答」调整提问。`
+        } else {
+          msg.content = `${msg.content}\n\n[提示：模型网关流式响应中途断开（${errMsg || 'Connection interrupted'}），可点击下方「重新生成回答」重试]`
+        }
+        asking.value = false
+        msgListRef.value?.scrollToBottom()
+        return
+      }
+
+      // 仅在流式连接尚未执行任何工具步即失败时，降级调用同步 qaApi.ask 兜底
       try {
         const res = await qaApi.ask(targetSessionId, payload)
+        lastTurnPersisted.value = true
         if (messages.value[assistantMsgIdx]?.role === 'assistant') {
           messages.value[assistantMsgIdx] = {
             role: 'assistant',
@@ -404,15 +427,95 @@ async function handleSendQuestion(question: string, attachmentIds: string[] = []
         }
         const updatedList = await qaApi.listSessions(selectedTaskId.value ?? undefined)
         sessions.value = updatedList || []
-      } catch {
-        if (messages.value[assistantMsgIdx]?.loading) {
-          messages.value.splice(assistantMsgIdx, 1)
+      } catch (askErr: unknown) {
+        const curMsg = messages.value[assistantMsgIdx]
+        const fallbackDetail =
+          askErr instanceof Error && askErr.message ? askErr.message : errMsg || '网关请求异常'
+        if (curMsg && curMsg.role === 'assistant') {
+          curMsg.loading = false
+          curMsg.streaming = false
+          curMsg.content = `⚠️ 模型网关连接超时或不可达（${fallbackDetail}）。已保护会话不被 0-Token 原始碎片污染，可排查 TUN 代理后点击下方「重新生成回答」，或点击「撤回本轮回答」调整提问。`
         }
       } finally {
         asking.value = false
       }
     },
   })
+}
+
+function handleStopGeneration(): void {
+  stopActiveQaStream()
+  asking.value = false
+  const lastIdx = messages.value.length - 1
+  const lastMsg = lastIdx >= 0 ? messages.value[lastIdx] : null
+  if (lastMsg && lastMsg.role === 'assistant' && (lastMsg.loading || lastMsg.streaming)) {
+    lastMsg.loading = false
+    lastMsg.streaming = false
+    if (!lastMsg.content || !lastMsg.content.trim()) {
+      const stepCount = lastMsg.steps ? lastMsg.steps.length : 0
+      lastMsg.content =
+        stepCount > 0
+          ? `⏹ 已手动停止生成（已保留上方 ${stepCount} 步工具检索结果，可点击「重新生成回答」重试或「撤回本轮回答」重新编辑）。`
+          : '⏹ 已手动停止本轮生成（可点击「重新生成回答」重试或「撤回本轮回答」重新编辑提问）。'
+    }
+  }
+}
+
+async function handleWithdrawLastTurn(fillInput = true): Promise<{
+  question: string
+  attachmentIds: string[]
+}> {
+  stopActiveQaStream()
+  asking.value = false
+
+  let withdrawnQuestion = ''
+  let withdrawnAttIds: string[] = []
+
+  if (messages.value.length > 0 && messages.value[messages.value.length - 1]?.role === 'assistant') {
+    messages.value.pop()
+  }
+  if (messages.value.length > 0 && messages.value[messages.value.length - 1]?.role === 'user') {
+    const lastUser = messages.value.pop()
+    withdrawnQuestion = String(lastUser?.content || '')
+    withdrawnAttIds = [...(lastUser?.attachment_ids || [])]
+  }
+
+  if (activeSessionId.value && lastTurnPersisted.value) {
+    try {
+      const out = await qaApi.deleteLastTurn(activeSessionId.value)
+      if (!withdrawnQuestion && out.withdrawn_question) {
+        withdrawnQuestion = out.withdrawn_question
+      }
+      if (withdrawnAttIds.length === 0 && out.withdrawn_attachment_ids?.length) {
+        withdrawnAttIds = [...out.withdrawn_attachment_ids]
+      }
+    } catch {
+      // 忽略网络异常，保证前端本地状态可撤回
+    }
+  }
+  lastTurnPersisted.value = true
+
+  if (fillInput) {
+    if (withdrawnQuestion) {
+      msgListRef.value?.setQuestionInput(withdrawnQuestion)
+    }
+    if (withdrawnAttIds.length > 0) {
+      selectedAttachmentIds.value = withdrawnAttIds
+    }
+    ElMessage.success('已撤回最后一轮回答，原问题已回填至输入框')
+  }
+
+  return { question: withdrawnQuestion, attachmentIds: withdrawnAttIds }
+}
+
+async function handleRegenerateLastTurn(): Promise<void> {
+  if (asking.value) return
+  const { question, attachmentIds } = await handleWithdrawLastTurn(false)
+  if (!question.trim()) {
+    ElMessage.warning('未找到可重新生成的上一轮提问')
+    return
+  }
+  await handleSendQuestion(question, attachmentIds)
 }
 
 onMounted(() => {
@@ -531,6 +634,9 @@ onBeforeUnmount(() => {
           @upload-attachment="handleUploadAttachment"
           @delete-attachment="handleDeleteAttachment"
           @update:reasoning-effort="setReasoningEffort"
+          @stop-stream="handleStopGeneration"
+          @withdraw-last="handleWithdrawLastTurn(true)"
+          @regenerate="handleRegenerateLastTurn"
         />
       </div>
     </section>

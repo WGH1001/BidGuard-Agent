@@ -41,7 +41,11 @@ from backend.utils.crypto import decrypt_api_key
 from core.llm_gateway import build_client_from_user_config, get_llm_client
 from core.parser import parse_document
 from core.price_extractor import run_price_check
-from core.qualification_scanner import parse_cn_date, scan_qualifications
+from core.qualification_scanner import (
+    parse_cn_date,
+    resolve_effective_social_requirement,
+    scan_qualifications,
+)
 from core.quote_verifier import verify_quote
 from core.response_checker import (
     _build_unified_page_context,
@@ -229,15 +233,27 @@ def _enrich_detail_with_page_meta(
     return out
 
 
-def resolve_f4_category_and_suggestion(f4_item: dict[str, Any]) -> tuple[str, str]:
-    """E5 ⑤ & ⑥：按 f4_item 的 mark 或 clause_no 前缀动态生成 category 与 suggestion。
+def resolve_f3_suggestion(f3_item: dict[str, Any]) -> str:
+    """E27 §2.1.2：按 F3 发现的 code 给出针对性整改建议，避免一刀切固定文案。"""
+    code_str = str(f3_item.get('code') or '').strip()
+    if code_str == 'SOCIAL_MONTH_MISSING':
+        return '请按本项目开标日期前的社保窗口期要求，补齐对应月份的单位社保缴纳证明或税务完税凭证扫描件'
+    if code_str in ('CERT_EXPIRED', 'CERT_EXPIRING'):
+        return '请替换处于本项目开标日期有效期内的最新证照/体系认证证书扫描件'
+    if code_str in ('FORBIDDEN_NAME', 'WRONG_BUYER_NAME'):
+        return '请全局排查并清理投标书中残留的外部项目或历史采购人单位名称，统一为本项目采购人全称'
+    if code_str == 'PLACEHOLDER':
+        return '请排查并补齐投标书中未填写的空白占位符（如 XXX、待定、空白下划线等）'
+    return '请替换有效期内证照或清理外部项目单位名称'
 
-    规则：
-    - 含 '★' -> category='★条款响应核验', suggestion 含 '对该 ★ 条款'
-    - 含 '▲' -> category='▲条款响应核验', suggestion 含 '对该 ▲ 条款'
-    - 无法判定 -> category='★/▲条款响应核验', suggestion 含 '对该 ★或▲ 条款'
-    （注：若为投标书内部前后承诺矛盾 scope=='bid_internal'，category 仍为 '前后承诺矛盾检测'）
-    """
+
+def resolve_f4_category_and_suggestion(f4_item: dict[str, Any]) -> tuple[str, str]:
+    """E5 ⑤ & ⑥ + E27 §2.3.2：按 f4_item 的 clause_role、mark 或 clause_no 前缀动态生成 category 与 suggestion。"""
+    if f4_item.get('clause_role') == 'submission_rule':
+        return (
+            '封标递交与形式自检提醒',
+            '请于封标打印与递交阶段按招标要求逐项核对正副本份数、电子版介质（PDF+Word）及印章字迹清晰度，无需在标书正文增补偏离说明',
+        )
     code_str = str(f4_item.get('code') or 'MISSING_RESPONSE')
     mark_str = str(f4_item.get('mark') or '').strip()
     clause_no_str = str(f4_item.get('clause_no') or '').strip()
@@ -453,6 +469,7 @@ class BidTaskWorker:
         pipeline_t0 = time.perf_counter()
         duration_record: dict[str, Optional[int]] = {
             'f1_ms': None,
+            'f_parse_ms': None,
             'f2_ms': None,
             'f3_ms': None,
             'f4_ms': None,
@@ -635,25 +652,69 @@ class BidTaskWorker:
 
             duration_record['f1_ms'] = max(0, int(round((time.perf_counter() - t_f1) * 1000)))
 
+            # ── 阶段 1.5：投标书全文与内嵌扫描图预解析（冷 OCR 耗时独立归属 f_parse_ms，F2/F3/F4 共享缓存）──
+            self._emit_stage(
+                session,
+                task,
+                'extracting',
+                42,
+                '正在解析投标文件全文与内嵌扫描图片（首次冷 OCR 耗时较长，完成后自动写入磁盘缓存）',
+            )
+            t_parse = time.perf_counter()
+            last_ocr_emit = [0.0]
+
+            def _on_bid_ocr_progress(done_imgs: int, total_imgs: int, newly_ocrd: int) -> None:
+                if newly_ocrd <= 0:
+                    return
+                now_ts = time.perf_counter()
+                if done_imgs < total_imgs and (now_ts - last_ocr_emit[0]) < 1.5 and (done_imgs % 5 != 0):
+                    return
+                last_ocr_emit[0] = now_ts
+                pct = min(53, 42 + int(round((done_imgs / max(1, total_imgs)) * 11)))
+                self._emit_stage(
+                    session,
+                    task,
+                    'extracting',
+                    pct,
+                    f"正在对投标书内嵌扫描件执行离线 OCR（已完成 {done_imgs} / {total_imgs} 张，每 10 张增量落盘缓存）",
+                )
+
+            bid_parsed = parse_document(str(bid_abs), ocr_images=True, progress_cb=_on_bid_ocr_progress)
+            duration_record['f_parse_ms'] = max(0, int(round((time.perf_counter() - t_parse) * 1000)))
+
             # ── 阶段 2：checking（F2 报价沙盒 + F3 证照/串名 + F4 双书逐条响应核验）──
             self._emit_stage(session, task, 'checking', 55, 'F2/F3/F4 正在并行执行报价算术、证照效期与 ★/▲ 条款逐条核验')
 
             t_f2 = time.perf_counter()
-            f2_res = run_price_check(bid_abs, tender_path=tender_abs)
+            f2_res = run_price_check(
+                bid_abs,
+                tender_path=tender_abs,
+                parsed_doc=bid_parsed,
+                tender_parsed_doc=tender_parsed,
+            )
             duration_record['f2_ms'] = max(0, int(round((time.perf_counter() - t_f2) * 1000)))
 
             t_f3 = time.perf_counter()
-            bid_parsed = parse_document(str(bid_abs))
             # E15 §2.1：一次性构建投标书统一双轨页码上下文（直接复用 response_checker 单一事实源，自动适配 pdf/docx）
             bid_page_ctx = _build_unified_page_context(bid_abs)
+
+            user_explicit_social = bool(cfg_snap.get('required_social_months'))
+            effective_social_months, social_min_count = resolve_effective_social_requirement(
+                tender_text=tender_parsed.text,
+                open_date_str=open_date_str,
+                configured_months=social_months,
+                is_user_explicit=user_explicit_social,
+            )
 
             f3_findings = list(
                 scan_qualifications(
                     text=bid_parsed.text,
                     open_date=open_date_str,
-                    required_social_months=social_months,
+                    required_social_months=effective_social_months,
                     forbidden_names=forbidden_names,
                     target_buyer=buyer_name,
+                    client=client,
+                    social_min_count=social_min_count,
                 )
                 or []
             )
@@ -673,6 +734,8 @@ class BidTaskWorker:
                 bid_path=bid_abs,
                 requirements=f1_requirements,
                 client=client,
+                tender_parsed_doc=tender_parsed,
+                bid_parsed_doc=bid_parsed,
             )
             duration_record['f4_ms'] = max(0, int(round((time.perf_counter() - t_f4) * 1000)))
 
@@ -725,7 +788,7 @@ class BidTaskWorker:
                         quote_verified=False,
                         page=f3_phys_page,
                         message=str(f3_item.get('message') or ''),
-                        suggestion='请替换有效期内证照或清理外部项目单位名称',
+                        suggestion=resolve_f3_suggestion(f3_item),
                         consequence='veto' if f3_item.get('severity') == 'error' else 'deduction',
                         detail_json=f3_detail,
                     )
@@ -806,7 +869,7 @@ class BidTaskWorker:
                         page=f4_item.get('bid_page') if f4_item.get('bid_page') is not None else f4_item.get('tender_page'),
                         message=str(f4_item.get('message') or ''),
                         suggestion=dyn_suggestion,
-                        consequence='veto' if sev_str == 'error' else 'deduction',
+                        consequence='none' if sev_str == 'info' else ('veto' if sev_str == 'error' else 'deduction'),
                         detail_json=f4_item,
                     )
                 )

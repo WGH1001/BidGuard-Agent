@@ -15,7 +15,7 @@ from pathlib import Path
 import re
 import struct
 import threading
-from typing import Optional
+from typing import Callable, Optional
 import zipfile
 
 import lxml.etree as ET
@@ -768,12 +768,60 @@ def _save_docx_media_cache(cache_path: Path, cache_map: dict[str, dict]) -> None
         pass
 
 
+def _count_docx_media_targets(
+    doc,
+    related_parts: dict,
+    cache_map: dict[str, dict],
+) -> tuple[int, int]:
+    """预扫描 docx 段落与表格引用的合规内嵌图片，返回 (total_uncached, cached_hits)。"""
+    seen: set[str] = set()
+    uncached = 0
+    cached = 0
+
+    def _scan_xml(xml_str: str) -> None:
+        nonlocal uncached, cached
+        if not xml_str or ('blip' not in xml_str and 'imagedata' not in xml_str):
+            return
+        for m in _REL_EMBED_RE.finditer(xml_str):
+            rid = m.group(1)
+            if not rid:
+                continue
+            part = related_parts.get(rid)
+            if part is None:
+                continue
+            img_bytes = getattr(part, 'blob', None)
+            if not img_bytes or not _passes_media_filter(img_bytes):
+                continue
+            sha1 = hashlib.sha1(img_bytes).hexdigest()
+            if sha1 in seen:
+                continue
+            seen.add(sha1)
+            if sha1 in cache_map:
+                cached += 1
+            else:
+                uncached += 1
+
+    for para in doc.paragraphs:
+        _scan_xml(getattr(para._p, 'xml', '') or '')
+    for table in doc.tables:
+        seen_tcs = set()
+        for row in table.rows:
+            for cell in row.cells:
+                tc = cell._tc
+                if tc in seen_tcs:
+                    continue
+                seen_tcs.add(tc)
+                _scan_xml(getattr(tc, 'xml', '') or '')
+    return uncached, cached
+
+
 def _extract_xml_embedded_media_texts(
     xml_str: str,
     related_parts: dict,
     cache_map: dict[str, dict],
     para_idx: int,
     seen_sha1s: set[str],
+    on_new_ocr: Optional[Callable[[], None]] = None,
 ) -> tuple[list[str], bool, bool]:
     """从段落或单元格 XML 提取内嵌图片并执行就近 OCR（命中缓存直接秒读，不重算）。"""
     if not xml_str or ('blip' not in xml_str and 'imagedata' not in xml_str):
@@ -814,6 +862,11 @@ def _extract_xml_embedded_media_texts(
         ocr_txt, skipped = _ocr_single_image_bytes(img_bytes)
         if skipped:
             ocr_skipped = True
+            if on_new_ocr is not None:
+                try:
+                    on_new_ocr()
+                except Exception:
+                    pass
             continue
 
         cache_map[sha1] = {
@@ -823,6 +876,11 @@ def _extract_xml_embedded_media_texts(
         cache_dirty = True
         if ocr_txt:
             ocr_texts.append(ocr_txt)
+        if on_new_ocr is not None:
+            try:
+                on_new_ocr()
+            except Exception:
+                pass
 
     return ocr_texts, cache_dirty, ocr_skipped
 
@@ -957,8 +1015,16 @@ def _ocr_image_text(img_path: Path) -> str:
     return text
 
 
-def parse_document(file_path: str) -> ParsedDoc:
-    """解析文档文件为纯文本（签名与返回结构严格保持不变）。"""
+_DOCX_MEDIA_INCREMENTAL_FLUSH = 10
+
+
+def parse_document(
+    file_path: str,
+    *,
+    ocr_images: bool = True,
+    progress_cb: Optional[Callable[[int, int, int], None]] = None,
+) -> ParsedDoc:
+    """解析文档文件为纯文本（兼容原有单参数签名，E27 新增可选 ocr_images 与 progress_cb）。"""
     path = Path(file_path)
 
     if not path.exists():
@@ -981,25 +1047,56 @@ def parse_document(file_path: str) -> ParsedDoc:
 
             related_parts = getattr(doc.part, 'related_parts', {}) or {}
             media_cache_path = _docx_media_ocr_cache_path(path)
-            media_cache_map = _load_docx_media_cache(media_cache_path)
+            media_cache_map = _load_docx_media_cache(media_cache_path) if ocr_images else {}
             seen_media_sha1s: set[str] = set()
             cache_dirty = False
             ocr_skipped_any = False
+            total_uncached = 0
+            cached_hits = 0
+            uncached_done = 0
+            unflushed_new = 0
+
+            if ocr_images and (progress_cb is not None or related_parts):
+                total_uncached, cached_hits = _count_docx_media_targets(
+                    doc, related_parts, media_cache_map
+                )
+                if progress_cb is not None and (total_uncached > 0 or cached_hits > 0):
+                    try:
+                        progress_cb(0, total_uncached, cached_hits)
+                    except Exception:
+                        pass
+
+            def _handle_new_ocr() -> None:
+                nonlocal uncached_done, unflushed_new, cache_dirty
+                uncached_done += 1
+                unflushed_new += 1
+                if unflushed_new >= _DOCX_MEDIA_INCREMENTAL_FLUSH:
+                    _save_docx_media_cache(media_cache_path, media_cache_map)
+                    unflushed_new = 0
+                    cache_dirty = False
+                if progress_cb is not None:
+                    progress_cb(uncached_done, total_uncached, cached_hits)
 
             for p_idx, para in enumerate(doc.paragraphs):
                 text = para.text.strip()
                 if text:
                     text_parts.append(text)
-                xml_str = getattr(para._p, 'xml', '') or ''
-                img_texts, dirty, skipped = _extract_xml_embedded_media_texts(
-                    xml_str, related_parts, media_cache_map, p_idx, seen_media_sha1s
-                )
-                if dirty:
-                    cache_dirty = True
-                if skipped:
-                    ocr_skipped_any = True
-                for itxt in img_texts:
-                    text_parts.append(itxt)
+                if ocr_images:
+                    xml_str = getattr(para._p, 'xml', '') or ''
+                    img_texts, dirty, skipped = _extract_xml_embedded_media_texts(
+                        xml_str,
+                        related_parts,
+                        media_cache_map,
+                        p_idx,
+                        seen_media_sha1s,
+                        on_new_ocr=_handle_new_ocr,
+                    )
+                    if dirty:
+                        cache_dirty = True
+                    if skipped:
+                        ocr_skipped_any = True
+                    for itxt in img_texts:
+                        text_parts.append(itxt)
 
             for table in doc.tables:
                 seen_tcs = set()
@@ -1012,18 +1109,24 @@ def parse_document(file_path: str) -> ParsedDoc:
                         text = cell.text.strip()
                         if text:
                             text_parts.append(text)
-                        tc_xml = getattr(tc, 'xml', '') or ''
-                        img_texts, dirty, skipped = _extract_xml_embedded_media_texts(
-                            tc_xml, related_parts, media_cache_map, -1, seen_media_sha1s
-                        )
-                        if dirty:
-                            cache_dirty = True
-                        if skipped:
-                            ocr_skipped_any = True
-                        for itxt in img_texts:
-                            text_parts.append(itxt)
+                        if ocr_images:
+                            tc_xml = getattr(tc, 'xml', '') or ''
+                            img_texts, dirty, skipped = _extract_xml_embedded_media_texts(
+                                tc_xml,
+                                related_parts,
+                                media_cache_map,
+                                -1,
+                                seen_media_sha1s,
+                                on_new_ocr=_handle_new_ocr,
+                            )
+                            if dirty:
+                                cache_dirty = True
+                            if skipped:
+                                ocr_skipped_any = True
+                            for itxt in img_texts:
+                                text_parts.append(itxt)
 
-            if cache_dirty:
+            if ocr_images and (cache_dirty or unflushed_new > 0):
                 _save_docx_media_cache(media_cache_path, media_cache_map)
 
             parsed_doc = ParsedDoc(text="\n".join(text_parts), source_type=source_type, pages=1)

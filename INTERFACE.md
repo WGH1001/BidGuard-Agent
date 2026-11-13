@@ -30,6 +30,10 @@ extract_required_certificates(text: str, *, qualification_hits=None, compliance_
 extract_open_date_from_tender_text(text: str) -> Optional[str]
 extract_open_date_with_evidence(text: str) -> Optional[dict[str, Any]]
 # 返回：{'open_date': 'YYYY-MM-DD', 'quote': 原文逐字片段, 'offset': int} 或 None
+classify_invalid_clause_role(clause_text: str, clause_no: str = '') -> str
+# E27：返回 'requirement' | 'eval_rule' | 'submission_rule'
+extract_chapter4_procurement_requirements(text: str) -> list[dict]
+# E27：无 ★/▲ 标书从第四章采购需求确定性提取技术/商务要求（clause_role='technical_or_commercial'）
 
 # core/tender_llm.py —— LLM 结构化层（在确定性层结果上追加键）
 extract_open_date_fallback_with_llm(text: str, client) -> Optional[dict]
@@ -51,7 +55,12 @@ extract_scoring_with_llm(file_path: str, client=None, env: Optional[str] = None)
 
 ```python
 # core/price_extractor.py
-run_price_check(bid_path: str | Path, tender_path: str | Path | None = None) -> dict
+extract_price_cap(text: str, package_no: int | None = None) -> str | None
+extract_price_data(file_path: str | Path, tender_path: str | Path | None = None,
+                   parsed_doc=None, tender_parsed_doc=None) -> dict
+run_price_check(bid_path: str | Path, tender_path: str | Path | None = None,
+                parsed_doc=None, tender_parsed_doc=None) -> dict
+# E27：package_no 支持按目标包号提取分包预算限价；parsed_doc/tender_parsed_doc 复用 Stage 1.5 预解析结果
 # 返回：extract_price_data 全部键 + 'findings'
 #   {'status': 'OK'|'NEED_MANUAL'|..., 'items': [...], 'table_total', 'bid_total',
 #    'bid_total_upper', 'price_cap', 'has_price_table_skeleton', 'findings': [...]}
@@ -68,10 +77,19 @@ PriceSandbox(items, table_total, bid_total, bid_total_upper, price_cap).run() ->
 
 ```python
 # core/qualification_scanner.py
+resolve_effective_social_requirement(tender_text: str, open_date_str: str,
+                                     manual_months: Optional[list[str]] = None,
+                                     rule_months: Optional[list[str]] = None,
+                                     rule_open_date: Optional[str] = None, *,
+                                     configured_months: Optional[list[str]] = None,
+                                     is_user_explicit: bool = False) -> tuple[list[str], Optional[int]]
 scan_qualifications(text: str, open_date: str,
                     required_social_months: list = None,
                     forbidden_names: list = None,
-                    target_buyer: str = '') -> list
+                    target_buyer: str = '', *,
+                    client: Any = None,
+                    social_min_count: Optional[int] = None) -> list
+# E27：开标日/年限动态推导失效默认社保月；局部社保窗保底 + 可选 client 语义鉴别（强制过 verify_quote）
 # text = 投标文件全文（parse_document(...).text）；open_date 形如 "2026-11-04"
 # 返回 findings 列表（格式同 F2）；开标日不可解析时返回
 # [{'code': 'INVALID_OPEN_DATE', 'severity': 'error', 'message': ...}]
@@ -86,7 +104,11 @@ match_required_certificates_with_ledger(required_certs: list[dict], ledger_certs
 # core/response_checker.py
 run_response_check(tender_path: str | Path, bid_path: str | Path,
                    requirements: Optional[list[dict]] = None,
-                   client=None) -> dict[str, Any]
+                   client=None, *,
+                   tender_parsed_doc: Any = None,
+                   bid_parsed_doc: Any = None) -> dict[str, Any]
+# E27：submission_rule 在 F4 降级 severity='info', consequence='none'；在 F5 偏离表导出中默认过滤（include_submission_rules=False）
+# E27：check_bid_self_contradictions 支持同句复合质保合并与未填模板下划线提示，L651 client.chat 异常单条降级不中断流水线
 # 返回：{'findings': [...],            # MISSING_RESPONSE + CONTRADICTION + MISSING_EVIDENCE 汇总
 #        'star_results': [...],        # 每条 ★/▲ 要求核验详情（含 RESPONSE_OK）
 #        'self_contradictions': [...], # 投标书内部矛盾
@@ -155,13 +177,17 @@ ask_bid_expert_stream(tender_path: str | Path, bid_path: str | Path, question: s
 #         新增 POST/DELETE /api/qa/sessions/{session_id}/attachments* 与单文件 20MB/单会话 10 个且 100MB/单轮 4 图管控；
 #         纯视觉观察引用保留正文并显式标 quote_verified=False；_parse_llm_json(strict=False) 容错未转义换行且禁吐残缺工具 JSON
 # search_tender(..., page_spans: list[...] | dict | None = None, after_offset: int = 0) / search_bid(...) 兼容旧版 list 与 E18 双轨 ctx dict
+# E27 起：新增 DELETE /api/qa/sessions/{session_id}/last-turn（及隐藏别名 /{session_id}/last-turn）返回 QaLastTurnWithdrawOut；
+#         POST /api/qa/sessions/{session_id}/ask 在配置网关失败（client is not None）时返回 HTTP 502 QA_GATEWAY_ERROR（不落库污染历史）
 ```
 
 ### 1.8 批注回写与解析底座
 
 ```python
 # core/parser.py
-parse_document(file_path: str) -> ParsedDoc          # .text / .source_type / .pages
+parse_document(file_path: str, *, ocr_images: bool = True,
+               progress_cb: Optional[Callable[[int, int, int], None]] = None) -> ParsedDoc          # .text / .source_type / .pages
+# E27：支持 Stage 1.5 统一预解析 progress_cb 实时回调内嵌图片 OCR 进度与分批刷盘；ocr_images 参数保持向后兼容
 parse_qa_attachment(file_path: str | Path) -> dict    # E24: 低门槛 F7 附件解析（0~99 字图片不报错，返回 is_image/ocr_chars/has_text）
 build_pdf_page_spans(file_path: str | Path | None) -> list[tuple[int, int, int]]
 offset_to_page(offset: int | None, page_spans: list[tuple[int, int, int]]) -> int | None
@@ -193,6 +219,8 @@ encode_image_for_vlm(file_path: str | Path, max_edge: int = 2048,
 #                   遇上游拒绝视觉 image_url 输入时自动剥图重试并置 supports_vision=False（_mark_vision_unsupported）；
 #   _build_extra_body() 无条件剔除 max_tokens 与 reasoning_effort_map 绝不透传上游
 #   _estimate_messages_prompt_chars() 对 image_url 按固定 512 字符估算，严禁 Base64 长度 // 2 虚高 token
+#   E27：LLMClient 读取 env_config['timeout']（默认 60.0s）并设 OpenAI max_retries=0 快速失败；
+#        私有 IP 网关异常自动附带 TUN/代理路由排查提示（_format_gateway_error_hint）
 ```
 
 ### 1.10 E4 招投标法规库与法条三态真伪核验（RulesAndCertsView / `/api/regulations`）
@@ -237,6 +265,7 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 ## 3. backend 层横切约定
 
 - 路由列表（11 组）：`auth`、`dashboard`、`checks`、`extract`、`deviation`、`radar`、`qa`、`rules`、`reports`、`model_config`、`regulations`。
+- E27 `duration_record` 新增 Stage 1.5 预解析耗时字段 `f_parse_ms`（保留 E11 既有 6 键 `f1_ms`/`f2_ms`/`f3_ms`/`f4_ms`/`grading_ms`/`total_ms`）；
 - 其余鉴权、多租户隔离、SSE 进度流、文件存储布局与统一错误格式约定保持不变。
 
 ---
@@ -262,3 +291,4 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 | 2026-11-12 | E24 F7 多文件与图片附件问答：`core/parser.py` 新增 `parse_qa_attachment` 低门槛解析入口（取消 `OCR_MIN_CHARS` 报错，`.ocr.txt` 缓存，保留 `parse_document` 不变）；`core/llm_gateway.py` 新增 `encode_image_for_vlm`（PyMuPDF `Pixmap` 真实像素探测 + 缩放降字节）、`supports_vision` 传参/单实例拒图熔断（`_is_vision_reject` / `_strip_image_blocks` / `_mark_vision_unsupported`）及图像占位 token 估算；`backend/models.py` 扩展 `qa_sessions.attachments_json` 与 `user_model_configs.supports_vision` 及方言感知迁移守卫（含 SQLite PRAGMA 启动自动检测）；`backend/routers/qa.py` + `schemas.py` 新增 `/attachments` 上传删除与配额校验（20MB/10个/100MB/单轮≤4图/INVALID_ATTACHMENT_ID）、级联删盘、`QaAttachmentOut`/`QaAskRequest`/`QaQuoteOut` 扩展；`backend/routers/model_config.py` + `worker.py` 全链路透传 `supports_vision`；`core/bid_react_agent.py` 扩至 7 工具（新增 `search_attachment`）、仅当轮附 `image_url`、`_verify_and_locate_quotes` 附件强制溯源/纯图降级、`_parse_llm_json(strict=False)` 容错、禁吐工具 JSON 与 `after_offset` 续检 | 实现侧 + 验收 |
 | 2026-11-12 | E25 全链路工作流与台账运维补强：`backend/models.py` 为 `company_certificates` 新增 `attachment_name`/`attachment_path`/`attachment_size` 三列及 `ensure_company_certificates_columns` 方言迁移守卫；`backend/routers/deviation.py` 增加运行中任务 `409 CHECK_TASK_RUNNING` 拦截，`checks.py`/`worker.py` 重跑清理旧偏离表 sidecar；`radar.py` 新增 `POST /api/radar/{task_id}/rescan`；`qa.py` + `QaSessionOut` 新增 0-Token 上下文动态 `suggested_questions`；`regulations.py` 新增 `DELETE /api/regulations/articles/{article_id}`；`reports.py` 新增 `GET /api/reports/audit-logs/export`（UTF-8 BOM CSV + 公式注入转义）；`rules.py` 新增 `parse-file` OCR 预填与 `{cert_id}/attachment` 上传下载删除闭环 | 架构侧 + 验收 |
 | 2026-11-12 | E26 招标所需证照清单与台账联动：`core/tender_extractor.py` 新增 0-Token `extract_required_certificates` 并纳入 `build_review_checklist` 返回 `'required_certificates'`；`core/qualification_scanner.py` 新增 `match_required_certificates_with_ledger`；`backend/schemas.py` 新增 `MatchedLedgerCertOut`/`RequiredCertItemOut`/`CertLedgerSummaryOut` 并扩展 `ExtractChecklistOut`；`backend/routers/extract.py` 按当前租户查询 `CompanyCertificate` 执行四态对账并返回台账匹配汇总 | 架构侧 + 验收 |
+| 2026-11-13 | E27 真标书实战排障与交互体验深化：`core/parser.py` `parse_document` 新增可选 `ocr_images`/`progress_cb` 与增量刷盘；`core/price_extractor.py` `extract_price_cap` 新增 `package_no` 分包预算精准匹配并支持复用 `parsed_doc`/`tender_parsed_doc`；`core/qualification_scanner.py` 新增 `resolve_effective_social_requirement` 并扩展 `scan_qualifications(..., client=None, social_min_count=None)`（局部社保窗隔离 + 受控 LLM 语义鉴别）；`core/tender_extractor.py` 新增 `classify_invalid_clause_role` 与 `extract_chapter4_procurement_requirements`；`core/response_checker.py` 区分 `eval_rule`/`submission_rule`（F4 降级 `info`+`none`，F5 默认过滤）、复合质保合并与 L651 `try/except` 单条降级；`core/llm_gateway.py` 新增 `timeout`/`max_retries=0` 与私有 IP TUN 诊断提示；`backend/worker.py` 拆分 Stage 1.5 `f_parse_ms` 耗时与 SSE 进度；`backend/routers/qa.py` 新增 `DELETE /api/qa/sessions/{id}/last-turn` 及 `/ask` 502 `QA_GATEWAY_ERROR` 隔离 | 架构侧 + 实现 |

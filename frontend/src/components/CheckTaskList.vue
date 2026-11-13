@@ -2,7 +2,7 @@
 import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { checksApi, validateUploadFile } from '@/api'
-import type { BidTaskOut } from '@/api/types'
+import type { BidTaskOut, TaskDurationRecord } from '@/api/types'
 
 const props = defineProps<{
   tasks: BidTaskOut[]
@@ -20,15 +20,6 @@ const emit = defineEmits<{
   (e: 'delete', task: BidTaskOut): void
   (e: 'refresh'): void
 }>()
-
-interface TaskDurationRecord {
-  f1_ms?: number | null
-  f2_ms?: number | null
-  f3_ms?: number | null
-  f4_ms?: number | null
-  grading_ms?: number | null
-  total_ms?: number | null
-}
 
 type TaskWithDuration = BidTaskOut & {
   started_at?: string | null
@@ -240,18 +231,15 @@ defineExpose({
         :key="item.id"
         class="rail-item"
         :class="{ active: item.id === props.selectedTaskId }"
+        :title="`任务 #${item.id}：${item.title}\n招标书：${item.tender_filename || '—'}\n投标书：${item.bid_filename || '—'}`"
         @click="emit('select', item)"
       >
         <div class="ri-row1">
-          <span class="ri-id mono-num">#{{ item.id }}</span>
+          <div class="ri-row1-left">
+            <span class="ri-id mono-num">#{{ item.id }}</span>
+            <span class="ri-title">{{ item.title }}</span>
+          </div>
           <div class="ri-row1-right">
-            <span
-              v-if="getTerminalDurationLabel(item)"
-              class="ri-dur-pill mono-num"
-              title="本次体检任务总耗时"
-            >
-              ⏱ {{ getTerminalDurationLabel(item) }}
-            </span>
             <span class="sev-pill" :class="statusMeta(item.status).cls">
               {{ statusMeta(item.status).label }}
             </span>
@@ -269,24 +257,30 @@ defineExpose({
           </div>
         </div>
 
-        <div class="ri-title" :title="item.title">{{ item.title }}</div>
-
-        <div class="ri-files">
-          <div>招：{{ item.tender_filename || '—' }}</div>
-          <div>投：{{ item.bid_filename || '—' }}</div>
-          <div class="ri-open-date mono-num">
+        <div class="ri-meta-row mono-num">
+          <span>
             开标：
-            <span :class="item.config_json?.open_date ? 'od-ok' : 'od-miss'">
+            <b :class="item.config_json?.open_date ? 'od-ok' : 'od-miss'">
               {{ item.config_json?.open_date || '未识别' }}
-            </span>
-          </div>
+            </b>
+          </span>
+          <span
+            v-if="getTerminalDurationLabel(item)"
+            class="ri-dur-pill"
+            title="本次体检任务总耗时"
+          >
+            ⏱ {{ getTerminalDurationLabel(item) }}
+          </span>
         </div>
 
-        <div class="ri-prog-row">
+        <div
+          v-if="['extracting', 'checking', 'grading', 'failed'].includes(item.status)"
+          class="ri-prog-row"
+        >
           <el-progress
             :percentage="item.progress || 0"
-            :stroke-width="5"
-            :status="item.status === 'failed' ? 'exception' : item.status === 'delivered' ? 'success' : undefined"
+            :stroke-width="4"
+            :status="item.status === 'failed' ? 'exception' : undefined"
           />
         </div>
 
@@ -399,11 +393,24 @@ defineExpose({
 
 <style scoped>
 .task-rail {
+  position: sticky;
+  top: 16px;
+  align-self: start;
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 110px);
-  min-height: 620px;
-  padding: 16px;
+  height: calc(100vh - 104px);
+  max-height: calc(100vh - 32px);
+  min-height: 540px;
+  padding: 14px;
+}
+
+@media (max-width: 1100px) {
+  .task-rail {
+    position: static;
+    height: auto;
+    max-height: none;
+    min-height: 0;
+  }
 }
 
 .rail-hd {
@@ -441,7 +448,7 @@ defineExpose({
 }
 
 .rail-item {
-  padding: 12px 13px;
+  padding: 9px 11px;
   border-radius: 8px;
   border: 1px solid var(--border-line);
   background: var(--bg-subtle);
@@ -464,13 +471,23 @@ defineExpose({
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 6px;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+
+.ri-row1-left {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  flex: 1;
 }
 
 .ri-row1-right {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
+  flex-shrink: 0;
 }
 
 .ri-dur-pill {
@@ -479,7 +496,7 @@ defineExpose({
   color: var(--txt-sec);
   background: #f1f5f9;
   border: 1px solid var(--border-line);
-  padding: 1px 6px;
+  padding: 0 5px;
   border-radius: 4px;
 }
 
@@ -489,45 +506,43 @@ defineExpose({
 }
 
 .ri-id {
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 800;
   color: var(--txt-muted);
+  flex-shrink: 0;
 }
 
 .ri-title {
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 800;
   color: var(--txt-strong);
-  margin-bottom: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.ri-files {
-  font-size: 11.5px;
+.ri-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
   color: var(--txt-sec);
-  line-height: 1.45;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
-.ri-files div {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ri-open-date .od-ok {
+.ri-meta-row .od-ok {
   color: var(--txt-strong);
   font-weight: 700;
 }
 
-.ri-open-date .od-miss {
+.ri-meta-row .od-miss {
   color: var(--txt-muted);
+  font-weight: 500;
 }
 
 .ri-prog-row {
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .ri-stats-bar {

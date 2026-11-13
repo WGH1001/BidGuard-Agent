@@ -22,6 +22,7 @@ from backend.schemas import (
     QaAskRequest,
     QaAskResponseOut,
     QaAttachmentOut,
+    QaLastTurnWithdrawOut,
     QaQuoteOut,
     QaSessionCreateRequest,
     QaSessionOut,
@@ -528,7 +529,18 @@ def ask_in_session(
             history=prior_history,
             attachments=runtime_atts,
         )
-    except Exception:
+    except Exception as exc:
+        if client is not None:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    'code': 'QA_GATEWAY_ERROR',
+                    'message': (
+                        f"模型网关调用异常或超时（{type(exc).__name__}: {exc}），"
+                        f"已避免降级覆盖为 0-Token 原始碎片；请排查 TUN 代理/网关连通性后重试或切换 0-Token 模式"
+                    ),
+                },
+            )
         res = ask_bid_expert(
             tender_path=tender_abs,
             bid_path=bid_abs,
@@ -739,4 +751,50 @@ def ask_in_session_stream(
             'Connection': 'keep-alive',
             'X-Accel-Buffering': 'no',
         },
+    )
+
+
+@router.delete('/{session_id}/last-turn', response_model=QaLastTurnWithdrawOut)
+@router.delete('/sessions/{session_id}/last-turn', response_model=QaLastTurnWithdrawOut, include_in_schema=False)
+def withdraw_last_turn_in_session(
+    session_id: int,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> QaLastTurnWithdrawOut:
+    """E27 §2.2.4：撤回会话最后一轮问答（移除末尾 assistant 与配对 user 消息，返回被撤回的问题文本以便前端回填或重发）。"""
+    tenant_id = int(current_user.tenant_id)
+    qa_sess = _get_tenant_session_or_404(db, session_id, tenant_id)
+    history = list(qa_sess.messages_json or [])
+
+    withdrawn_q = ''
+    withdrawn_att_ids: list[str] = []
+
+    if history and str(history[-1].get('role') or '') == 'assistant':
+        history.pop()
+    if history and str(history[-1].get('role') or '') == 'user':
+        last_user = history.pop()
+        withdrawn_q = str(last_user.get('content') or '')
+        withdrawn_att_ids = [str(a) for a in (last_user.get('attachment_ids') or []) if a]
+
+    qa_sess.messages_json = history
+    qa_sess.updated_at = _utc_now()
+    db.commit()
+
+    record_audit(
+        db,
+        action='qa_withdraw_last_turn',
+        tenant_id=tenant_id,
+        user_id=current_user.get('id'),
+        target=f"qa_session:{qa_sess.id}",
+        detail_json={
+            'withdrawn_question': withdrawn_q[:80],
+            'remaining_messages': len(history),
+        },
+    )
+
+    return QaLastTurnWithdrawOut(
+        session_id=qa_sess.id,
+        withdrawn_question=withdrawn_q,
+        withdrawn_attachment_ids=withdrawn_att_ids,
+        remaining_messages=len(history),
     )

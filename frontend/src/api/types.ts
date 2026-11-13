@@ -103,6 +103,16 @@ export interface BidTaskStats {
   summary?: string
 }
 
+export interface TaskDurationRecord {
+  f1_ms?: number | null
+  f_parse_ms?: number | null
+  f2_ms?: number | null
+  f3_ms?: number | null
+  f4_ms?: number | null
+  grading_ms?: number | null
+  total_ms?: number | null
+}
+
 export interface BidTaskOut {
   id: number
   tenant_id: number
@@ -125,6 +135,9 @@ export interface BidTaskOut {
     [key: string]: unknown
   } | null
   llm_usage_json?: Record<string, unknown> | null
+  duration_json?: TaskDurationRecord | null
+  started_at?: string | null
+  finished_at?: string | null
   delivered_at?: string | null
   created_at?: string | null
   updated_at?: string | null
@@ -483,6 +496,13 @@ export interface QaAskResponseOut {
   steps: ReActStepTraceItem[]
   rounds_used: number
   terminated_by_max_rounds: boolean
+}
+
+export interface QaLastTurnWithdrawOut {
+  session_id: number
+  withdrawn_question: string
+  withdrawn_attachment_ids: string[]
+  remaining_messages: number
 }
 
 export interface QaStreamHandlers {

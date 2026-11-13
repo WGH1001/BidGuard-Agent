@@ -171,7 +171,7 @@ def export_deviation_table(
         checklist = build_review_checklist(str(t_path))
         requirements = checklist['marked_clauses'] + checklist['invalid_bid_clauses']
 
-    valid_reqs = _filter_valid_requirements(requirements)
+    valid_reqs = _filter_valid_requirements(requirements, include_submission_rules=False)
 
     f4_res = run_response_check(
         tender_path=t_path,

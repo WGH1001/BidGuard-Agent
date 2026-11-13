@@ -35,6 +35,9 @@ const emit = defineEmits<{
   (e: 'delete-attachment', att: QaAttachmentOut): void
   (e: 'update:selectedAttachmentIds', ids: string[]): void
   (e: 'update:reasoningEffort', level: ReasoningEffortLevel): void
+  (e: 'regenerate'): void
+  (e: 'withdraw-last'): void
+  (e: 'stop-stream'): void
 }>()
 
 const questionInput = ref('')
@@ -178,8 +181,13 @@ watch(
   },
 )
 
+function setQuestionInput(val: string): void {
+  questionInput.value = val
+}
+
 defineExpose({
   scrollToBottom,
+  setQuestionInput,
 })
 </script>
 
@@ -280,6 +288,40 @@ defineExpose({
               :default-open="Boolean(msg.streaming)"
             />
           </template>
+
+          <!-- E27 §2.2.4：最后一轮回答操作栏（生成中支持停止生成，完成后支持重新生成与撤回本轮） -->
+          <div
+            v-if="index === props.messages.length - 1"
+            class="a-turn-actions"
+          >
+            <button
+              v-if="msg.loading || msg.streaming || props.sending"
+              type="button"
+              class="turn-act-btn stop"
+              title="立即中断当前流式生成并保留已检索步骤"
+              @click="emit('stop-stream')"
+            >
+              ⏹ 停止生成
+            </button>
+            <template v-else>
+              <button
+                type="button"
+                class="turn-act-btn retry"
+                title="移除本轮回答并使用同一问题与附件重新生成"
+                @click="emit('regenerate')"
+              >
+                ↻ 重新生成回答
+              </button>
+              <button
+                type="button"
+                class="turn-act-btn withdraw"
+                title="撤回本轮问答并将原问题回填至下方输入框"
+                @click="emit('withdraw-last')"
+              >
+                ↶ 撤回本轮回答
+              </button>
+            </template>
+          </div>
         </div>
       </div>
 
@@ -432,13 +474,21 @@ defineExpose({
           </div>
 
           <el-button
+            v-if="props.sending"
+            type="danger"
+            plain
+            class="send-action-btn"
+            @click="emit('stop-stream')"
+          >
+            ⏹ 停止生成
+          </el-button>
+          <el-button
+            v-else
             type="primary"
             class="send-action-btn"
-            :loading="props.sending"
-            :disabled="props.sending"
             @click="handleSendClick"
           >
-            {{ props.sending ? '核验中…' : '发送追问' }}
+            发送追问
           </el-button>
         </div>
       </div>
@@ -886,5 +936,44 @@ defineExpose({
   height: 34px;
   min-width: 96px;
   font-weight: 800;
+}
+
+.a-turn-actions {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-line);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.turn-act-btn {
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1px solid var(--border-line);
+  background: var(--bg-subtle);
+  color: var(--txt-body);
+  transition: all 0.15s;
+}
+
+.turn-act-btn:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+  background: #ffffff;
+}
+
+.turn-act-btn.stop {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.turn-act-btn.stop:hover {
+  background: #fee2e2;
+  border-color: #ef4444;
 }
 </style>

@@ -141,8 +141,18 @@ def _deviation_entry(
     if not force_rebuild and out_abs.is_file() and sidecar.is_file():
         try:
             import json
+            from core.tender_extractor import classify_invalid_clause_role
             cached = json.loads(sidecar.read_text(encoding='utf-8'))
-            return DeviationExportOut(**cached)
+            cached_rows = cached.get('rows') or []
+            has_stale_non_req = any(
+                classify_invalid_clause_role(
+                    str(r.get('tender_requirement') or ''),
+                    str(r.get('clause_no') or ''),
+                ) in ('eval_rule', 'submission_rule')
+                for r in cached_rows
+            )
+            if not has_stale_non_req:
+                return DeviationExportOut(**cached)
         except Exception:
             pass  # 快照损坏则走重新生成兜底
 
