@@ -850,7 +850,7 @@ onMounted(() => {
                   </div>
                   <div class="lc-meta">
                     <div>发文机关：{{ law.issuing_body || '国家立法机关' }}</div>
-                    <div>
+                    <div class="lc-source" :title="law.source_url || '内置种子'">
                       来源：<code>{{ law.source_url || '内置种子' }}</code>
                     </div>
                     <div v-if="law.updated_at">
@@ -1265,15 +1265,34 @@ onMounted(() => {
 
 .reg-split-layout {
   display: grid;
-  grid-template-columns: 330px 1fr;
+  grid-template-columns: 320px 1fr;
   gap: 16px;
   align-items: start;
 }
 
 .law-cards-col {
+  position: sticky;
+  top: 16px;
+  align-self: start;
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+  padding-right: 4px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+@media (max-width: 1100px) {
+  .reg-split-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .law-cards-col {
+    position: static;
+    max-height: none;
+    overflow-y: visible;
+    padding-right: 0;
+  }
 }
 
 .law-card-item {
@@ -1320,20 +1339,22 @@ onMounted(() => {
 .lc-meta {
   font-size: 11.5px;
   color: var(--txt-sec);
-  line-height: 1.55;
-  /* 长来源 URL 断行防溢出（生产实锤：gov.cn 长 URL 超出卡片边框不可读） */
-  word-break: break-all;
-  overflow-wrap: anywhere;
+  line-height: 1.5;
   min-width: 0;
+}
+
+.lc-source {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .lc-meta code {
   font-size: 11px;
-  word-break: break-all;
-  overflow-wrap: anywhere;
 }
 
 .law-articles-col {
+  min-width: 0;
   border: 1px solid var(--border-line);
   border-radius: 8px;
   padding: 14px 16px;
@@ -1358,8 +1379,6 @@ onMounted(() => {
 }
 
 .articles-scroll-list {
-  max-height: 520px;
-  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 10px;

@@ -430,7 +430,8 @@ _EVAL_BLOCK_HEADER_RE = re.compile(
 _SUB_ITEM_NUM_RE = re.compile(r'(?:^|\n)[ \t]*(\d{1,2}[、.．])[ \t]*')
 _EVAL_COMMITTEE_RULE_RE = re.compile(
     r'^(?:[一二三四五六七八九十]+、\s*)?评标办法'
-    r'|评标委员会(?:根据评分标准|认为投标人的报价明显低于|应当将其作为无效投标)'
+    r'|^\d{1,2}[、.．]\s*报价过低[：:]'
+    r'|评标委员会(?:根据评分标准|认为投标人(?:的报价明显低于)?|应当将其作为无效投标)'
     r'|按照评审因素的量化指标评审得分最高'
 )
 _SUBMISSION_RULE_RE = re.compile(
@@ -453,6 +454,52 @@ def classify_invalid_clause_role(clause_text: str, clause_no: str = '') -> str:
 _classify_invalid_clause_role = classify_invalid_clause_role
 
 
+_PROCUREMENT_CH_KEYS = ('采购需求', '技术要求', '项目需求', '技术标准')
+_TECH_NUMBERED_SUB_RE = re.compile(
+    r'(?:^|\n)[ \t]*(（\d{1,2}）|\(\d{1,2}\)|\d{1,2}[、.．](?!\d))[ \t]*([^\n]+)'
+)
+
+
+def _pick_procurement_chapter(
+    text: str,
+    real_chapters: list[dict],
+) -> tuple[Optional[dict], int]:
+    """从真实章节候选中选出采购需求正文（避开前文概览短清单与正文内句中引用）。"""
+    candidates: list[tuple[int, dict, bool, int]] = []
+    for idx, ch in enumerate(real_chapters):
+        if not any(k in ch['title'] for k in _PROCUREMENT_CH_KEYS):
+            continue
+        ch_start = ch['start']
+        ch_end = real_chapters[idx + 1]['start'] if idx + 1 < len(real_chapters) else len(text)
+        seg_len = len(text[ch_start:ch_end].strip())
+        is_line_start = ch_start == 0 or text[ch_start - 1] in '\n\r\f'
+        candidates.append((idx, ch, is_line_start, seg_len))
+
+    if not candidates:
+        return None, -1
+
+    # 优先：行首真实章标题 + 正文非短存根（>=80字），避免“第三章内列举各章标题”仅十余字假命中
+    for idx, ch, is_line_start, seg_len in candidates:
+        if is_line_start and seg_len >= 80:
+            return ch, idx
+    # 次选：任意满足正文字数门槛的候选
+    for idx, ch, _is_ls, seg_len in candidates:
+        if seg_len >= 80:
+            return ch, idx
+    # 兜底：选最长片段
+    best = max(candidates, key=lambda item: item[3])
+    return best[1], best[0]
+
+
+def _trim_trailing_table_number(seg: str, start_in_seg: int, end_in_seg: int) -> int:
+    """剔除片段末尾孤立 PDF 页码或表格数量数字行，保持原文连续子串。"""
+    sub = seg[start_in_seg:end_in_seg].rstrip()
+    m_tail = re.search(r'(?:\r?\n)+[ \t]*\d{1,3}[ \t]*$', sub)
+    if m_tail:
+        return start_in_seg + m_tail.start()
+    return start_in_seg + len(sub)
+
+
 def extract_chapter4_procurement_requirements(text: str) -> list[dict]:
     """当招标文件无 ★/▲ 标记时，从第四章/采购需求章节确定性提取核心技术与商务条款。"""
     if not text:
@@ -463,13 +510,7 @@ def extract_chapter4_procurement_requirements(text: str) -> list[dict]:
         if '…' not in ch['title'] and '...' not in ch['title']
         and not re.search(r'[.·\t]{2,}\s*\d+\s*$', ch['title'])
     ]
-    target_ch = None
-    target_idx = -1
-    for idx, ch in enumerate(real_chapters):
-        if any(k in ch['title'] for k in ('采购需求', '技术要求', '项目需求', '技术标准')):
-            target_ch = ch
-            target_idx = idx
-            break
+    target_ch, target_idx = _pick_procurement_chapter(text, real_chapters)
     if target_ch is None:
         return []
 
@@ -490,13 +531,14 @@ def extract_chapter4_procurement_requirements(text: str) -> list[dict]:
         sec_stop = re.search(r'\n\s*[三四五六七八九十]+、', seg[bm.end():b_end])
         if sec_stop:
             b_end = bm.end() + sec_stop.start()
+        b_end = _trim_trailing_table_number(seg, b_start, b_end)
         raw_block = seg[b_start:b_end].strip()
         clean_block = re.sub(r'^[\uf06c\uf0d8\uf0a7●■◆]\s*', '', raw_block).strip()
         if len(clean_block) < 6:
             continue
         title_line = bm.group(1).strip()
         clause_label = f"采购需求-{title_line[:12]}"
-        abs_start = ch_start + b_start + (raw_block.find(clean_block))
+        abs_start = ch_start + b_start + raw_block.find(clean_block)
         abs_end = abs_start + len(clean_block)
         items.append({
             'pattern': 'C',
@@ -510,6 +552,36 @@ def extract_chapter4_procurement_requirements(text: str) -> list[dict]:
             'promise_doc': '',
         })
 
+    # 1b. 若无项目符号但技术需求节使用（1）/(1)/1. 编号条款，兜底拆出各技术子项
+    if not items:
+        m_tech = re.search(r'(?:^|\n)[ \t]*(?:二、\s*(?:采购需求|技术要求)[^\n]*|技术参数\b)', seg)
+        tech_base = m_tech.end() if m_tech else 0
+        m_comm_stop = re.search(r'\n[ \t]*[三四五六七八九十]+、', seg[tech_base:])
+        tech_end = tech_base + m_comm_stop.start() if m_comm_stop else len(seg)
+        tech_slice = seg[tech_base:tech_end]
+        sub_matches = list(_TECH_NUMBERED_SUB_RE.finditer(tech_slice))
+        for i, sm in enumerate(sub_matches):
+            s_start = tech_base + sm.start(1)
+            s_end = tech_base + (sub_matches[i + 1].start(1) if i + 1 < len(sub_matches) else len(tech_slice))
+            s_end = _trim_trailing_table_number(seg, s_start, s_end)
+            block = seg[s_start:s_end].strip()
+            if len(block) < 8:
+                continue
+            sub_no = sm.group(1).strip()
+            abs_start = ch_start + s_start
+            abs_end = abs_start + len(block)
+            items.append({
+                'pattern': 'C',
+                'mark': '',
+                'kind': 'requirement',
+                'clause_role': 'technical_or_commercial',
+                'clause_no': f"采购需求-{sub_no}",
+                'text': text[abs_start:abs_end],
+                'start': abs_start,
+                'end': abs_end,
+                'promise_doc': '',
+            })
+
     # 2. 提取关键商务小节（交付/实施、售后服务、验收标准、质保期要求）
     comm_re = re.compile(
         r'(?:^|\n)[ \t]*([二三四五六七八九十]+、\s*(?:交付或者实施的时间和地点|交付(?:时间|期|地点)|包装和运输[^\n]*|售后服务[^\n]*|验收标准[^\n]*|质保期要求[^\n]*))'
@@ -520,6 +592,7 @@ def extract_chapter4_procurement_requirements(text: str) -> list[dict]:
         # 取该小节直至下一个汉字大序号标题
         next_sec = re.search(r'\n[ \t]*[二三四五六七八九十]+、', seg[cm.end(1):])
         c_end = cm.end(1) + next_sec.start() if next_sec else len(seg)
+        c_end = _trim_trailing_table_number(seg, c_start, c_end)
         block = seg[c_start:c_end].strip()
         if len(block) < 8:
             continue
@@ -562,16 +635,26 @@ def extract_invalid_bid_clauses(text: str) -> list[dict]:
 
     for m in _PATTERN_B_RE.finditer(text):
         start, end, clause_no = _expand_enclosing_clause(text, m.start(), m.end())
-        clause_txt = text[start:end]
-        # 防整段吸附：若向后吸附到了「三、评标办法」大节标题，收缩到触发词所在的数字子项
-        if _EVAL_BLOCK_HEADER_RE.search(clause_txt.lstrip()) and m.start() > start:
+        header_slice = text[start:max(start, m.start())].lstrip()
+        # 防整段吸附：若前序编号为「三、评标办法」大节标题，先收缩到触发词所在数字子项再重算终点，避免 600 字截断半截丢失 eval_rule 特征词
+        if _EVAL_BLOCK_HEADER_RE.search(header_slice) and m.start() > start:
             sub_matches = list(_SUB_ITEM_NUM_RE.finditer(text, start, m.start()))
             if sub_matches:
                 last_sub = sub_matches[-1]
-                sub_offset = last_sub.start(1)
-                start = sub_offset
+                start = last_sub.start(1)
                 clause_no = last_sub.group(1).strip()
-                clause_txt = text[start:end]
+                nxt = _CLAUSE_HEADER_RE.search(text, m.end(), m.end() + 600)
+                end = nxt.start() if nxt else min(len(text), m.end() + 600)
+                period = text.rfind('。', start, end)
+                if period >= m.end() - 1:
+                    end = period + 1
+                else:
+                    period_after = text.find('。', m.end(), min(len(text), m.end() + 120))
+                    if period_after >= 0:
+                        end = period_after + 1
+                if end - start > 600:
+                    end = max(m.end() + 1 if m.end() < len(text) else m.end(), start + 600)
+        clause_txt = text[start:end]
         records.append({
             'pattern': 'B', 'text': clause_txt, 'start': start, 'end': end,
             'clause_no': clause_no, 'promise_doc': '',

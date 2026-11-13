@@ -28,8 +28,7 @@ from backend.auth import AuthUser, get_current_user, record_audit, require_admin
 from backend.database import PROJECT_ROOT, get_db
 from backend.models import AuditLog, BidCheckTask, BidFinding
 from backend.schemas import AuditLogItemOut, AuditLogListOut
-from backend.worker import resolve_effective_llm_client, resolve_project_path
-from core.deviation_exporter import export_deviation_table
+from backend.worker import build_and_cache_deviation_artifacts, resolve_effective_llm_client, resolve_project_path
 from core.redline import inject_pdf_highlights, inject_word_comments
 from core.tender_extractor import build_review_checklist
 
@@ -216,7 +215,13 @@ def _build_task_deliver_zip(
                 checklist = build_review_checklist(str(tender_abs))
                 reqs = list(checklist.get('marked_clauses') or []) + list(checklist.get('invalid_bid_clauses') or [])
                 client, _ = resolve_effective_llm_client(db, user_id if user_id is not None else task.user_id)
-                export_deviation_table(tender_abs, bid_abs, dev_path, requirements=reqs, client=client)
+                build_and_cache_deviation_artifacts(
+                    task_id=task.id,
+                    tender_abs=tender_abs,
+                    bid_abs=bid_abs,
+                    requirements=reqs,
+                    client=client,
+                )
             entries.append(("2_技术与商务偏离表.docx", dev_path.read_bytes()))
 
         # 3. 人工终核签字确认单.docx（signoff）

@@ -30,7 +30,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, RGBColor
 
 from core.response_checker import _filter_valid_requirements, run_response_check
-from core.tender_extractor import build_review_checklist
+from core.tender_extractor import build_review_checklist, classify_invalid_clause_role
 
 DEVIATION_TABLE_HEADERS = (
     '序号',
@@ -155,14 +155,55 @@ def _format_location_index(star_res: dict) -> str:
     return f"{t_part} | {b_part}"
 
 
+def _resolve_f4_star_results(
+    tender_path: Path,
+    bid_path: Path,
+    requirements: list[dict],
+    valid_reqs: list[dict],
+    client: Any,
+    f4_result: Optional[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """优先复用已算好的 F4 结果（按有效条款对齐并剔除 submission_rule），免去重复 LLM 调用。"""
+    if isinstance(f4_result, dict) and isinstance(f4_result.get('star_results'), list):
+        raw_star = list(f4_result['star_results'])
+        if len(raw_star) == len(valid_reqs):
+            return f4_result, raw_star
+
+        all_valid_reqs = _filter_valid_requirements(requirements, include_submission_rules=True)
+        if len(raw_star) == len(all_valid_reqs):
+            filtered_star = [
+                s_res
+                for req, s_res in zip(all_valid_reqs, raw_star)
+                if (
+                    req.get('clause_role')
+                    or classify_invalid_clause_role(
+                        req.get('full_text') or req.get('text') or '',
+                        req.get('clause_no') or '',
+                    )
+                ) != 'submission_rule'
+            ]
+            if len(filtered_star) == len(valid_reqs):
+                return f4_result, filtered_star
+
+    computed = run_response_check(
+        tender_path=tender_path,
+        bid_path=bid_path,
+        requirements=valid_reqs,
+        client=client,
+    )
+    return computed, list(computed.get('star_results', []))
+
+
 def export_deviation_table(
     tender_path: str | Path,
     bid_path: str | Path,
     output_path: str | Path,
     requirements: Optional[list[dict]] = None,
     client=None,
+    *,
+    f4_result: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """一键生成《技术与商务偏离表.docx》。"""
+    """一键生成《技术与商务偏离表.docx》（支持传入 f4_result 实现零额外 LLM 复用导出）。"""
     t_path = Path(tender_path)
     b_path = Path(bid_path)
     out_path = Path(output_path)
@@ -173,13 +214,14 @@ def export_deviation_table(
 
     valid_reqs = _filter_valid_requirements(requirements, include_submission_rules=False)
 
-    f4_res = run_response_check(
+    f4_res, star_results = _resolve_f4_star_results(
         tender_path=t_path,
         bid_path=b_path,
-        requirements=valid_reqs,
+        requirements=requirements,
+        valid_reqs=valid_reqs,
         client=client,
+        f4_result=f4_result,
     )
-    star_results = f4_res.get('star_results', [])
 
     if len(valid_reqs) != len(star_results):
         raise RuntimeError(

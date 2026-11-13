@@ -111,14 +111,16 @@ def test_e25_f5_running_conflict_409_and_rerun_clears_deviation_cache(tmp_path, 
         dev_sidecar = PROJECT_ROOT / 'output' / 'deviation' / f"{tid}_stats.json"
         assert dev_docx.is_file() and dev_sidecar.is_file()
 
-        # 污染 sidecar 为 999 行，验证触发重跑后旧缓存被清除
+        # 污染 sidecar 为 999 行，验证触发重跑先清理旧缓存、流水线完成后零 LLM 自动重建新偏离表与 sidecar
         dev_sidecar.write_text(
             json.dumps({**r_dev_ok.json(), 'total_rows': 999}, ensure_ascii=False),
             encoding='utf-8',
         )
         r_rerun = tc.post(f"/api/checks/{tid}/run?sync=true", headers=hdrs)
         assert r_rerun.status_code == 200
-        assert not dev_sidecar.is_file()
+        assert dev_docx.is_file() and dev_sidecar.is_file()
+        rebuilt_snap = json.loads(dev_sidecar.read_text(encoding='utf-8'))
+        assert rebuilt_snap['total_rows'] != 999
 
         r_dev_fresh = tc.get(f"/api/deviation/{tid}", headers=hdrs)
         assert r_dev_fresh.status_code == 200

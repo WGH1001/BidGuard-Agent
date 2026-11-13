@@ -18,6 +18,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import queue
@@ -38,6 +39,7 @@ from backend.models import (
     ensure_user_model_configs_columns,
 )
 from backend.utils.crypto import decrypt_api_key
+from core.deviation_exporter import export_deviation_table
 from core.llm_gateway import build_client_from_user_config, get_llm_client
 from core.parser import parse_document
 from core.price_extractor import run_price_check
@@ -373,12 +375,60 @@ class SSEBroadcaster:
         with self._lock:
             return self._latest.get(int(task_id))
 
+_logger = logging.getLogger(__name__)
+_DEVIATION_OUT_DIR = (PROJECT_ROOT / 'output' / 'deviation').resolve()
+
+
+def deviation_stats_sidecar_path(task_id: int) -> Path:
+    """偏离表统计快照（sidecar JSON）：产物 docx 旁，供 GET 复用秒回。"""
+    return _DEVIATION_OUT_DIR / f"{int(task_id)}_stats.json"
+
+
+def build_and_cache_deviation_artifacts(
+    *,
+    task_id: int,
+    tender_abs: Path,
+    bid_abs: Path,
+    requirements: list[dict[str, Any]],
+    client=None,
+    f4_result: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """生成偏离表 docx 并原子写入统计快照 sidecar JSON（复用 f4_result 可零额外 LLM 预生成）。"""
+    _DEVIATION_OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_filename = f"{int(task_id)}_偏离表.docx"
+    out_abs = (_DEVIATION_OUT_DIR / out_filename).resolve()
+
+    res = export_deviation_table(
+        tender_path=tender_abs,
+        bid_path=bid_abs,
+        output_path=out_abs,
+        requirements=requirements,
+        client=client,
+        f4_result=f4_result,
+    )
+    payload = {
+        'task_id': int(task_id),
+        'download_url': f"/api/files/{out_abs.relative_to(PROJECT_ROOT.resolve()).as_posix()}",
+        'output_filename': out_filename,
+        'total_rows': int(res.get('total_rows', 0)),
+        'no_deviation_count': int(res.get('no_deviation_count', 0)),
+        'negative_deviation_count': int(res.get('negative_deviation_count', 0)),
+        'missing_count': int(res.get('missing_count', 0)),
+        'contradiction_count': int(res.get('contradiction_count', 0)),
+        'rows': list(res.get('rows') or []),
+    }
+    sidecar = deviation_stats_sidecar_path(task_id)
+    tmp_sidecar = sidecar.with_suffix('.json.tmp')
+    tmp_sidecar.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')
+    os.replace(str(tmp_sidecar), str(sidecar))
+    return payload
+
+
 def _cleanup_task_deviation_artifacts(task_id: int) -> None:
     """E25 §2.1.3：清理指定任务旧的偏离表 docx 与统计快照 sidecar，防止任务重跑后 F5 仍返回过时快照。"""
-    dev_dir = (PROJECT_ROOT / 'output' / 'deviation').resolve()
     for fname in (f"{int(task_id)}_偏离表.docx", f"{int(task_id)}_stats.json"):
         try:
-            (dev_dir / fname).unlink(missing_ok=True)
+            (_DEVIATION_OUT_DIR / fname).unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -974,6 +1024,19 @@ class BidTaskWorker:
                 'bid_total': f2_res.get('bid_total'),
                 'llm_status': llm_status,
             }
+
+            # E27 补强：F4 完成后零 LLM 预生成 F5 偏离表与统计快照，确保点进 F5 与交付打包秒开
+            try:
+                build_and_cache_deviation_artifacts(
+                    task_id=task.id,
+                    tender_abs=tender_abs,
+                    bid_abs=bid_abs,
+                    requirements=f1_requirements,
+                    client=None,
+                    f4_result=f4_res,
+                )
+            except Exception as dev_exc:
+                _logger.warning("Task %s F5 偏离表预生成跳过（回退按需生成）: %s", task.id, dev_exc)
 
             # ── 阶段 4：delivered（核验完成）──
             finished_utc = _utc_now()

@@ -294,6 +294,21 @@ def test_e27_real_corpus_bjtu_02_04_probe():
     )
     assert not any(f['code'] == 'SOCIAL_MONTH_MISSING' for f in f3_04)
 
+    from core.tender_extractor import build_review_checklist
+
+    ck04 = build_review_checklist(str(t04))
+    ch4_04 = [c for c in ck04['invalid_bid_clauses'] if c.get('clause_role') == 'technical_or_commercial']
+    assert len(ch4_04) == 12
+    assert any('工业物性数据知识库' in c.get('text', '') for c in ch4_04)
+    assert any(c.get('clause_no') == '六、' and '硬件1 年质保' in c.get('text', '') for c in ch4_04)
+    assert any(c.get('clause_no') == '6、' and c.get('clause_role') == 'eval_rule' for c in ck04['invalid_bid_clauses'])
+
+    ck02 = build_review_checklist(str(t02))
+    ch4_02 = [c for c in ck02['invalid_bid_clauses'] if c.get('clause_role') == 'technical_or_commercial']
+    assert len(ch4_02) == 11
+    assert any(c.get('clause_no') == '采购需求-（1）' for c in ch4_02)
+    assert any(c.get('clause_no') == '6、' and c.get('clause_role') == 'eval_rule' for c in ck02['invalid_bid_clauses'])
+
 
 def test_e27_qa_ask_502_no_fallback_pollution_and_last_turn_alias(tmp_path, monkeypatch):
     """§2.2：/ask 网关故障返回 502 QA_GATEWAY_ERROR 且不污染会话历史；支持 DELETE /api/qa/{id}/last-turn 别名路由。"""
@@ -511,7 +526,7 @@ def test_e27_cold_ocr_progress_callback_not_muted_by_zero_cached_hits(tmp_path, 
     from docx import Document
     from backend.database import Base, get_engine, get_session_factory
     from backend.models import BidCheckTask, Tenant
-    from backend.worker import BidTaskWorker
+    from backend.worker import BidTaskWorker, _cleanup_task_deviation_artifacts, deviation_stats_sidecar_path
 
     monkeypatch.setenv('BIDGUARD_FORCE_ZERO_TOKEN', '1')
 
@@ -586,9 +601,99 @@ def test_e27_cold_ocr_progress_callback_not_muted_by_zero_cached_hits(tmp_path, 
             assert 'f_parse_ms' in dur and dur['f_parse_ms'] >= 0
         finally:
             s2.close()
+        assert deviation_stats_sidecar_path(tid).is_file()
     finally:
+        _cleanup_task_deviation_artifacts(tid)
         worker.shutdown(wait=False)
         eng.dispose()
+
+
+def test_e27_deviation_export_reuses_f4_result_zero_llm_with_submission_rule(tmp_path, monkeypatch):
+    """§2.6：export_deviation_table 传入 f4_result 时跳过二次 run_response_check（0 次 LLM），且兼容含 submission_rule 的长度差异。"""
+    import core.deviation_exporter as dev_mod
+    from core.deviation_exporter import export_deviation_table
+    from core.response_checker import run_response_check
+    from core.tender_extractor import extract_invalid_bid_clauses
+
+    tender_txt = tmp_path / 't.txt'
+    bid_txt = tmp_path / 'b.txt'
+    out_docx = tmp_path / 'out_dev.docx'
+
+    t_body = (
+        "第三章 投标人须知\n"
+        "14.1 投标文件份数：正本1份，副本4份，未按要求递交电子版按无效投标处理。\n"
+        "第四章 采购需求及技术要求\n"
+        "二、采购需求及技术要求\n"
+        "● 数据知识库模块\n"
+        "支持工业物性数据接入与自动向量化检索。\n"
+        "六、质保期要求：硬件1年质保，软件2年质保。\n"
+        "第五章 评标办法\n"
+    )
+    b_body = (
+        "响应内容：支持工业物性数据接入与自动向量化检索。\n"
+        "承诺：硬件1年质保，软件2年质保。\n"
+    )
+    tender_txt.write_text(t_body, encoding='utf-8', newline='\n')
+    bid_txt.write_text(b_body, encoding='utf-8', newline='\n')
+
+    reqs = extract_invalid_bid_clauses(t_body)
+    assert any(r.get('clause_role') == 'submission_rule' for r in reqs)
+    f4_res = run_response_check(tender_txt, bid_txt, requirements=reqs, client=None)
+    assert len(f4_res['star_results']) == 3  # 14.1 + 1条技术 + 六、质保
+
+    def _forbid_second_run(*args, **kwargs):
+        raise AssertionError('传入 f4_result 时严禁再次调用 run_response_check')
+
+    monkeypatch.setattr(dev_mod, 'run_response_check', _forbid_second_run)
+
+    res = export_deviation_table(
+        tender_txt,
+        bid_txt,
+        out_docx,
+        requirements=reqs,
+        client=None,
+        f4_result=f4_res,
+    )
+    assert out_docx.is_file()
+    assert res['total_rows'] == 2  # 已剥除 14.1 submission_rule，仅留 2 条实质要求
+    assert all(r['clause_no'] != '14.1' for r in res['rows'])
+
+
+def test_e27_chapter4_stub_skip_and_truncated_eval_rule():
+    """§2.6：第三章 13 字假章节头不得截胡真正第四章；长评标办法下 6、报价过低 必须完整切出并归为 eval_rule。"""
+    from core.tender_extractor import classify_invalid_clause_role, extract_invalid_bid_clauses
+
+    filler = '其他评标细则说明内容，此处填充字符以拉长前导段落确保超过六百字限制。' * 14
+    sample = (
+        "第三章 投标人须知\n"
+        "本招标文件共五章：\n"
+        "第三章投标人须知\n"
+        "第四章采购需求及技术要求\n"
+        "第五章评分办法及评分标准\n"
+        "4.2 请投标人认真审阅上述全部章节条款。\n"
+        "第四章采购需求及技术要求\n"
+        "二、采购需求及技术要求\n"
+        "（1）采用逻辑隔离技术实现工作环境与普通环境安全隔离。\n"
+        "（2）支持不少于10个客户端并发访问及审计追溯。\n"
+        "三、交付或者实施的时间和地点\n"
+        "交付时间：自合同签订生效后3个月内。\n"
+        "六、质保期要求：硬件1年质保，软件2年质保。\n"
+        "第五章评分办法及评分标准\n"
+        f"三、评标办法\n1、{filler}\n"
+        "6、报价过低：\n"
+        "评标委员会认为投标人的报价明显低于其他通过符合性审查投标人的报价，"
+        "应当要求其在合理时间内提供说明，不能证明其报价合理性的，评标委员会应当将其作为无效投标处理。\n"
+    )
+    clauses = extract_invalid_bid_clauses(sample)
+    tech_comm = [c for c in clauses if c.get('clause_role') == 'technical_or_commercial']
+    assert len(tech_comm) == 4
+    assert [c['clause_no'] for c in tech_comm] == ['采购需求-（1）', '采购需求-（2）', '三、', '六、']
+
+    low_price = [c for c in clauses if c.get('clause_no') == '6、']
+    assert low_price and low_price[0].get('clause_role') == 'eval_rule'
+    assert '评标委员会应当将其作为无效投标处理' in low_price[0]['text']
+    # 旧缓存中只截到"评标委员会认为投标人"的残留片段也能被识别为 eval_rule 失效清理
+    assert classify_invalid_clause_role('6、报价过低：\n评标委员会认为投标人', '6、') == 'eval_rule'
 
 
 

@@ -9,22 +9,23 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from backend.auth import AuthUser, get_current_user, record_audit
-from backend.database import PROJECT_ROOT, get_db
+from backend.database import get_db
 from backend.models import BidCheckTask
 from backend.schemas import DeviationExportOut
-from backend.worker import get_worker, resolve_effective_llm_client, resolve_project_path
-from core.deviation_exporter import export_deviation_table
+from backend.worker import (
+    _DEVIATION_OUT_DIR,
+    build_and_cache_deviation_artifacts,
+    deviation_stats_sidecar_path,
+    get_worker,
+    resolve_effective_llm_client,
+    resolve_project_path,
+)
 from core.tender_extractor import build_review_checklist
 
 router = APIRouter(prefix='/api/deviation', tags=['deviation'])
 
-_DEVIATION_OUT_DIR = (PROJECT_ROOT / 'output' / 'deviation').resolve()
 _DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-
-
-def _stats_sidecar_path(task_id: int) -> Path:
-    """偏离表统计快照（sidecar JSON）：产物 docx 旁，供 GET 复用秒回。"""
-    return _DEVIATION_OUT_DIR / f"{task_id}_stats.json"
+_stats_sidecar_path = deviation_stats_sidecar_path
 
 
 def _generate_deviation_and_cache(
@@ -37,38 +38,18 @@ def _generate_deviation_and_cache(
     user_id=None,
 ) -> DeviationExportOut:
     """全量生成偏离表：解析双书 → F4 对齐 → 写 docx + 统计快照 sidecar。"""
-    _DEVIATION_OUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_filename = f"{task.id}_偏离表.docx"
-    out_abs = (_DEVIATION_OUT_DIR / out_filename).resolve()
-
     # 铁律 1：F1 抽取结果显式传入 requirements=，避免内部重复解析
     checklist = build_review_checklist(str(tender_abs))
     reqs = list(checklist.get('marked_clauses') or []) + list(checklist.get('invalid_bid_clauses') or [])
 
-    res = export_deviation_table(
-        tender_path=tender_abs,
-        bid_path=bid_abs,
-        output_path=out_abs,
+    payload = build_and_cache_deviation_artifacts(
+        task_id=task.id,
+        tender_abs=tender_abs,
+        bid_abs=bid_abs,
         requirements=reqs,
         client=client,
     )
-
-    out = DeviationExportOut(
-        task_id=task.id,
-        download_url=f"/api/files/{out_abs.relative_to(PROJECT_ROOT.resolve()).as_posix()}",
-        output_filename=out_filename,
-        total_rows=int(res.get('total_rows', 0)),
-        no_deviation_count=int(res.get('no_deviation_count', 0)),
-        negative_deviation_count=int(res.get('negative_deviation_count', 0)),
-        missing_count=int(res.get('missing_count', 0)),
-        contradiction_count=int(res.get('contradiction_count', 0)),
-        rows=list(res.get('rows') or []),
-    )
-
-    # 写统计快照（含 rows），GET 复用零重算
-    import json
-    _stats_sidecar_path(task.id).write_text(
-        json.dumps(out.model_dump(), ensure_ascii=False), encoding='utf-8')
+    out = DeviationExportOut(**payload)
 
     record_audit(
         db,

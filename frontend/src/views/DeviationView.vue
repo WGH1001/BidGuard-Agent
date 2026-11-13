@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onActivated, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { checksApi, deviationApi } from '@/api'
 import type { BidTaskOut, DeviationExportOut, DeviationRowItem } from '@/api/types'
 import { useAppStore } from '@/stores/app'
+
+defineOptions({ name: 'DeviationView' })
 
 const route = useRoute()
 const appStore = useAppStore()
@@ -12,7 +14,9 @@ const appStore = useAppStore()
 type DeviationFilterKind = 'ALL' | 'no_deviation' | 'negative' | 'missing' | 'contradiction'
 
 const loadingTasks = ref(false)
-const generating = ref(false)
+const loadingDeviation = ref(false)
+const regenerating = ref(false)
+const isBusy = computed(() => loadingDeviation.value || regenerating.value)
 const downloading = ref(false)
 const runningConflictMsg = ref('')
 let loadSeq = 0
@@ -71,6 +75,11 @@ async function loadAvailableTasks(): Promise<void> {
     const queryTid = Number(route.query.task_id)
     if (queryTid && tasks.value.some((t) => t.id === queryTid)) {
       selectedTaskId.value = queryTid
+    } else if (
+      selectedTaskId.value &&
+      tasks.value.some((t) => t.id === selectedTaskId.value)
+    ) {
+      // 保留当前用户在 F5 中已手动切换选中的任务
     } else if (appStore.activeTaskId && tasks.value.some((t) => t.id === appStore.activeTaskId)) {
       selectedTaskId.value = appStore.activeTaskId
     } else if (tasks.value.length > 0) {
@@ -82,17 +91,28 @@ async function loadAvailableTasks(): Promise<void> {
   }
 
   if (selectedTaskId.value) {
+    appStore.setActiveTaskId(selectedTaskId.value)
     await handleLoadDeviation()
   }
 }
 
-/** 进页面/切换任务：调 GET，产物已存在时后端秒回复用 */
+async function handleTaskChange(): Promise<void> {
+  if (selectedTaskId.value) {
+    appStore.setActiveTaskId(selectedTaskId.value)
+  }
+  await handleLoadDeviation()
+}
+
+/** 进页面/切换任务：调 GET，产物已存在时后端秒回复用；先清旧表防跨包切换视觉残影 */
 async function handleLoadDeviation(): Promise<void> {
   const tid = selectedTaskId.value
   if (!tid) return
   const seq = ++loadSeq
   runningConflictMsg.value = ''
-  generating.value = true
+  if (devResult.value && devResult.value.task_id !== tid) {
+    devResult.value = null
+  }
+  loadingDeviation.value = true
   try {
     const res = await deviationApi.get(tid)
     if (seq !== loadSeq || selectedTaskId.value !== tid) return
@@ -108,7 +128,7 @@ async function handleLoadDeviation(): Promise<void> {
     }
   } finally {
     if (seq === loadSeq) {
-      generating.value = false
+      loadingDeviation.value = false
     }
   }
 }
@@ -122,7 +142,7 @@ async function handleGenerateDeviation(): Promise<void> {
   }
   const seq = ++loadSeq
   runningConflictMsg.value = ''
-  generating.value = true
+  regenerating.value = true
   try {
     const res = await deviationApi.generate(tid)
     if (seq !== loadSeq || selectedTaskId.value !== tid) return
@@ -139,7 +159,7 @@ async function handleGenerateDeviation(): Promise<void> {
     }
   } finally {
     if (seq === loadSeq) {
-      generating.value = false
+      regenerating.value = false
     }
   }
 }
@@ -165,6 +185,38 @@ function rowClassName({ row }: { row: { is_negative?: boolean } }): string {
 onMounted(() => {
   void loadAvailableTasks()
 })
+
+onActivated(() => {
+  const queryTid = Number(route.query.task_id)
+  if (queryTid && tasks.value.some((t) => t.id === queryTid) && selectedTaskId.value !== queryTid) {
+    selectedTaskId.value = queryTid
+    appStore.setActiveTaskId(queryTid)
+    void handleLoadDeviation()
+    return
+  }
+  if (!selectedTaskId.value) {
+    void loadAvailableTasks()
+    return
+  }
+  void checksApi.list({ task_type: 'pre_check', page: 1, page_size: 50 }).then((res) => {
+    tasks.value = res.items || []
+  })
+  if (!devResult.value || devResult.value.task_id !== selectedTaskId.value) {
+    void handleLoadDeviation()
+  }
+})
+
+watch(
+  () => route.query.task_id,
+  (rawTid) => {
+    const queryTid = Number(rawTid)
+    if (queryTid && tasks.value.some((t) => t.id === queryTid) && selectedTaskId.value !== queryTid) {
+      selectedTaskId.value = queryTid
+      appStore.setActiveTaskId(queryTid)
+      void handleLoadDeviation()
+    }
+  },
+)
 </script>
 
 <template>
@@ -185,7 +237,7 @@ onMounted(() => {
           :loading="loadingTasks"
           placeholder="选择已上传双书的体检任务"
           style="width: 340px"
-          @change="handleLoadDeviation"
+          @change="handleTaskChange"
         >
           <el-option
             v-for="t in tasks"
@@ -195,7 +247,12 @@ onMounted(() => {
           />
         </el-select>
 
-        <el-button type="primary" :loading="generating" @click="handleGenerateDeviation">
+        <el-button
+          type="primary"
+          :loading="regenerating"
+          :disabled="loadingTasks || loadingDeviation"
+          @click="handleGenerateDeviation"
+        >
           重新生成偏离表
         </el-button>
 
@@ -210,7 +267,7 @@ onMounted(() => {
       </div>
     </section>
 
-    <div v-loading="generating" class="deviation-body-wrap">
+    <div v-loading="isBusy" class="deviation-body-wrap">
       <template v-if="devResult">
         <!-- 统计概览卡片（支持点击卡片直接联动筛选对应种类的偏离行） -->
       <div class="dev-stats-grid">
@@ -339,8 +396,8 @@ onMounted(() => {
           :description="
             runningConflictMsg
               ? `${runningConflictMsg}（您可随时切换上方下拉框查看其他已完成任务）`
-              : generating
-                ? '正在消费 F4 核验结果生成标准偏离表，请稍候…'
+              : isBusy
+                ? '正在加载或生成标准偏离表，请稍候…'
                 : '请选择一个防废标体检任务以生成并预览《技术与商务偏离表》'
           "
         />
