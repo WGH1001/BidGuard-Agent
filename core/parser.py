@@ -757,13 +757,97 @@ def _load_docx_media_cache(cache_path: Path) -> dict[str, dict]:
         return {}
 
 
+def _atomic_write_text(target: Path, content: str) -> None:
+    """跨平台原子落盘辅助（先写临时文件再 replace，防中途中断截断缓存 JSON）。"""
+    tmp = target.with_name(f"{target.name}.tmp")
+    try:
+        tmp.write_text(content, encoding='utf-8', newline='\n')
+        tmp.replace(target)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        target.write_text(content, encoding='utf-8', newline='\n')
+
+
 def _save_docx_media_cache(cache_path: Path, cache_map: dict[str, dict]) -> None:
     """将图片 SHA1 -> 识别文本与段落位置写入 <docx>.media.ocr.json 伴生缓存。"""
     if not cache_map:
         return
     try:
         payload = {'images': cache_map}
-        cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+        _atomic_write_text(cache_path, json.dumps(payload, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+
+
+_PDF_PAGE_INCREMENTAL_FLUSH = 5
+
+
+def _load_pdf_resume_pages(
+    json_cache: Path,
+    total_pages: int,
+    source_size: int,
+    source_mtime_ns: int,
+) -> dict[int, dict]:
+    """加载扫描 PDF 未完成断点缓存或完整结构化缓存，返回 page_index -> page_data。"""
+    if not json_cache.is_file():
+        return {}
+    try:
+        raw = json.loads(json_cache.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+    pages_list: list = []
+    if isinstance(raw, list) and len(raw) == total_pages:
+        pages_list = raw
+    elif isinstance(raw, dict) and raw.get('partial') is True:
+        if (
+            int(raw.get('total_pages', -1)) != total_pages
+            or int(raw.get('source_size', -1)) != source_size
+            or int(raw.get('source_mtime_ns', -1)) != source_mtime_ns
+        ):
+            return {}
+        raw_pages = raw.get('pages')
+        if isinstance(raw_pages, list):
+            pages_list = raw_pages
+    else:
+        return {}
+
+    out: dict[int, dict] = {}
+    for item in pages_list:
+        if not isinstance(item, dict) or 'page_index' not in item:
+            continue
+        try:
+            idx = int(item['page_index'])
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < total_pages and isinstance(item.get('lines'), list):
+            out[idx] = item
+    return out
+
+
+def _save_pdf_partial_ocr_cache(
+    json_cache: Path,
+    total_pages: int,
+    source_size: int,
+    source_mtime_ns: int,
+    pages_by_idx: dict[int, dict],
+) -> None:
+    """分批增量落盘已完成页到 <pdf>.ocr.json（dict 包装标记 partial=True，防止未完成时被 get_pdf_ocr_data 误判完整）。"""
+    if not pages_by_idx:
+        return
+    try:
+        ordered = [pages_by_idx[i] for i in sorted(pages_by_idx.keys())]
+        payload = {
+            'partial': True,
+            'total_pages': total_pages,
+            'source_size': source_size,
+            'source_mtime_ns': source_mtime_ns,
+            'pages': ordered,
+        }
+        _atomic_write_text(json_cache, json.dumps(payload, ensure_ascii=False))
     except Exception:
         pass
 
@@ -897,62 +981,129 @@ def _render_page_image(page):
     return np.ascontiguousarray(img[:, :, ::-1])
 
 
-def _ocr_pdf_text(pdf_path: Path) -> str:
-    """扫描件 OCR 主流程：缓存秒读 → 逐页渲染识别 → 成功写缓存。"""
+def _ocr_pdf_text(
+    pdf_path: Path,
+    progress_cb: Optional[Callable[[int, int, int], None]] = None,
+) -> str:
+    """扫描件 OCR 主流程：缓存秒读 → 断点续传/分批增量落盘 → 全部完成后落盘正式缓存。"""
     cache = _ocr_cache_path(pdf_path)
+    json_cache = _ocr_json_cache_path(pdf_path)
     if cache.exists():
         cached = cache.read_text(encoding='utf-8')
         if cached.strip():
+            if progress_cb is not None:
+                cached_pages = 0
+                if json_cache.is_file():
+                    try:
+                        raw = json.loads(json_cache.read_text(encoding='utf-8'))
+                        if isinstance(raw, list):
+                            cached_pages = len(raw)
+                    except Exception:
+                        pass
+                try:
+                    progress_cb(0, 0, cached_pages)
+                except Exception:
+                    pass
             return cached
 
-    engine = _get_ocr_engine()
-    ocr_parts = []
-    ocr_pages_data = []
     import pymupdf
-    with pymupdf.open(str(pdf_path)) as doc:
-        for p_idx, page in enumerate(doc):
-            pix = page.get_pixmap(dpi=200)
-            img_bgr = _render_page_image(page)
-            result, _ = engine(img_bgr)
-            page_lines = []
-            if result:
-                for line in result:
-                    if len(line) >= 2 and line[1]:
-                        txt = str(line[1]).strip()
-                        ocr_parts.append(txt)
-                        raw_box = line[0]
-                        box = []
-                        if isinstance(raw_box, (list, tuple)):
-                            box = [[float(pt[0]), float(pt[1])] for pt in raw_box]
-                        score = float(line[2]) if len(line) >= 3 else 1.0
-                        page_lines.append({
-                            'box': box,
-                            'text': txt,
-                            'score': score
-                        })
-            ocr_pages_data.append({
-                'page_index': p_idx,
-                'page_width': float(page.rect.width),
-                'page_height': float(page.rect.height),
-                'img_width': float(pix.width),
-                'img_height': float(pix.height),
-                'lines': page_lines
-            })
+    file_stat = pdf_path.stat()
+    source_size = int(file_stat.st_size)
+    source_mtime_ns = int(file_stat.st_mtime_ns)
 
-    text = '\n'.join(p for p in ocr_parts if p)
+    pages_by_idx: dict[int, dict] = {}
+    total_pages = 0
+    unflushed_new = 0
+
+    with pymupdf.open(str(pdf_path)) as doc:
+        total_pages = int(doc.page_count)
+        pages_by_idx = _load_pdf_resume_pages(json_cache, total_pages, source_size, source_mtime_ns)
+        total_uncached = sum(1 for i in range(total_pages) if i not in pages_by_idx)
+        cached_hits = total_pages - total_uncached
+        uncached_done = 0
+
+        if progress_cb is not None and (total_uncached > 0 or cached_hits > 0):
+            try:
+                progress_cb(0, total_uncached, cached_hits)
+            except Exception:
+                pass
+
+        engine = _get_ocr_engine() if total_uncached > 0 else None
+
+        try:
+            for p_idx, page in enumerate(doc):
+                if p_idx in pages_by_idx:
+                    continue
+                pix = page.get_pixmap(dpi=200)
+                img_bgr = _render_page_image(page)
+                result, _ = engine(img_bgr)
+                page_lines = []
+                if result:
+                    for line in result:
+                        if len(line) >= 2 and line[1]:
+                            txt = str(line[1]).strip()
+                            if not txt:
+                                continue
+                            raw_box = line[0]
+                            box = []
+                            if isinstance(raw_box, (list, tuple)):
+                                box = [[float(pt[0]), float(pt[1])] for pt in raw_box]
+                            score = float(line[2]) if len(line) >= 3 else 1.0
+                            page_lines.append({
+                                'box': box,
+                                'text': txt,
+                                'score': score
+                            })
+                pages_by_idx[p_idx] = {
+                    'page_index': p_idx,
+                    'page_width': float(page.rect.width),
+                    'page_height': float(page.rect.height),
+                    'img_width': float(pix.width),
+                    'img_height': float(pix.height),
+                    'lines': page_lines,
+                }
+                uncached_done += 1
+                unflushed_new += 1
+                if unflushed_new >= _PDF_PAGE_INCREMENTAL_FLUSH:
+                    _save_pdf_partial_ocr_cache(
+                        json_cache, total_pages, source_size, source_mtime_ns, pages_by_idx
+                    )
+                    unflushed_new = 0
+                if progress_cb is not None:
+                    try:
+                        progress_cb(uncached_done, total_uncached, cached_hits)
+                    except Exception:
+                        pass
+        except Exception:
+            if unflushed_new > 0:
+                _save_pdf_partial_ocr_cache(
+                    json_cache, total_pages, source_size, source_mtime_ns, pages_by_idx
+                )
+            raise
+
+    ocr_pages_data = [pages_by_idx[i] for i in range(total_pages) if i in pages_by_idx]
+    ocr_parts = []
+    for p_item in ocr_pages_data:
+        for line_item in p_item.get('lines') or []:
+            txt = str(line_item.get('text') or '').strip()
+            if txt:
+                ocr_parts.append(txt)
+
+    text = '\n'.join(ocr_parts)
     if len(text.strip()) < OCR_MIN_CHARS:
+        try:
+            json_cache.unlink(missing_ok=True)
+        except Exception:
+            pass
         raise ValueError(
             f'OCR 识别后仍仅得 {len(text.strip())} 字：该 PDF 为空白页或'
             '图片内容无法识别，请确认上传的是有效合同扫描件'
         )
-    cache.write_text(text, encoding='utf-8')
     try:
-        _ocr_json_cache_path(pdf_path).write_text(
-            json.dumps(ocr_pages_data, ensure_ascii=False),
-            encoding='utf-8'
-        )
+        _atomic_write_text(json_cache, json.dumps(ocr_pages_data, ensure_ascii=False))
     except Exception:
         pass
+    _atomic_write_text(cache, text)
     return text
 
 
@@ -1148,7 +1299,7 @@ def parse_document(
             text = "\n".join(text_parts)
 
             if len(text.strip()) < OCR_MIN_CHARS and max_page_chars < 20:
-                text = _ocr_pdf_text(path)
+                text = _ocr_pdf_text(path, progress_cb=progress_cb)
 
             return ParsedDoc(text=text, source_type=source_type, pages=pages)
 

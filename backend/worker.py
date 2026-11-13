@@ -663,20 +663,24 @@ class BidTaskWorker:
             t_parse = time.perf_counter()
             last_ocr_emit = [0.0]
 
-            def _on_bid_ocr_progress(done_imgs: int, total_imgs: int, newly_ocrd: int) -> None:
-                if newly_ocrd <= 0:
+            is_bid_pdf = str(bid_abs).lower().endswith('.pdf')
+            ocr_unit = '页' if is_bid_pdf else '张'
+            flush_step = 5 if is_bid_pdf else 10
+
+            def _on_bid_ocr_progress(done_items: int, total_items: int, _cached_hits: int) -> None:
+                if total_items <= 0 or done_items <= 0:
                     return
                 now_ts = time.perf_counter()
-                if done_imgs < total_imgs and (now_ts - last_ocr_emit[0]) < 1.5 and (done_imgs % 5 != 0):
+                if done_items < total_items and (now_ts - last_ocr_emit[0]) < 1.5 and (done_items % 5 != 0):
                     return
                 last_ocr_emit[0] = now_ts
-                pct = min(53, 42 + int(round((done_imgs / max(1, total_imgs)) * 11)))
+                pct = min(53, 42 + int(round((done_items / max(1, total_items)) * 11)))
                 self._emit_stage(
                     session,
                     task,
                     'extracting',
                     pct,
-                    f"正在对投标书内嵌扫描件执行离线 OCR（已完成 {done_imgs} / {total_imgs} 张，每 10 张增量落盘缓存）",
+                    f"正在对投标书扫描件/内嵌图片执行离线 OCR（已完成 {done_items} / {total_items} {ocr_unit}，每 {flush_step} {ocr_unit}增量落盘缓存）",
                 )
 
             bid_parsed = parse_document(str(bid_abs), ocr_images=True, progress_cb=_on_bid_ocr_progress)

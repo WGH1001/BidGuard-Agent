@@ -54,7 +54,7 @@ BidGuard-Agent/
 ├── core/                                # 19 个模块（F1~F7 + 混合检索 + 法规库，逐项状态见 §3）
 ├── backend/                             # main + models(11表) + schemas + 11 组路由
 ├── frontend/                            # Vue3 + TS：12 个视图全部落地
-├── tests/                               # 32 个测试文件（test_*.py）237 项全绿
+├── tests/                               # 32 个测试文件（test_*.py）239 项全绿
 ├── scripts/                             # build_f1_baseline.py / eval_f1_llm.py / probe_reasoning_efforts.py
 ├── data/
 │   ├── corpus/m0_samples/               # 11 份语料 + baseline / ground_truth / llm_eval 三本账（§4）
@@ -68,9 +68,9 @@ BidGuard-Agent/
 
 ## 2. 当前基线（截至 2026-11-12）
 
-- **开发阶段**：3 周排期全部完成 + 二十七轮增强升级（E1~E27）全量实现（E1~E26 已验收并入库；**E27 已完成全部实现与本地验证，留在工作区待最终门禁放行后确认 commit**：涵盖 F3 社保语境防误拼 + 受控 LLM 鉴别、网关超时与 TUN 诊断/F7 重生成与撤回本轮 + `/ask` 502 隔离、`clause_role` 分层与第四章补齐 + F5 偏离表过滤、分包预算限价精准匹配、Stage 1.5 全图 OCR `f_parse_ms` 拆分及 F2–F4 台账吸顶折叠改版）
-- **Git 最新功能 Commit**：工作区 E27 改动待确认 commit；当前仓库最新基线提交 `1087a49`（`docs: 全面同步AGENTS/README/FRONTEND至E26与227项验收基线`），前序功能提交 `4af8c66`（E26）/ `d133a21`（E25）/ `29e5d56` & `a166973`（E24 + E4 爬虫修复）
-- **测试基线**：**237 项 pytest 全绿（零回归）**（在 227 项主线基础上新增 `tests/test_e27_real_bid_fixes.py` 10 项回归与北交大 02/04 真语料实弹探针）+ `vue-tsc --noEmit` 零错误 + `vite build` 成功 —— 第一验收线已演进至 **237 项**
+- **开发阶段**：3 周排期全部完成 + 二十七轮增强升级（E1~E27）全量实现（E1~E27 主体 `3dc8f65` 已入库；**E27 验收追补扫描 PDF 每 5 页增量 `.ocr.json` 断点续扫与冷启动进度回调修复留在工作区待确认 commit**：涵盖 F3 社保语境防误拼 + 受控 LLM 鉴别、网关超时与 TUN 诊断/F7 重生成与撤回本轮 + `/ask` 502 隔离、`clause_role` 分层与第四章补齐 + F5 偏离表过滤、分包预算限价精准匹配、Stage 1.5 全图与扫描 PDF OCR `f_parse_ms` 拆分及 F2–F4 台账吸顶折叠改版）
+- **Git 最新功能 Commit**：`3dc8f65`（E27 主体已入库）；工作区保留 E27 验收追加（扫描 PDF 5 页增量断点缓存与冷启动 SSE 播报修复）待确认 commit；前序主线：`1087a49` / `4af8c66`（E26）/ `d133a21`（E25）
+- **测试基线**：**239 项 pytest 全绿（零回归）**（在 227 项主线基础上新增 `tests/test_e27_real_bid_fixes.py` 12 项回归与北交大 02/04 真语料实弹探针）+ `vue-tsc --noEmit` 零错误 + `vite build` 成功 —— 第一验收线已演进至 **239 项**
 - **模型网关基线**：`config/models.yaml` 当前工作区设为 `default_env: prod`（内网私有网关 `http://10.0.2.81:3000/v1`，`GLM-5.3-Flash`，`timeout: 60`）；并行提供 `demo` 环境（智谱开放平台 `glm-5.3-flash`、`embedding: embedding-3` 激活 L2 混合检索、`timeout: 60`），`LLMClient` 统一控重试与 TUN/私有 IP 报错排查提示
 - **运行环境**：本机开发用项目自带 `.venv`（依赖已全量钉死）；生产走 Docker 四容器（`docker compose up -d --build`，默认宿主机 `APP_PORT=8000` + `POSTGRES_PORT=15432`，与老项目 `8080` + `5432` 并行共存不冲突）
 - **快速验收命令**：
@@ -87,7 +87,7 @@ BidGuard-Agent/
 | 序号 | 文件路径 | 所属模块 | 一句话职责说明 | 当前状态与实测验收数据 |
 |---|---|---|---|---|
 | 1 | `core/interfaces.py` | 基础契约 | `ParsedDoc`、`Clause`、`LLMResponse` 等核心数据类 | 已验收（全模块共用契约） |
-| 2 | `core/parser.py` | 文档解析 | Word/PDF/TXT 解析、vMerge 去重、RapidOCR 离线缓存；E5 新增 `build_pdf_page_spans/offset_to_page`；E6 新增 `build_docx_page_spans/offset_to_docx_page`（双轨页码：印刷页 > 物理页估算 > 字符偏移诚实回退）。**E6 验收时偏移权威源已从 lxml 重建改为 python-docx 部件序列（7/7 真语料零漂移）**；**E24 新增** `parse_qa_attachment` 附件低门槛解析（取消 `OCR_MIN_CHARS=100` 报错，复用 RapidOCR 与 `.ocr.txt` 缓存）；**E27 新增** `parse_document(..., ocr_images=True, progress_cb=None)` 支持 Stage 1.5 全图 OCR 进度回调与分批增量刷盘 | 已验收（11 份真语料解析零虚增） |
+| 2 | `core/parser.py` | 文档解析 | Word/PDF/TXT 解析、vMerge 去重、RapidOCR 离线缓存；E5 新增 `build_pdf_page_spans/offset_to_page`；E6 新增 `build_docx_page_spans/offset_to_docx_page`（双轨页码：印刷页 > 物理页估算 > 字符偏移诚实回退）。**E6 验收时偏移权威源已从 lxml 重建改为 python-docx 部件序列（7/7 真语料零漂移）**；**E24 新增** `parse_qa_attachment` 附件低门槛解析（取消 `OCR_MIN_CHARS=100` 报错，复用 RapidOCR 与 `.ocr.txt` 缓存）；**E27 新增** `parse_document(..., ocr_images=True, progress_cb=None)` 与 `_ocr_pdf_text(..., progress_cb=None)` 支持 Stage 1.5 全图与扫描 PDF OCR 进度回调、`.docx` 每 10 张 `.media.ocr.json` 与扫描 `.pdf` 每 5 页 `.ocr.json`（`partial=True` 断点续扫）分批原子落盘 | 已验收（11 份真语料解析零虚增） |
 | 3 | `core/splitter.py` | 条款切分 | 条款编号与段落切分，保留精确 `start/end` 偏移 | 已验收 |
 | 4 | `core/quote_verifier.py` | 溯源锁账 | `normalize_zh` 中文归一 + `verify_quote` 连续原文子串核验 | 已验收（F1/F4 防幻觉守门员） |
 | 5 | `core/llm_gateway.py` | 模型网关 | OpenAI 兼容多环境调用、线程安全用量累加（`self._lock`）、`embed()` 向量接入、原生 `reasoning_effort` 透传；**E22 加固**：组合条件拒绝识别（屏蔽无关 400 误判）、单实例内存熔断记忆（不改 `self.chat_options`）、`chat_stream()` 组合去参重试、`reasoning_effort_map` 配置翻译与内部键隔离；**E24 新增**：PyMuPDF `Pixmap` 真实像素内存缩图 `encode_image_for_vlm`、`supports_vision` 透传/图像 token 占位估算与 `_is_vision_reject`/`_mark_vision_unsupported` 拒图熔断剥图重试；**E27 加固** 读取 `timeout`（默认 60.0s）+ OpenAI `max_retries=0` 与私网 IP TUN 排查提示（`_format_gateway_error_hint`） | 已验收（E12 / E22 / E24 / E27 实测全绿） |
@@ -180,15 +180,15 @@ BidGuard-Agent/
 | E23 | 开标日期全链路 11/11 精准提取（含通用锚点同义词、中文大写日期、正则未命中局部窗 LLM 兜底 + `verify_quote` 双锁、手填强校验 `INVALID_OPEN_DATE`、双向 `OPEN_DATE_MISMATCH` 预警及 `open_date_source` 前后端全链路来源可观测）、F1/F6 开标日透出、大盘倒计时优先有日期项+类型徽标、F5 去全白遮罩、顶栏 44px 瘦身+F7 高屏占比与发送旁深度选择器、`_coerce_action_input` 工具 JSON 解包与 `total_price` 校验 | **已验收**（`59b410e`） | 211 项 + `vue-tsc` + `vite build` |
 | E24 | F7 标书专家多文件与图片附件问答双轨落地（`parse_qa_attachment` 取消 100 字门禁、`.ocr.txt` 缓存、20MB/10 个/100MB 配额与 `DELETE` 级联清盘、老库双表自动加列、`supports_vision` 三处设置与网关 PyMuPDF 真实像素缩图/拒图单实例熔断、`search_attachment` 第 7 工具 + `INVALID_ATTACHMENT_ID` 拒收 + `verify_quote` 反幻觉与纯图降级、`_parse_llm_json(strict=False)` 容错/禁吐工具 JSON/`after_offset` 续检、前端上传勾选与视觉参考标记） | **已验收**（`a166973` / `29e5d56`） | 218 项 + `vue-tsc` + `vite build` |
 | E25 | 全链路工作流与台账运维补强：F5 下拉防锁死/在途 `409 CHECK_TASK_RUNNING`/重跑清旧偏离表；F6 单条 `rescan` 与全站开标日显化/未识别降级；F7 上下文 `suggested_questions`（含备证清单兜底提示）；法规单条删除并重算主表哈希；审计日志 UTF-8 BOM CSV 导出；企业证照可选 PDF/图片 OCR 预填与原件上传下载解绑 | **已验收（工作区待确认 commit）** | 223 项 + `vue-tsc` + `vite build` |
-| E26 | 招标所需证照清单 0-Token 确定性提取与企业台账自动对账：`extract_required_certificates` 提取资格门槛/产品强制认证/评分资质/人员证书（带 `verify_quote` 溯源、"无需提供证明材料"免报护栏与品目清单节能产品证书捕获）并接入 `build_review_checklist`；`match_required_certificates_with_ledger` 按租户 `CompanyCertificate` 台账做四态对账（`valid`/`expiring_soon`/`expired`/`not_in_ledger`，以开标日为优先参照）；F1 前端第 ⑤ 页签与台账快捷补录联动 | **已归档（`4af8c66` / `1087a49`）** | 227 项 + `vue-tsc` + `vite build`
-| E27 | 真标书实战排障与交互体验深化：F3 社保动态窗口推导与局部语境防误拼 + 受控 LLM 语义鉴别（强过 `verify_quote`）与按 `code` 专属建议；模型网关可控 `timeout=60` / `max_retries=0` 与 TUN 诊断提示、F4 `check_bid_self_contradictions` L651 断连降级、F7 新增 `DELETE /api/qa/sessions/{id}/last-turn` 撤回本轮 + 重新生成/停止生成 + `/ask` `502 QA_GATEWAY_ERROR` 防污染；`clause_role`（`requirement`/`eval_rule`/`submission_rule`/`technical_or_commercial`）分层与第四章采购需求补齐、同句复合质保合并与未填下划线提示；分包预算限价精准匹配 + Stage 1.5 全图 OCR 独立 `f_parse_ms` 与增量 `.media.ocr.json` 刷盘；F2–F4 台账 `.task-rail` 吸顶常驻、3 行瘦身与折叠 | **已验收全绿（工作区待确认 commit）** | 237 项 + `vue-tsc` + `vite build` | |
+| E26 | 招标所需证照清单 0-Token 确定性提取与企业台账自动对账：`extract_required_certificates` 提取资格门槛/产品强制认证/评分资质/人员证书（带 `verify_quote` 溯源、"无需提供证明材料"免报护栏与品目清单节能产品证书捕获）并接入 `build_review_checklist`；`match_required_certificates_with_ledger` 按租户 `CompanyCertificate` 台账做四态对账（`valid`/`expiring_soon`/`expired`/`not_in_ledger`，以开标日为优先参照）；F1 前端第 ⑤ 页签与台账快捷补录联动 | **已归档（`4af8c66` / `1087a49`）** | 227 项 + `vue-tsc` + `vite build` |
+| E27 | 真标书实战排障与交互体验深化：F3 社保动态窗口推导与局部语境防误拼 + 受控 LLM 语义鉴别（强过 `verify_quote`）与按 `code` 专属建议；模型网关可控 `timeout=60` / `max_retries=0` 与 TUN 诊断提示、F4 `check_bid_self_contradictions` L651 断连降级、F7 新增 `DELETE /api/qa/sessions/{id}/last-turn` 撤回本轮 + 重新生成/停止生成 + `/ask` `502 QA_GATEWAY_ERROR` 防污染；`clause_role`（`requirement`/`eval_rule`/`submission_rule`/`technical_or_commercial`）分层与第四章采购需求补齐、同句复合质保合并与未填下划线提示；分包预算限价精准匹配 + Stage 1.5 全图/扫描 PDF OCR 独立 `f_parse_ms`、`.docx` 10 图 `.media.ocr.json` 与扫描 `.pdf` 5 页 `.ocr.json`（`partial=True` 断点续扫）及冷启动 `cached_hits=0` 进度播报修复；F2–F4 台账 `.task-rail` 吸顶常驻、3 行瘦身与折叠 | **主体已入库 `3dc8f65`，验收追补扫描 PDF 增量缓存待确认 commit** | 239 项 + `vue-tsc` + `vite build` |
 | chore | requirements 全量钉死（`59e6b64`）、基础镜像 digest 钉死、弹窗会话记忆 | `90a1947` | — |
 
 ---
 
 ## 7. 协作纪律与工程红线（完整版见 `AGENTS.md`）
 
-1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线已演进至 **237 项**（含 E27 10 项）。
+1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线已演进至 **239 项**（含 E27 12 项）。
 2. **凡能算的绝不进大模型（0 Token 优先）**；金额全程 `Decimal` 禁 `float`（ROUND_HALF_UP 量化 0.01）。
 3. **LLM 只吃局部窗口 + 强制 `quote_verifier` 溯源**；严禁整本标书直塞。
 4. **宁缺毋滥显式降级**：无法对齐必返回 NEED_MANUAL；找不到位置绝不乱锚（E5 五级定位链 + 置信护栏）；页码诚实回退字符偏移并标"不一定准确"。
@@ -219,6 +219,6 @@ BidGuard-Agent/
 ## 9. 本文档信息来源
 
 1. `docs/cards/` B1~E27 全部任务卡与验收记录；`派发归档/` 各阶段派发包全文
-2. Git 提交链（`git log --oneline`，已演进至 1087a49（E26）基线 + 工作区 E27 待确认 commit）；237 项 pytest + `vue-tsc` + `vite build` 实测回执
+2. Git 提交链（`git log --oneline`，已演进至 `3dc8f65` E27 主体 + 工作区追补扫描 PDF 增量缓存待确认 commit）；239 项 pytest + `vue-tsc` + `vite build` 实测回执
 3. `data/corpus/m0_samples/` 三本账 + `语料清单.md`、`data/corpus/sim_bids/_README.md`；`data/corpus/regulations/` 法规种子
 4. `E:\agent\Contract-Review-Agent\HANDOVER_V2.md`（文档骨架参照）

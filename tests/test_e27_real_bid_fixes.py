@@ -406,3 +406,189 @@ def test_e27_parse_document_backward_compat(tmp_path):
     assert d2.pages == 1
 
 
+def test_e27_scanned_pdf_incremental_flush_and_resume(tmp_path, monkeypatch):
+    """§2.4.1：扫描 PDF 每 N 页（_PDF_PAGE_INCREMENTAL_FLUSH=5）增量写入 .ocr.json 断点缓存，中断后断点续扫不白算。"""
+    import json
+    import pymupdf
+    import core.parser as parser_mod
+
+    pdf_path = tmp_path / 'scanned_bid.pdf'
+    doc = pymupdf.open()
+    for _ in range(7):
+        doc.new_page(width=595, height=842)
+    doc.save(str(pdf_path))
+    doc.close()
+
+    json_cache = Path(str(pdf_path) + '.ocr.json')
+    txt_cache = Path(str(pdf_path) + '.ocr.txt')
+
+    # 第一轮：在第 5 页结束时已触发增量落盘（partial=True 且 pages=5），第 6 页模拟中断崩溃
+    phase1_calls: list[int] = []
+
+    def _crash_on_6th(_img_bgr):
+        phase1_calls.append(1)
+        idx = len(phase1_calls)
+        if idx == 6:
+            raise RuntimeError('simulated ocr crash on page 6')
+        txt = f'扫描投标书第{idx}页响应内容，企业资质与投标总价500000元均完全符合招标文件要求。'
+        return [([[0, 0], [100, 0], [100, 20], [0, 20]], txt, 0.98)], None
+
+    monkeypatch.setattr(parser_mod, '_get_ocr_engine', lambda: _crash_on_6th)
+
+    flushed_snapshot_at_5: dict | None = None
+
+    def _cb_phase1(done: int, total: int, cached: int) -> None:
+        nonlocal flushed_snapshot_at_5
+        if done == 5 and json_cache.is_file():
+            flushed_snapshot_at_5 = json.loads(json_cache.read_text(encoding='utf-8'))
+
+    with pytest.raises(RuntimeError, match='simulated ocr crash on page 6'):
+        parse_document(str(pdf_path), progress_cb=_cb_phase1)
+
+    assert len(phase1_calls) == 6
+    assert flushed_snapshot_at_5 is not None
+    assert flushed_snapshot_at_5.get('partial') is True
+    assert len(flushed_snapshot_at_5.get('pages') or []) == 5
+    assert not txt_cache.exists()
+    assert json_cache.is_file()
+
+    # 第二轮：恢复正常 OCR 引擎断点续扫，必须跳过已落盘的前 5 页，只识别第 6、7 两页
+    phase2_calls: list[int] = []
+    phase2_events: list[tuple[int, int, int]] = []
+
+    def _resume_engine(_img_bgr):
+        phase2_calls.append(1)
+        idx = 5 + len(phase2_calls)
+        txt = f'扫描投标书第{idx}页响应内容，企业资质与投标总价500000元均完全符合招标文件要求。'
+        return [([[0, 0], [100, 0], [100, 20], [0, 20]], txt, 0.99)], None
+
+    monkeypatch.setattr(parser_mod, '_get_ocr_engine', lambda: _resume_engine)
+    res = parse_document(
+        str(pdf_path),
+        progress_cb=lambda done, total, cached: phase2_events.append((done, total, cached)),
+    )
+
+    assert len(phase2_calls) == 2
+    assert phase2_events == [(0, 2, 5), (1, 2, 5), (2, 2, 5)]
+    assert res.pages == 7
+    assert '扫描投标书第1页' in res.text
+    assert '扫描投标书第7页' in res.text
+    assert txt_cache.is_file()
+
+    # 全部完成后 .ocr.json 转为完整 list[dict]，get_pdf_ocr_data 直接秒读不重复跑 OCR
+    final_data = parser_mod.get_pdf_ocr_data(pdf_path)
+    assert isinstance(final_data, list) and len(final_data) == 7
+    assert len(phase2_calls) == 2
+
+    # 源文件被不同字节大小的 PDF 原位覆盖时，旧断点缓存必须自动失效重建
+    new_doc = pymupdf.open()
+    for _ in range(3):
+        p = new_doc.new_page(width=400, height=600)
+        p.draw_rect(pymupdf.Rect(10, 10, 100, 100), color=(0, 0, 0))
+    new_doc.save(str(pdf_path))
+    new_doc.close()
+    txt_cache.unlink(missing_ok=True)
+    # 人造 3 页部分旧缓存并验证 size 变更时清空重建
+    rebuilt_calls: list[int] = []
+
+    def _fresh_engine(_img_bgr):
+        rebuilt_calls.append(1)
+        idx = len(rebuilt_calls)
+        txt = f'新版扫描投标书第{idx}页完整内容，满足全部实质性资格要求与开标一览表要求，累计字数达标。'
+        return [([[0, 0], [100, 0], [100, 20], [0, 20]], txt, 0.99)], None
+
+    monkeypatch.setattr(parser_mod, '_get_ocr_engine', lambda: _fresh_engine)
+    res_new = parse_document(str(pdf_path))
+    assert len(rebuilt_calls) == 3
+    assert '新版扫描投标书第3页' in res_new.text
+
+
+def test_e27_cold_ocr_progress_callback_not_muted_by_zero_cached_hits(tmp_path, monkeypatch):
+    """§2.4.3：冷启动 cached_hits=0 时 worker 阶段 1.5 不得静音跳过 SSE 进度推送，扫描 PDF 正确显示按页播报。"""
+    import json
+    import pymupdf
+    import core.parser as parser_mod
+    from docx import Document
+    from backend.database import Base, get_engine, get_session_factory
+    from backend.models import BidCheckTask, Tenant
+    from backend.worker import BidTaskWorker
+
+    monkeypatch.setenv('BIDGUARD_FORCE_ZERO_TOKEN', '1')
+
+    tender_docx = tmp_path / 'tender.docx'
+    td = Document()
+    td.add_paragraph('第一章 招标公告\n最高限价：100万元。\n★1. 质保期不少于1年。')
+    td.save(str(tender_docx))
+
+    bid_pdf = tmp_path / 'bid_scan.pdf'
+    pd = pymupdf.open()
+    for _ in range(6):
+        pd.new_page(width=595, height=842)
+    pd.save(str(bid_pdf))
+    pd.close()
+
+    call_no = [0]
+
+    def _fake_pdf_ocr(_img_bgr):
+        call_no[0] += 1
+        txt = f'第{call_no[0]}页投标响应内容：★1. 质保期1年，投标总价为900000.00元，资格证明文件齐全有效。'
+        return [([[0, 0], [100, 0], [100, 20], [0, 20]], txt, 0.99)], None
+
+    monkeypatch.setattr(parser_mod, '_get_ocr_engine', lambda: _fake_pdf_ocr)
+
+    db_file = tmp_path / 'worker_pdf_progress.db'
+    eng = get_engine(f"sqlite:///{db_file.as_posix()}")
+    Base.metadata.create_all(bind=eng)
+    SessionMaker = get_session_factory(eng)
+
+    s = SessionMaker()
+    try:
+        tenant = Tenant(name='冷启动进度测试部', is_active=True)
+        s.add(tenant)
+        s.flush()
+        task = BidCheckTask(
+            tenant_id=tenant.id,
+            task_type='pre_check',
+            title='扫描PDF进度验证任务',
+            status='created',
+            progress=0,
+            tender_filename='tender.docx',
+            bid_filename='bid_scan.pdf',
+            tender_path=str(tender_docx),
+            bid_path=str(bid_pdf),
+        )
+        s.add(task)
+        s.commit()
+        tid = task.id
+    finally:
+        s.close()
+
+    emitted_details: list[tuple[str, int, str]] = []
+    worker = BidTaskWorker(session_factory=SessionMaker, max_workers=1)
+    orig_emit = worker._emit_stage
+
+    def _spy_emit(session, task_obj, status, progress, detail):
+        emitted_details.append((status, int(progress), str(detail)))
+        return orig_emit(session, task_obj, status, progress, detail)
+
+    monkeypatch.setattr(worker, '_emit_stage', _spy_emit)
+    try:
+        worker.submit_check_task(tid, sync=True)
+        assert any('每 5 页增量落盘缓存' in d and '/ 6 页' in d for _, _, d in emitted_details)
+        s2 = SessionMaker()
+        try:
+            done_row = s2.query(BidCheckTask).filter_by(id=tid).first()
+            assert done_row is not None
+            assert done_row.status == 'delivered'
+            raw_dur = done_row.duration_json
+            dur = json.loads(raw_dur) if isinstance(raw_dur, str) else raw_dur
+            assert isinstance(dur, dict)
+            assert 'f_parse_ms' in dur and dur['f_parse_ms'] >= 0
+        finally:
+            s2.close()
+    finally:
+        worker.shutdown(wait=False)
+        eng.dispose()
+
+
+
