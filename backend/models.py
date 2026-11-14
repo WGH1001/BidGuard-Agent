@@ -476,6 +476,7 @@ def apply_sqlite_pragmas(engine: Any) -> None:
         cursor.execute('PRAGMA foreign_keys=ON')
         try:
             cursor.execute('PRAGMA journal_mode=WAL')
+            cursor.execute('PRAGMA busy_timeout=5000')
             # E11：对已有本地 SQLite 老库连接时顺带探测表结构并平滑补齐耗时列
             cursor.execute("PRAGMA table_info(bid_check_tasks)")
             cols = {row[1] for row in cursor.fetchall()}

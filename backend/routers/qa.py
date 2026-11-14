@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shutil
+import threading
 from typing import Any, Optional
 import uuid
 
@@ -41,6 +42,9 @@ _QA_MAX_SESSION_FILES = 10                         # 单会话附件个数上限
 _QA_MAX_SESSION_TOTAL_BYTES = 100 * 1024 * 1024    # 单会话累计体积上限 100 MB
 _QA_MAX_IMAGES_PER_TURN = 4                        # 单轮追问图片上限 4 张
 _QA_UPLOADS_ROOT = (PROJECT_ROOT / 'data' / 'uploads' / 'qa').resolve()
+
+# E28 §2.1：SQLite/多线程并发流落库串行互斥锁（仅保护短事务读写提交，绝不包住耗时的 OCR/LLM 调用）
+_QA_DB_WRITE_LOCK = threading.Lock()
 
 
 def _utc_now() -> datetime:
@@ -273,20 +277,21 @@ def create_qa_session(
         if not body.title:
             title = f"{task.title} · 专家追问"
 
-    qa_sess = QaSession(
-        tenant_id=tenant_id,
-        user_id=current_user.get('id'),
-        task_id=body.task_id,
-        title=title,
-        tender_path=tender_path,
-        bid_path=bid_path,
-        messages_json=[],
-        attachments_json=[],
-    )
-    db.add(qa_sess)
-    db.commit()
-    db.refresh(qa_sess)
-    return _session_to_out(qa_sess, db)
+    with _QA_DB_WRITE_LOCK:
+        qa_sess = QaSession(
+            tenant_id=tenant_id,
+            user_id=current_user.get('id'),
+            task_id=body.task_id,
+            title=title,
+            tender_path=tender_path,
+            bid_path=bid_path,
+            messages_json=[],
+            attachments_json=[],
+        )
+        db.add(qa_sess)
+        db.commit()
+        db.refresh(qa_sess)
+        return _session_to_out(qa_sess, db)
 
 
 @router.get('/sessions', response_model=list[QaSessionOut])
@@ -415,19 +420,34 @@ def upload_qa_attachment(
         'uploaded_at': _utc_now().isoformat(),
     }
 
-    existing_atts.append(att_record)
-    qa_sess.attachments_json = list(existing_atts)
-    qa_sess.updated_at = _utc_now()
-    db.commit()
+    with _QA_DB_WRITE_LOCK:
+        db.rollback()
+        db.expire_all()
+        fresh_sess = _get_tenant_session_or_404(db, session_id, tenant_id)
+        latest_atts = [a for a in (getattr(fresh_sess, 'attachments_json', None) or []) if isinstance(a, dict)]
+        if len(latest_atts) >= _QA_MAX_SESSION_FILES or (
+            sum(int(a.get('size_bytes') or 0) for a in latest_atts) + size_bytes > _QA_MAX_SESSION_TOTAL_BYTES
+        ):
+            target_file.unlink(missing_ok=True)
+            for sfx in ('.ocr.txt', '.ocr.json', '.media.ocr.json'):
+                Path(str(target_file) + sfx).unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=422,
+                detail={'code': 'ATTACHMENT_LIMIT_EXCEEDED', 'message': '会话附件配额已满，请先清理部分附件'},
+            )
+        latest_atts.append(att_record)
+        fresh_sess.attachments_json = list(latest_atts)
+        fresh_sess.updated_at = _utc_now()
+        db.commit()
 
-    record_audit(
-        db,
-        action='qa_attachment_upload',
-        tenant_id=tenant_id,
-        user_id=current_user.get('id'),
-        target=f"qa_session:{session_id}",
-        detail_json={'attachment_id': att_id, 'filename': orig_name, 'size_bytes': size_bytes},
-    )
+        record_audit(
+            db,
+            action='qa_attachment_upload',
+            tenant_id=tenant_id,
+            user_id=current_user.get('id'),
+            target=f"qa_session:{session_id}",
+            detail_json={'attachment_id': att_id, 'filename': orig_name, 'size_bytes': size_bytes},
+        )
     return _att_dict_to_out(att_record)
 
 
@@ -441,27 +461,28 @@ def delete_qa_attachment(
 ) -> OkResponse:
     """E24 §2.3：删除会话中的单个附件，并同步清理磁盘原文件及伴生 OCR 缓存。"""
     tenant_id = int(current_user.tenant_id)
-    qa_sess = _get_tenant_session_or_404(db, session_id, tenant_id)
+    with _QA_DB_WRITE_LOCK:
+        db.rollback()
+        db.expire_all()
+        fresh_sess = _get_tenant_session_or_404(db, session_id, tenant_id)
+        latest_atts = [a for a in (getattr(fresh_sess, 'attachments_json', None) or []) if isinstance(a, dict)]
+        target_meta = next((a for a in latest_atts if a.get('attachment_id') == attachment_id), None)
+        if target_meta is None:
+            raise HTTPException(
+                status_code=404,
+                detail={'code': 'ATTACHMENT_NOT_FOUND', 'message': '未找到指定的会话附件'},
+            )
+        rel_p = target_meta.get('rel_path')
+        fresh_sess.attachments_json = [a for a in latest_atts if a.get('attachment_id') != attachment_id]
+        fresh_sess.updated_at = _utc_now()
+        db.commit()
 
-    existing_atts = [a for a in (getattr(qa_sess, 'attachments_json', None) or []) if isinstance(a, dict)]
-    target_meta = next((a for a in existing_atts if a.get('attachment_id') == attachment_id), None)
-    if target_meta is None:
-        raise HTTPException(
-            status_code=404,
-            detail={'code': 'ATTACHMENT_NOT_FOUND', 'message': '未找到指定的会话附件'},
-        )
-
-    rel_p = target_meta.get('rel_path')
     if rel_p:
         abs_p = resolve_project_path(rel_p)
         if abs_p.is_relative_to(_QA_UPLOADS_ROOT):
             abs_p.unlink(missing_ok=True)
             for sfx in ('.ocr.txt', '.ocr.json', '.media.ocr.json'):
                 Path(str(abs_p) + sfx).unlink(missing_ok=True)
-
-    qa_sess.attachments_json = [a for a in existing_atts if a.get('attachment_id') != attachment_id]
-    qa_sess.updated_at = _utc_now()
-    db.commit()
     return OkResponse(ok=True, message='附件已删除')
 
 
@@ -474,15 +495,101 @@ def delete_qa_session(
 ) -> OkResponse:
     """删除问答会话，并级联清理 data/uploads/qa/{tenant_id}/{session_id}/ 下的全部物理附件与 OCR 缓存。"""
     tenant_id = int(current_user.tenant_id)
-    row = _get_tenant_session_or_404(db, session_id, tenant_id)
-    db.delete(row)
-    db.commit()
+    with _QA_DB_WRITE_LOCK:
+        db.rollback()
+        db.expire_all()
+        row = _get_tenant_session_or_404(db, session_id, tenant_id)
+        db.delete(row)
+        db.commit()
 
     sess_dir = (_QA_UPLOADS_ROOT / str(tenant_id) / str(session_id)).resolve()
     if sess_dir.is_dir() and sess_dir.is_relative_to(_QA_UPLOADS_ROOT):
         shutil.rmtree(sess_dir, ignore_errors=True)
 
     return OkResponse(ok=True, message='会话已删除')
+
+
+def _build_qa_quotes_out(raw_quotes: Optional[list[dict[str, Any]]]) -> list[QaQuoteOut]:
+    return [
+        QaQuoteOut(
+            source=str(q.get('source') or 'tender'),
+            quote=str(q.get('quote') or ''),
+            offset=q.get('offset'),
+            page=q.get('page'),
+            quote_verified=bool(q.get('quote_verified', True)),
+            note=q.get('note'),
+            attachment_id=q.get('attachment_id'),
+            attachment_name=q.get('attachment_name'),
+        )
+        for q in (raw_quotes or [])
+    ]
+
+
+def _persist_qa_turn_locked(
+    db_or_factory: Any,
+    *,
+    is_factory: bool,
+    session_id: int,
+    tenant_id: int,
+    user_id: Optional[int],
+    question: str,
+    bubble_atts: list[dict[str, Any]],
+    answer: str,
+    mode: str,
+    quotes_payload: list[dict[str, Any]],
+    steps_payload: list[dict[str, Any]],
+    attachments_count: int,
+    is_stream: bool,
+) -> None:
+    """E28 §2.1：串行持有写锁并重载最新消息历史追加整轮 Q&A，防 SQLite 并发落库 lock 与脏覆盖。"""
+    with _QA_DB_WRITE_LOCK:
+        write_sess: Session = db_or_factory() if is_factory else db_or_factory
+        try:
+            if not is_factory:
+                write_sess.rollback()
+                write_sess.expire_all()
+            row = write_sess.query(QaSession).filter_by(id=session_id, tenant_id=tenant_id).first()
+            if row is not None:
+                new_hist = list(row.messages_json or [])
+                new_hist.append({
+                    'role': 'user',
+                    'content': question,
+                    'attachment_ids': [a['attachment_id'] for a in bubble_atts],
+                    'attachments': bubble_atts,
+                    'quotes': [],
+                    'steps': [],
+                })
+                new_hist.append({
+                    'role': 'assistant',
+                    'content': answer,
+                    'mode': mode,
+                    'quotes': quotes_payload,
+                    'steps': steps_payload,
+                })
+                row.messages_json = new_hist
+                if row.title in ('新对话', '标书专家追问会话'):
+                    row.title = question[:30]
+                row.updated_at = _utc_now()
+                write_sess.commit()
+
+            detail_json: dict[str, Any] = {
+                'mode': mode,
+                'quotes_count': len(quotes_payload),
+                'attachments_count': attachments_count,
+            }
+            if is_stream:
+                detail_json['stream'] = True
+            record_audit(
+                write_sess,
+                action='qa_ask',
+                tenant_id=tenant_id,
+                user_id=user_id,
+                target=f"qa_session:{session_id}",
+                detail_json=detail_json,
+            )
+        finally:
+            if is_factory:
+                write_sess.close()
 
 
 @router.post('/{session_id}/ask', response_model=QaAskResponseOut)
@@ -552,60 +659,33 @@ def ask_in_session(
             attachments=runtime_atts,
         )
 
-    quotes_out = [
-        QaQuoteOut(
-            source=str(q.get('source') or 'tender'),
-            quote=str(q.get('quote') or ''),
-            offset=q.get('offset'),
-            page=q.get('page'),
-            quote_verified=bool(q.get('quote_verified', True)),
-            note=q.get('note'),
-            attachment_id=q.get('attachment_id'),
-            attachment_name=q.get('attachment_name'),
-        )
-        for q in (res.get('quotes') or [])
-    ]
+    quotes_out = _build_qa_quotes_out(res.get('quotes'))
+    clean_question = body.question.strip()
+    answer_text = str(res.get('answer') or '')
+    mode_str = str(res.get('mode') or 'keyword_fallback')
+    steps_list = list(res.get('steps') or [])
 
-    history = list(qa_sess.messages_json or [])
-    history.append({
-        'role': 'user',
-        'content': body.question.strip(),
-        'attachment_ids': [a['attachment_id'] for a in bubble_atts],
-        'attachments': bubble_atts,
-        'quotes': [],
-        'steps': [],
-    })
-    history.append({
-        'role': 'assistant',
-        'content': str(res.get('answer') or ''),
-        'mode': str(res.get('mode') or 'keyword_fallback'),
-        'quotes': [q.model_dump() for q in quotes_out],
-        'steps': list(res.get('steps') or []),
-    })
-    qa_sess.messages_json = history
-    if qa_sess.title in ('新对话', '标书专家追问会话'):
-        qa_sess.title = body.question.strip()[:30]
-    qa_sess.updated_at = _utc_now()
-    db.commit()
-
-    record_audit(
+    _persist_qa_turn_locked(
         db,
-        action='qa_ask',
+        is_factory=False,
+        session_id=qa_sess.id,
         tenant_id=tenant_id,
         user_id=current_user.get('id'),
-        target=f"qa_session:{qa_sess.id}",
-        detail_json={
-            'mode': res.get('mode'),
-            'quotes_count': len(quotes_out),
-            'attachments_count': len(runtime_atts),
-        },
+        question=clean_question,
+        bubble_atts=bubble_atts,
+        answer=answer_text,
+        mode=mode_str,
+        quotes_payload=[q.model_dump() for q in quotes_out],
+        steps_payload=steps_list,
+        attachments_count=len(runtime_atts),
+        is_stream=False,
     )
 
     return QaAskResponseOut(
         session_id=qa_sess.id,
-        mode=str(res.get('mode') or 'keyword_fallback'),
-        question=body.question.strip(),
-        answer=str(res.get('answer') or ''),
+        mode=mode_str,
+        question=clean_question,
+        answer=answer_text,
         quotes=quotes_out,
         steps=list(res.get('steps') or []),
         rounds_used=int(res.get('rounds_used') or 1),
@@ -653,6 +733,7 @@ def ask_in_session_stream(
     write_session_factory = (
         db_mod.get_session_factory(db_bind) if db_bind is not None else db_mod.SessionLocal
     )
+    db.rollback()
 
     def _sse_stream_gen():
         try:
@@ -671,19 +752,7 @@ def ask_in_session_stream(
                 ev_data = ev.get('data') or {}
 
                 if ev_type == 'done':
-                    quotes_out = [
-                        QaQuoteOut(
-                            source=str(q.get('source') or 'tender'),
-                            quote=str(q.get('quote') or ''),
-                            offset=q.get('offset'),
-                            page=q.get('page'),
-                            quote_verified=bool(q.get('quote_verified', True)),
-                            note=q.get('note'),
-                            attachment_id=q.get('attachment_id'),
-                            attachment_name=q.get('attachment_name'),
-                        )
-                        for q in (ev_data.get('quotes') or [])
-                    ]
+                    quotes_out = _build_qa_quotes_out(ev_data.get('quotes'))
                     done_payload = {
                         'session_id': session_id,
                         'mode': str(ev_data.get('mode') or 'keyword_fallback'),
@@ -695,46 +764,21 @@ def ask_in_session_stream(
                         'terminated_by_max_rounds': bool(ev_data.get('terminated_by_max_rounds', False)),
                     }
 
-                    write_sess = write_session_factory()
-                    try:
-                        row = write_sess.query(QaSession).filter_by(id=session_id, tenant_id=tenant_id).first()
-                        if row is not None:
-                            new_hist = list(row.messages_json or [])
-                            new_hist.append({
-                                'role': 'user',
-                                'content': clean_question,
-                                'attachment_ids': [a['attachment_id'] for a in bubble_atts],
-                                'attachments': bubble_atts,
-                                'quotes': [],
-                                'steps': [],
-                            })
-                            new_hist.append({
-                                'role': 'assistant',
-                                'content': done_payload['answer'],
-                                'mode': done_payload['mode'],
-                                'quotes': done_payload['quotes'],
-                                'steps': done_payload['steps'],
-                            })
-                            row.messages_json = new_hist
-                            if row.title in ('新对话', '标书专家追问会话'):
-                                row.title = clean_question[:30]
-                            row.updated_at = _utc_now()
-                            write_sess.commit()
-                        record_audit(
-                            write_sess,
-                            action='qa_ask',
-                            tenant_id=tenant_id,
-                            user_id=user_id,
-                            target=f"qa_session:{session_id}",
-                            detail_json={
-                                'mode': done_payload['mode'],
-                                'quotes_count': len(quotes_out),
-                                'attachments_count': len(runtime_atts),
-                                'stream': True,
-                            },
-                        )
-                    finally:
-                        write_sess.close()
+                    _persist_qa_turn_locked(
+                        write_session_factory,
+                        is_factory=True,
+                        session_id=session_id,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        question=clean_question,
+                        bubble_atts=bubble_atts,
+                        answer=done_payload['answer'],
+                        mode=done_payload['mode'],
+                        quotes_payload=done_payload['quotes'],
+                        steps_payload=done_payload['steps'],
+                        attachments_count=len(runtime_atts),
+                        is_stream=True,
+                    )
 
                     yield f"event: done\ndata: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
                 else:
@@ -763,34 +807,37 @@ def withdraw_last_turn_in_session(
 ) -> QaLastTurnWithdrawOut:
     """E27 §2.2.4：撤回会话最后一轮问答（移除末尾 assistant 与配对 user 消息，返回被撤回的问题文本以便前端回填或重发）。"""
     tenant_id = int(current_user.tenant_id)
-    qa_sess = _get_tenant_session_or_404(db, session_id, tenant_id)
-    history = list(qa_sess.messages_json or [])
+    with _QA_DB_WRITE_LOCK:
+        db.rollback()
+        db.expire_all()
+        qa_sess = _get_tenant_session_or_404(db, session_id, tenant_id)
+        history = list(qa_sess.messages_json or [])
 
-    withdrawn_q = ''
-    withdrawn_att_ids: list[str] = []
+        withdrawn_q = ''
+        withdrawn_att_ids: list[str] = []
 
-    if history and str(history[-1].get('role') or '') == 'assistant':
-        history.pop()
-    if history and str(history[-1].get('role') or '') == 'user':
-        last_user = history.pop()
-        withdrawn_q = str(last_user.get('content') or '')
-        withdrawn_att_ids = [str(a) for a in (last_user.get('attachment_ids') or []) if a]
+        if history and str(history[-1].get('role') or '') == 'assistant':
+            history.pop()
+        if history and str(history[-1].get('role') or '') == 'user':
+            last_user = history.pop()
+            withdrawn_q = str(last_user.get('content') or '')
+            withdrawn_att_ids = [str(a) for a in (last_user.get('attachment_ids') or []) if a]
 
-    qa_sess.messages_json = history
-    qa_sess.updated_at = _utc_now()
-    db.commit()
+        qa_sess.messages_json = history
+        qa_sess.updated_at = _utc_now()
+        db.commit()
 
-    record_audit(
-        db,
-        action='qa_withdraw_last_turn',
-        tenant_id=tenant_id,
-        user_id=current_user.get('id'),
-        target=f"qa_session:{qa_sess.id}",
-        detail_json={
-            'withdrawn_question': withdrawn_q[:80],
-            'remaining_messages': len(history),
-        },
-    )
+        record_audit(
+            db,
+            action='qa_withdraw_last_turn',
+            tenant_id=tenant_id,
+            user_id=current_user.get('id'),
+            target=f"qa_session:{qa_sess.id}",
+            detail_json={
+                'withdrawn_question': withdrawn_q[:80],
+                'remaining_messages': len(history),
+            },
+        )
 
     return QaLastTurnWithdrawOut(
         session_id=qa_sess.id,
