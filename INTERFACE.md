@@ -186,7 +186,8 @@ ask_bid_expert_stream(tender_path: str | Path, bid_path: str | Path, question: s
 #        {'mode': 'react'|'keyword_fallback', 'question', 'answer',
 #         'quotes': [{'source','quote','offset','page','footer_page','is_docx_page','quote_verified','attachment_id','attachment_name'}, ...],
 #         'steps': [{'round','thought','action','action_input','observation','batch_index'?: int,'batch_size'?: int}, ...],
-#         'rounds_used': int, 'terminated_by_max_rounds': bool, 'forced_final'?: bool}
+#         'rounds_used': int, 'terminated_by_max_rounds': bool, 'forced_final'?: bool,
+#         'grounded'?: bool, 'fast_path'?: bool, 'route'?: str | None}
 # E18 起：quotes/检索工具通过统一双轨页码上下文适配 PDF 与 docx；无法计算页码时诚实为 None 并展示字符偏移
 # E19/E21 起：UI reasoning_effort 支持 'low' | 'medium' | 'high'，网关侧映射智谱合法值
 #           （low->'low', medium->'high', high->'max'；三挡均开放至 7 轮=6 工具+1 final，仅调推理深度；非法值忽略走默认）
@@ -213,6 +214,9 @@ ask_bid_expert_stream(tender_path: str | Path, bid_path: str | Path, question: s
 #         （单工具 Exception 转 observation.error，BaseException 立即撤池上抛）；rounds_used 表示大模型思考回合数（steps 保持平铺并可选附带 batch_index/batch_size）；
 #         _EFFORT_UPSTREAM_MAP 与 max_rounds=None 解耦拉开思考回合天花板为 low=7 / medium=8 / high=12（显式传整数 max_rounds 时仍取 min 兼容 E21）；
 #         每轮回灌注入剩余回合预算与偏移桶同源空转去重遥测（含 locate_chapter start 偏移）；hybrid_retriever 按 doc_sha 加锁并原子 os.replace() 写入 .emb.npy 缓存
+# E34 起：_REACT_SYSTEM_PROMPT 开放第 1 轮快速通道（仅限系统能力/通用概念/历史重排，可选 route='direct_meta'），
+#         并置入 Python 确定性防偷懒护栏（MAX_UNGROUNDED_BOUNCE_PER_TURN = 1、_should_bounce_first_round_ungrounded，覆盖 JSON final 与非 JSON 首轮纯文本，要求 bool(formatted_history) 方放行历史整理且 r_idx < limit、无图附件）；
+#         done 帧新增 grounded / fast_path / route（未执行工具且无有效溯源/图附件时 grounded=False, fast_path=True）
 ```
 
 ### 1.8 批注回写与解析底座
@@ -305,6 +309,7 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 - E31 体检任务重命名与 QA 错误归类：`PATCH /api/checks/{task_id}`（`BidTaskRenameRequest`，多租户 `404` / 空标题 `422 EMPTY_TASK_TITLE` / 联动同步 `"{old_title} · 专家追问"` 默认会话标题 / `rename_check_task` 审计）；`/api/qa` 透出 `error_type: 'gateway' | 'tool_or_internal'` 区分网关异常（`502 QA_GATEWAY_ERROR`）与工具内部异常（`500 QA_EXECUTION_ERROR`）；
 - E32 登录安全开关与轻量管理员账户接口：`GET /api/health` 与 `GET /api/auth/health`（`HealthOut`）新增 `show_demo_login: bool = False`（`resolve_show_demo_login()` 需 `SHOW_DEMO_LOGIN` 与 `SEED_DEMO_DATA` 均未关闭）；`UserProfileOut` 新增 `tenant_name: Optional[str] = None`（`AuthUser`/`/login`/`/me` 动态带出部门名）；新增 6 个 `require_admin` 端点 `GET/POST /api/auth/tenants`、`GET/POST /api/auth/users`、`PATCH /api/auth/users/{user_id}`、`POST /api/auth/users/{user_id}/reset-password`（严格 `role ∈ {'admin','member'}` 精确白名单校验 `422 INVALID_ROLE`、防自锁双护栏 `409 LAST_ADMIN_PROTECTED` 先于 `409 CANNOT_MODIFY_SELF`，及全量 `AuditLog` 无密码留痕）；
 - E33 QA 检索深度上限放宽：`QaAskRequest.max_rounds` 由 `default=7, ge=1, le=8` 放宽为 `Optional[int] = Field(default=None, ge=1, le=12)`（默认 `None` 时按 `reasoning_effort` 自动匹配 `7 / 8 / 12` 思考回合上限，无挡位默认 `7`）；
+- E34 快速通道响应透传：`QaAskResponseOut` 新增 `grounded: bool = True`、`fast_path: bool = False`、`route: Optional[str] = None`；`/api/qa/sessions/{id}/ask`、`/ask/stream` `done` 帧及 `_persist_qa_turn_locked` 写入 `messages_json` 同步透传（不改数据库表结构）；
 - 其余鉴权、多租户隔离、SSE 进度流、文件存储布局与统一错误格式约定保持不变。
 
 ---
@@ -337,3 +342,4 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 | 2026-11-16 | E31 F7 算术沙盒容错、ReAct 工具异常自愈与体检任务重命名卡：`core/price_sandbox.py` 内置零依赖安全解析 `_parse_sandbox_amount`/`_parse_sandbox_qty`（支持逗号/货币前缀/万元换算/量词及科学计数法 `'3E+5'`）与结构化 `INVALID_PRICE_FORMAT` 降级（严禁反向导入 `price_extractor`），`amount_to_upper()` 同步安全解析；`core/bid_react_agent.py` `recalc_price` 兼容字段别名、`qty=1` 单双价互补标注 `derived`/`derived_fields`/`derived_warning`、`_safe_int_offset` 与 `ask_bid_expert_stream` 单工具 `try/except Exception` 转 `observation.error` 自愈（放行 `BaseException`）；`backend/routers/qa.py` 新增 `_classify_qa_exception` 区分 `gateway`(502 `QA_GATEWAY_ERROR`) 与 `tool_or_internal`(500 `QA_EXECUTION_ERROR`) 并在 SSE `error` 帧透传 `error_type`；`backend/schemas.py` + `backend/routers/checks.py` 新增 `PATCH /api/checks/{task_id}` 体检任务重命名（同步联动默认标题 `QaSession` 与 `rename_check_task` 审计）；前端 `types.ts`/`index.ts`/`QaChatView.vue`/`CheckTaskList.vue`/`CheckDetailView.vue` 完成结构化错误分流与双入口行内改名 | 实现 + 验收 |
 | 2026-11-16 | E32 F7 轮数耗尽强制收口、登录页安全脱敏与轻量管理员用户管理卡：`core/bid_react_agent.py` 新增 `_FORCED_WRAPUP_PROMPT`、max-rounds 后追加 1 次强制收口 LLM 调用（防历史合同张冠李戴 + 强制过 `verify_quote` + `forced_final` 标记与异常/非工具文本优雅降级并透传 `BaseException`）；`backend/auth.py`/`main.py`/`schemas.py`/`routers/auth.py` 新增 `resolve_show_demo_login()`、`HealthOut.show_demo_login`、`UserProfileOut.tenant_name` 与 6 个 `require_admin` 部门/用户管理端点（`422 INVALID_ROLE` 白名单、`409 LAST_ADMIN_PROTECTED` 先于 `CANNOT_MODIFY_SELF` 双护栏及脱敏审计）；前端 `LoginView.vue` fail-closed 隐藏演示账号、新建 `UsersManageView.vue`（`/users` `requiresAdmin`）、`stores/auth.ts` 动态部门名与 `App.vue` 管理员入口 | 实现 + 验收 |
 | 2026-11-16 | E33 F7 自主检索与并行工具调度卡：`core/bid_react_agent.py` 新增 `_extract_round_actions` 支持同轮批量 `actions`（上限 `MAX_PARALLEL_ACTIONS_PER_ROUND=4`）、`_dispatch_single_tool` + `ThreadPoolExecutor` 并发保序执行（透传 `BaseException`）、`_EFFORT_UPSTREAM_MAP` 与 `max_rounds: Optional[int] = None` 解耦为 `low=7/medium=8/high=12`（兼容显式传入 E21 契约）、及 `_update_stagnation_state`/`_build_round_feedback_message` 注入剩余回合预算与偏移桶同源空转提示；`core/hybrid_retriever.py` 按 `doc_sha` 加分段锁并原子 `os.replace()` 写入 `.emb.npy`；`backend/schemas.py` `QaAskRequest.max_rounds` 放宽至 `Optional[int] = Field(default=None, ge=1, le=12)`；前端 `types.ts`/`QaChatView.vue`/`ReActSteps.vue`/`QaMessageList.vue` 移除 `max_rounds:7` 硬编码、区分思考回合与步数展示并补全 `search_attachment` 标签 | 实现 + 验收 |
+| 2026-11-16 | E34 F7 快速通道判定卡：`core/bid_react_agent.py` 扩展 `_REACT_SYSTEM_PROMPT` 放行三类直答并新增 `MAX_UNGROUNDED_BOUNCE_PER_TURN = 1`、`_PROJECT_VERIFY_SIGNAL_RE`、`_REORG_META_RE`、`_should_bounce_first_round_ungrounded`（覆盖首轮 `final` 与纯文本裸答、要求 `bool(formatted_history)` 防空会话整理绕过、`r_idx < limit`、带图不回弹），done 帧透出 `grounded`/`fast_path`/`route`；`backend/schemas.py` `QaAskResponseOut` 与 `backend/routers/qa.py`（`/ask`、`/ask/stream` 与 `_persist_qa_turn_locked` `messages_json`）全链路透传；前端 `types.ts`/`QaChatView.vue`/`QaMessageList.vue` 在 `grounded === false` 时渲染「未检索标书原文 · 仅供参考」提示徽标 | 实现 + 验收 |

@@ -387,6 +387,9 @@ class QaAskResponseOut(BaseModel):
     steps: list[dict[str, Any]] = Field(default_factory=list)
     rounds_used: int = 1
     terminated_by_max_rounds: bool = False
+    grounded: bool = True
+    fast_path: bool = False
+    route: Optional[str] = None
 
 
 class QaSessionOut(BaseModel):

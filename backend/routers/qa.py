@@ -622,6 +622,9 @@ def _persist_qa_turn_locked(
     steps_payload: list[dict[str, Any]],
     attachments_count: int,
     is_stream: bool,
+    grounded: bool = True,
+    fast_path: bool = False,
+    route: Optional[str] = None,
 ) -> None:
     """E28 §2.1：串行持有写锁并重载最新消息历史追加整轮 Q&A，防 SQLite 并发落库 lock 与脏覆盖。"""
     with _QA_DB_WRITE_LOCK:
@@ -641,13 +644,18 @@ def _persist_qa_turn_locked(
                     'quotes': [],
                     'steps': [],
                 })
-                new_hist.append({
+                assistant_entry: dict[str, Any] = {
                     'role': 'assistant',
                     'content': answer,
                     'mode': mode,
                     'quotes': quotes_payload,
                     'steps': steps_payload,
-                })
+                    'grounded': grounded,
+                    'fast_path': fast_path,
+                }
+                if route is not None:
+                    assistant_entry['route'] = route
+                new_hist.append(assistant_entry)
                 row.messages_json = new_hist
                 clean_q = (question or '').strip()
                 if _is_default_session_title(row.title) and clean_q:
@@ -761,6 +769,9 @@ def ask_in_session(
     answer_text = str(res.get('answer') or '')
     mode_str = str(res.get('mode') or 'keyword_fallback')
     steps_list = list(res.get('steps') or [])
+    is_grounded = bool(res.get('grounded', True))
+    is_fast_path = bool(res.get('fast_path', False))
+    route_val = res.get('route')
 
     _persist_qa_turn_locked(
         db,
@@ -776,6 +787,9 @@ def ask_in_session(
         steps_payload=steps_list,
         attachments_count=len(runtime_atts),
         is_stream=False,
+        grounded=is_grounded,
+        fast_path=is_fast_path,
+        route=route_val,
     )
 
     return QaAskResponseOut(
@@ -787,6 +801,9 @@ def ask_in_session(
         steps=list(res.get('steps') or []),
         rounds_used=int(res.get('rounds_used') or 1),
         terminated_by_max_rounds=bool(res.get('terminated_by_max_rounds', False)),
+        grounded=is_grounded,
+        fast_path=is_fast_path,
+        route=route_val,
     )
 
 
@@ -850,6 +867,9 @@ def ask_in_session_stream(
 
                 if ev_type == 'done':
                     quotes_out = _build_qa_quotes_out(ev_data.get('quotes'))
+                    is_grounded = bool(ev_data.get('grounded', True))
+                    is_fast_path = bool(ev_data.get('fast_path', False))
+                    route_val = ev_data.get('route')
                     done_payload = {
                         'session_id': session_id,
                         'mode': str(ev_data.get('mode') or 'keyword_fallback'),
@@ -859,6 +879,9 @@ def ask_in_session_stream(
                         'steps': list(ev_data.get('steps') or []),
                         'rounds_used': int(ev_data.get('rounds_used') or 1),
                         'terminated_by_max_rounds': bool(ev_data.get('terminated_by_max_rounds', False)),
+                        'grounded': is_grounded,
+                        'fast_path': is_fast_path,
+                        'route': route_val,
                     }
 
                     _persist_qa_turn_locked(
@@ -875,6 +898,9 @@ def ask_in_session_stream(
                         steps_payload=done_payload['steps'],
                         attachments_count=len(runtime_atts),
                         is_stream=True,
+                        grounded=is_grounded,
+                        fast_path=is_fast_path,
+                        route=route_val,
                     )
 
                     yield f"event: done\ndata: {json.dumps(done_payload, ensure_ascii=False)}\n\n"

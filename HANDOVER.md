@@ -54,23 +54,23 @@ BidGuard-Agent/
 ├── core/                                # 19 个模块（F1~F7 + 混合检索 + 法规库，逐项状态见 §3）
 ├── backend/                             # main + models(11表) + schemas + 11 组路由
 ├── frontend/                            # Vue3 + TS：13 个视图全部落地
-├── tests/                               # 38 个测试文件（test_*.py）280 项全绿
+├── tests/                               # 39 个测试文件（test_*.py）286 项全绿
 ├── scripts/                             # build_f1_baseline.py / eval_f1_llm.py / probe_reasoning_efforts.py
 ├── data/
 │   ├── corpus/m0_samples/               # 11 份语料 + baseline / ground_truth / llm_eval 三本账（§4）
 │   ├── corpus/regulations/              # E4：4 部法律 JSON 种子 + originals/ 原文（含 87 号令扫描 PDF）
 │   └── rules/law_source/                # 4 部法规官方文本
 ├── deploy/nginx/nginx.conf              # 静态直发 + /api/ 反代 SSE 防缓冲三件套
-└── docs/                                # DEPLOY.md / cards/（任务卡归档含 B1~E33，共 40 份）/ 待立卡-E1E2升级点定案.md
+└── docs/                                # DEPLOY.md / cards/（任务卡归档含 B1~E34，共 41 份）/ 待立卡-E1E2升级点定案.md
 ```
 
 ---
 
 ## 2. 当前基线（截至 2026-11-16）
 
-- **开发阶段**：3 周排期全部完成 + 三十三轮增强升级（E1~E33）全量实现（E28 `67b95ac`、E29 `063e497`、E30 `0756c2a`、E31 `10a63eb`、E32 `804c45b` 均已入库；**E33 · F7 自主检索与并行工具调度卡已完成验证留在工作区待确认 commit**）
-- **Git 最新功能 Commit**：`804c45b`（E32 · F7 轮数收口、登录页安全脱敏与轻量管理员用户管理卡）；工作区保留 E33 待确认 commit；前序主线：`10a63eb`（E31）/ `0756c2a`（E30）/ `063e497`（E29）
-- **测试基线**：**280 项 pytest 全绿（零回归）**（在 `804c45b` 272 项基线基础上于 `tests/test_e33_react_autonomous_dispatch.py` 新增 8 项测试）+ `npm --prefix frontend run build`（`vue-tsc --noEmit && vite build` 零错误构建成功）—— 第一验收线已演进至 **280 项**
+- **开发阶段**：3 周排期全部完成 + 三十四轮增强升级（E1~E34）全量实现（E28 `67b95ac`、E29 `063e497`、E30 `0756c2a`、E31 `10a63eb`、E32 `804c45b`、E33 `72cac30` 均已入库；**E34 · F7 快速通道判定卡已完成验证留在工作区待确认 commit**）
+- **Git 最新功能 Commit**：`72cac30`（E33 · F7 并行工具调度与自主检索深度）；工作区保留 E34 待确认 commit；前序主线：`804c45b`（E32）/ `10a63eb`（E31）/ `0756c2a`（E30）
+- **测试基线**：**286 项 pytest 全绿（零回归）**（在 `72cac30` 280 项基线基础上于 `tests/test_e34_react_fast_path.py` 新增 6 项测试）+ `npm --prefix frontend run build`（`vue-tsc --noEmit && vite build` 零错误构建成功）—— 第一验收线已演进至 **286 项**
 - **模型网关基线**：`config/models.yaml` 当前工作区设为 `default_env: prod`（内网私有网关 `http://10.0.2.81:3000/v1`，`GLM-5.3-Flash`，`timeout: 60`）；并行提供 `demo` 环境（智谱开放平台 `glm-5.3-flash`、`embedding: embedding-3` 激活 L2 混合检索、`timeout: 60`），`LLMClient` 统一控重试与 TUN/私有 IP 报错排查提示
 - **运行环境**：本机开发用项目自带 `.venv`（依赖已全量钉死）；生产走 Docker 四容器（`docker compose up -d --build`，默认宿主机 `APP_PORT=8000` + `POSTGRES_PORT=15432`，与老项目 `8080` + `5432` 并行共存不冲突）
 - **快速验收命令**：
@@ -100,7 +100,7 @@ BidGuard-Agent/
 | 12 | `core/response_checker.py` | **F4 双书勾稽** | ★/▲ 逐条响应核验 + 大模型判定 + 自洽扫描；E6 接入 docx 双轨页码；E5 类名符号动态化；E19 升级“阶段 A 按序预定位 + 阶段 B 仅 `client.chat` 并发”双阶段引擎；**E27 升级** `submission_rule` 降级 `info`+`none`、同句复合质保合并与未填下划线提示、L651 `client.chat` 断连单条降级及支持复用 `tender_parsed_doc`/`bid_parsed_doc`；**E29 升级** 定位与自相矛盾跳过目录页与 `media_ocr_spans`/历史合同区、全命中对偏离表正面响应评分择优并顺延截取完整响应；**E30 新增** `progress_cb` 与取消快速撤池 `pool.shutdown(wait=False, cancel_futures=True)` | **已验收**（E19 `BIDGUARD_F4_CONCURRENCY` 默认 4；04/02 真标书定位实测通过） |
 | 13 | `core/deviation_exporter.py` | **F5 偏离表** | 《技术与商务偏离表.docx》一键生成；E6 位置列升级为"第X页(印刷页Y·估算)"带 @charN 诚实回退；**E27** 传入 `include_submission_rules=False` 过滤纯递交/形式纪律，仅输出实质性技术/商务要求；§2.6 新增 keyword-only `f4_result=None`（`_resolve_f4_star_results` 兼容 `submission_rule` 长度差）支持流水线 0-LLM 预生成 | **已验收** |
 | 14 | `core/rigging_radar.py` | **F6 控标雷达** | 排他性/倾向性控标参数识别（确定性正则 + 大模型④，标注"疑似"）；E18 接入统一双轨页码；**E30 新增** `progress_cb` 接入服务端取消检查 | **已验收**（E3R 修复 import；E18 打通 docx 页码；E30 接取消） |
-| 15 | `core/bid_react_agent.py` | **F7 专家追问** | 多轮 ReAct 追问；E4 挂载 `cite_regulation` 第 6 工具；E18 兼容双轨页码与 `list \| dict` 传参；E19 支持三挡 `reasoning_effort`；E21 注入多轮 `history`（最近 6 轮截断+0-Token 逆序回溯）、智谱合法挡位映射与 `ask_bid_expert_stream` 流式事件引擎；E23 新增 `_coerce_action_input` 自动解包字符串化 JSON 与 `recalc_price` 缺失 `total_price` 明确拦截；**E24 扩至 7 工具**（新增 `search_attachment`）、仅当轮按选附 `image_url`、附件逐字 `verify_quote` 强制溯源与纯图视觉降级、`_parse_llm_json(strict=False)` 容错、禁吐残缺工具 JSON 与 `after_offset` 续检；**E31 补强** `recalc_price` 别名+`qty=1` `derived` 推算标注、`_safe_int_offset` 与 `ask_bid_expert_stream` 单工具异常转 `observation.error` 自愈（透传 `BaseException`）；**E32 升级** max-rounds 耗尽后追加 1 次强制收口 LLM 调用（`_FORCED_WRAPUP_PROMPT` 禁再调工具并警示过往历史合同张冠李戴 + `verify_quote` 核验 + `forced_final` 标定及纯文本/异常降级并透传 `BaseException`）；**E33 升级** 单回合最多 4 路工具 `actions` 并发保序调度、挡位上限解耦（`low=7/medium=8/high=12`）与每轮剩余回合预算/偏移桶去重空转提示 | **已验收**（E21 / E23 / E24 / E31 / E32 / E33 实测全绿） |
+| 15 | `core/bid_react_agent.py` | **F7 专家追问** | 多轮 ReAct 追问；E4 挂载 `cite_regulation` 第 6 工具；E18 兼容双轨页码与 `list \| dict` 传参；E19 支持三挡 `reasoning_effort`；E21 注入多轮 `history`（最近 6 轮截断+0-Token 逆序回溯）、智谱合法挡位映射与 `ask_bid_expert_stream` 流式事件引擎；E23 新增 `_coerce_action_input` 自动解包字符串化 JSON 与 `recalc_price` 缺失 `total_price` 明确拦截；**E24 扩至 7 工具**（新增 `search_attachment`）、仅当轮按选附 `image_url`、附件逐字 `verify_quote` 强制溯源与纯图视觉降级、`_parse_llm_json(strict=False)` 容错、禁吐残缺工具 JSON 与 `after_offset` 续检；**E31 补强** `recalc_price` 别名+`qty=1` `derived` 推算标注、`_safe_int_offset` 与 `ask_bid_expert_stream` 单工具异常转 `observation.error` 自愈（透传 `BaseException`）；**E32 升级** max-rounds 耗尽后追加 1 次强制收口 LLM 调用（`_FORCED_WRAPUP_PROMPT` 禁再调工具并警示过往历史合同张冠李戴 + `verify_quote` 核验 + `forced_final` 标定及纯文本/异常降级并透传 `BaseException`）；**E33 升级** 单回合最多 4 路工具 `actions` 并发保序调度、挡位上限解耦（`low=7/medium=8/high=12`）与每轮剩余回合预算/偏移桶去重空转提示；**E34 升级** 首轮快速通道（`route='direct_meta'`）+ Python 确定性防偷懒回弹护栏（`MAX_UNGROUNDED_BOUNCE_PER_TURN=1`，防空会话整理绕过与纯文本裸答）及 `grounded/fast_path` 标定 | **已验收**（E21 / E23 / E24 / E31 / E32 / E33 / E34 实测全绿） |
 | 16 | `core/redline.py` | 批注回写 | Word OOXML 批注气泡 + PDF 坐标高亮；**E5 升级**：五级降级定位链（L3 标点归一/L4 逐字符 bbox 归一/L5 置信护栏≥60%且≥8字）、总览页（A4 插入 PDF 首部，全部发现编号 N01.. + LINK_GOTO 点击跳转） | **已验收**（E5 卡，111→115 项含 6 新测试） |
 | 17 | `core/hybrid_retriever.py` | **E2 混合检索** | BM25 三级门控（词面精确/同义词扩展 45 组/语义兜底）+ MISSING_EVIDENCE 探针；E12 正式激活 L2 向量嵌入重排（带 `.emb.npy` 维度校验失效重算）；**E33 加固** 按 `doc_sha` 分段互斥锁 + 临时文件 `os.replace()` 原子写缓存防并发竞争 | **已验收**（E2 + E12 + E33 并发压测全绿） |
 | 18 | `core/regulation_library.py` | **E4 法规库** | 8 部法律条文库：三态核验（exact_match/fuzzy_hint/unverifiable，**LLM 对真伪零裁决权**）、中文/阿拉伯条号归一、张冠李戴降级 fuzzy_hint、四格式导入（json/txt/docx/pdf，content_hash 幂等） | **已验收**（E4 卡，含 crawl 集成测试外网隔离） |
@@ -144,7 +144,7 @@ BidGuard-Agent/
 5. **~~仿真投标语料制作中~~ 已收官（11/11 全验收放行）**：见 `data/corpus/sim_bids/_README.md`——含连云港（62▲/56.8万字）、滁州物业（E13 修复后放行）、芜湖无为（E14 修复后 0 error/0 warning 收官）在内的 11 份仿真投标书全部验收通过，全套语料零返工。
 6. **~~F7 问答工作台布局与并发增强（E28）~~ 已交付（主体 `1ba30e0` 已入库；重命名与 F1 概览条网格补强待确认 commit）**：在 `dff8855` 入库后按 `AGENTS.md` §三.4 串行完成 `QaChatView.vue` 多会话 `cachedRuntimes` Map 并发流式生成、同会话单流令牌约束、Antigravity 风格 `Pinned Conversations`（`localStorage` 按用户名隔离）与 `Projects` 树形侧栏、`.stream-grid-spinner` 活跃指示、`backend/routers/qa.py` `_QA_DB_WRITE_LOCK` 串行落库及 `backend/models.py` `PRAGMA busy_timeout=5000`，并追加 `PATCH /api/qa/sessions/{id}` 重命名、首问自动命名与 `ExtractView.vue` F1 概览条 3×2 Grid 对齐。
 7. **F2-2 / F2 阶段七/八已交付**：E7（`891b3ab`）、E8（`d56a9af`）、E9（`2137047`）、E13（`38bb1d1`）、E14（`e8d1465`）均已验收入库，11 份仿真语料相关算术盲区已清零。
-8. **待立 E34 · F7 快速通道判定卡**：支持元问题与历史重排直出 `final (route="direct_meta")`，配 Python 确定性领域关键词单次回弹硬护栏（`MAX_UNGROUNDED_BOUNCE_PER_TURN = 1` 防通用概念题无限弹回）及 `fast_path=True / grounded=False` 不可剥离警示。
+8. **~~E34 · F7 快速通道判定卡~~ 已实现验证（工作区待确认 commit）**：元问题与基于 `prior_history` 的整理类请求首轮直出 `final (route="direct_meta")`，配 Python 确定性领域关键词单次回弹护栏（`MAX_UNGROUNDED_BOUNCE_PER_TURN = 1`）及全链路 `grounded=False / fast_path=True` 微标签持久化呈现。
 
 ---
 
@@ -188,14 +188,15 @@ BidGuard-Agent/
 | E30 | 可中断流水线与活性心跳卡：`_PipelineCancelled(BaseException)` + `BidTaskWorker._cancel_flags` 协作式取消穿透 F1 fallback/Stage 1.5 OCR/F4 并发撤池与 `POST /api/checks/{id}/cancel`；F1 逐条款心跳进度帧（`"已判定 X / Y 条"` + `updated_at`）与前端 `>120s` 无响应判活预警；`recover_stale_tasks()` 服务启动遗留 `running` 任务自动复位；F6 控标雷达接入服务端 `_cancel_flags` 消灭僵尸 `checking` 与 `ExtractView.vue` `AbortController` 队列取消 | **已验收入库（`0756c2a`）** | 256 项 + `vue-tsc` + `vite build` |
 | E31 | F7 算术沙盒容错、ReAct 工具异常自愈与体检任务重命名卡：`PriceSandbox` 零依赖解析带逗号/单位/万元/量词/科学计数法金额数量与 `INVALID_PRICE_FORMAT` 降级；`recalc_price` 别名+`qty=1` `derived` 推算标注；`ask_bid_expert_stream` 单工具 `try/except Exception` 自愈（透传 `BaseException`）与 `_safe_int_offset`；前后端 `error_type`（`gateway` vs `tool_or_internal`）精准归类；`PATCH /api/checks/{task_id}` 体检任务重命名、联动默认 `QaSession` 标题与台账/详情行内编辑 | **已验收入库（`10a63eb`）** | 260 项 + `vue-tsc` + `vite build` |
 | E32 | F7 轮数耗尽强制收口、登录页安全脱敏与轻量管理员用户管理卡：`core/bid_react_agent.py` 达到 `max_rounds` 后追加 1 次强制收口 LLM 调用（`_FORCED_WRAPUP_PROMPT` 防历史合同张冠李戴 + 强制 `verify_quote` + `forced_final` 与异常优雅降级透传 `BaseException`）；`/api/health` 与 `/api/auth/health` 下发 `show_demo_login`（联动 `SHOW_DEMO_LOGIN`+`SEED_DEMO_DATA`）+ `LoginView.vue` fail-closed 隐藏演示账号；新增 6 个 `require_admin` 部门/用户管理端点（`422 INVALID_ROLE` 白名单、`409 LAST_ADMIN_PROTECTED` 先于 `CANNOT_MODIFY_SELF` 防自锁双护栏、禁用即时 `401 USER_DISABLED` 与脱敏审计）+ `UserProfileOut.tenant_name` 动态部门显示 + `UsersManageView.vue`（`/users`） | **已验收入库（`804c45b`）** | 272 项 + `vue-tsc` + `vite build` |
-| E33 | F7 自主检索与并行工具调度卡：`core/bid_react_agent.py` 新增 `_extract_round_actions` 支持同轮批量 `actions`（上限 `MAX_PARALLEL_ACTIONS_PER_ROUND=4`）、`_dispatch_single_tool` + `ThreadPoolExecutor` 并发保序执行（单工具自愈 + `BaseException` 快速撤池透传）、`_EFFORT_UPSTREAM_MAP` 与 `max_rounds: Optional[int] = None` 解耦为 `low=7/medium=8/high=12`（兼容 E21 显式断言）及每轮剩余预算与偏移桶同源空转去重提示；`core/hybrid_retriever.py` 按 `doc_sha` 分段加锁+原子 `os.replace()` 写缓存；`backend/schemas.py` `QaAskRequest.max_rounds` 放宽至 `le=12`；前端 `types.ts`/`QaChatView.vue`/`ReActSteps.vue`/`QaMessageList.vue` 区分思考回合与执行步数并展示并行微标 | **工作区已完成待确认 commit** | **280 项** + `vue-tsc` + `vite build` |
+| E33 | F7 自主检索与并行工具调度卡：`core/bid_react_agent.py` 新增 `_extract_round_actions` 支持同轮批量 `actions`（上限 `MAX_PARALLEL_ACTIONS_PER_ROUND=4`）、`_dispatch_single_tool` + `ThreadPoolExecutor` 并发保序执行（单工具自愈 + `BaseException` 快速撤池透传）、`_EFFORT_UPSTREAM_MAP` 与 `max_rounds: Optional[int] = None` 解耦为 `low=7/medium=8/high=12`（兼容 E21 显式断言）及每轮剩余预算与偏移桶同源空转去重提示；`core/hybrid_retriever.py` 按 `doc_sha` 分段加锁+原子 `os.replace()` 写缓存；`backend/schemas.py` `QaAskRequest.max_rounds` 放宽至 `le=12`；前端 `types.ts`/`QaChatView.vue`/`ReActSteps.vue`/`QaMessageList.vue` 区分思考回合与执行步数并展示并行微标 | **已验收入库（`72cac30`）** | 280 项 + `vue-tsc` + `vite build` |
+| E34 | F7 快速通道判定卡：`core/bid_react_agent.py` 扩展 `_REACT_SYSTEM_PROMPT` 放行三类无须查标书的直答并置入 Python 确定性单次回弹护栏（`MAX_UNGROUNDED_BOUNCE_PER_TURN=1`，覆盖首轮 `final` 与纯文本裸答、要求 `bool(formatted_history)` 防空会话整理绕过、`r_idx < limit` 边界与带图附件免回弹），done 帧新增 `grounded/fast_path/route`；`backend/schemas.py` `QaAskResponseOut` 与 `backend/routers/qa.py`（`/ask`、`/ask/stream` 与 `messages_json` 持久化）全链路透传；前端 `types.ts`/`QaChatView.vue`/`QaMessageList.vue` 仅对 `grounded === false` 展示「未检索标书原文 · 仅供参考」徽标 | **工作区已完成待确认 commit** | **286 项** + `vue-tsc` + `vite build` |
 | chore | requirements 全量钉死（`59e6b64`）、基础镜像 digest 钉死、弹窗会话记忆 | `90a1947` | — |
 
 ---
 
 ## 7. 协作纪律与工程红线（完整版见 `AGENTS.md`）
 
-1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线已演进至 **280 项**（含 E33 新增 8 项并行工具调度、缓存并发锁、挡位解耦与空转遥测回归）。
+1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线已演进至 **286 项**（含 E34 新增 6 项快速通道判定与防偷懒回弹护栏回归）。
 2. **凡能算的绝不进大模型（0 Token 优先）**；金额全程 `Decimal` 禁 `float`（ROUND_HALF_UP 量化 0.01）。
 3. **LLM 只吃局部窗口 + 强制 `quote_verifier` 溯源**；严禁整本标书直塞。
 4. **宁缺毋滥显式降级**：无法对齐必返回 NEED_MANUAL；找不到位置绝不乱锚（E5 五级定位链 + 置信护栏）；页码诚实回退字符偏移并标"不一定准确"。
@@ -216,7 +217,7 @@ BidGuard-Agent/
 | `INTERFACE.md` | core↔backend 契约锁死 | 涉签名改动时同步 |
 | `FRONTEND.md` | 前端架构说明 | 前端结构变化时同步 |
 | `docs/DEPLOY.md` | 本机直跑 + Linux Docker/离线/裸机部署手册 | 部署变化时同步 |
-| `docs/cards/` | 任务卡归档（B1~E33） | 每立卡/收卡时归档 |
+| `docs/cards/` | 任务卡归档（B1~E34） | 每立卡/收卡时归档 |
 | `.workbuddy/memory/`（不入库） | 架构侧 AI 工作日志 | 每日实质工作后追加 |
 
 **冷启动口令**（新会话开场）：「先读取 AGENTS.md 和 HANDOVER.md，然后读 docs/cards/ 里最新一张卡，汇报理解后等我派活。」
@@ -225,7 +226,7 @@ BidGuard-Agent/
 
 ## 9. 本文档信息来源
 
-1. `docs/cards/` B1~E33 全部任务卡与验收记录；`派发归档/` 各阶段派发包全文
-2. Git 提交链（`git log --oneline`，已演进至 `804c45b` E32 终版；E33 · F7 自主检索与并行工具调度卡留在工作区待确认 commit）；280 项 pytest + `vue-tsc` + `vite build` 实测回执
+1. `docs/cards/` B1~E34 全部任务卡与验收记录；`派发归档/` 各阶段派发包全文
+2. Git 提交链（`git log --oneline`，已演进至 `72cac30` E33 终版；E34 · F7 快速通道判定卡留在工作区待确认 commit）；286 项 pytest + `vue-tsc` + `vite build` 实测回执
 3. `data/corpus/m0_samples/` 三本账 + `语料清单.md`、`data/corpus/sim_bids/_README.md`；`data/corpus/regulations/` 法规种子
 4. `E:\agent\Contract-Review-Agent\HANDOVER_V2.md`（文档骨架参照）

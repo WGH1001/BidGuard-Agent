@@ -220,15 +220,27 @@ defineExpose({
         <div v-else class="bubble assistant-bubble">
           <div class="a-head">
             <span class="a-name">BidGuard 标书核验专家</span>
-            <span
-              v-if="msg.mode === 'keyword_fallback'"
-              class="sev-pill warning"
-            >
-              离线检索模式 (0-Token)
-            </span>
-            <span v-else-if="msg.mode === 'react'" class="sev-pill info">
-              ReAct 多步检索模式
-            </span>
+            <div class="a-head-badges">
+              <span
+                v-if="msg.grounded === false"
+                class="sev-pill warning"
+                title="该回答未执行招投标文件检索，仅供参考"
+              >
+                未检索标书原文 · 仅供参考
+              </span>
+              <span
+                v-if="msg.mode === 'keyword_fallback'"
+                class="sev-pill warning"
+              >
+                离线检索模式 (0-Token)
+              </span>
+              <span
+                v-else-if="msg.mode === 'react' && msg.grounded !== false"
+                class="sev-pill info"
+              >
+                ReAct 多步检索模式
+              </span>
+            </div>
           </div>
 
           <div v-if="msg.loading && !msg.content" class="a-thinking-stage">
@@ -591,6 +603,13 @@ defineExpose({
   font-size: 13px;
   font-weight: 900;
   color: var(--txt-strong);
+}
+
+.a-head-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .a-thinking-stage {

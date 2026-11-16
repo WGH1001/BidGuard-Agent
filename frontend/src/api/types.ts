@@ -506,6 +506,9 @@ export interface QaMessageItem {
   steps?: ReActStepTraceItem[]
   attachment_ids?: string[]
   attachments?: QaAttachmentSummary[]
+  grounded?: boolean
+  fast_path?: boolean
+  route?: string | null
   loading?: boolean
   streaming?: boolean
 }
@@ -554,6 +557,9 @@ export interface QaAskResponseOut {
   steps: ReActStepTraceItem[]
   rounds_used: number
   terminated_by_max_rounds: boolean
+  grounded?: boolean
+  fast_path?: boolean
+  route?: string | null
 }
 
 export interface QaLastTurnWithdrawOut {

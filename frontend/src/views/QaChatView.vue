@@ -822,6 +822,9 @@ async function handleSendQuestion(question: string, attachmentIds: string[] = []
           mode: finalRes.mode,
           quotes: finalRes.quotes || [],
           steps: finalRes.steps || msg.steps || [],
+          grounded: finalRes.grounded,
+          fast_path: finalRes.fast_path,
+          route: finalRes.route,
           loading: false,
           streaming: false,
         }
@@ -934,6 +937,9 @@ async function handleSendQuestion(question: string, attachmentIds: string[] = []
             mode: res.mode,
             quotes: res.quotes || [],
             steps: res.steps || [],
+            grounded: res.grounded,
+            fast_path: res.fast_path,
+            route: res.route,
             loading: false,
             streaming: false,
           }

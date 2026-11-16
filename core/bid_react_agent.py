@@ -42,7 +42,22 @@ from core.tender_extractor import locate_chapters, locate_keyword_sections
 _SEARCH_WINDOW = 200
 _MAX_HITS_PER_SEARCH = 5
 MAX_PARALLEL_ACTIONS_PER_ROUND = 4
+MAX_UNGROUNDED_BOUNCE_PER_TURN = 1
 _JSON_BLOCK_RE = re.compile(r'\{.*\}', re.DOTALL)
+
+# E34：识别涉及本项目核验的查证信号（用于首轮未检索即直答时的确定性回弹拦截）
+_PROJECT_VERIFY_SIGNAL_RE = re.compile(
+    r'金额|限价|报价|单价|合价|总价|预算|质保|保修|维保|售后|工期|交货|交付|'
+    r'资质|营业执照|证书|社保|缴存|业绩|评分|偏离|★|▲|开标|'
+    r'投标文件|招标文件|投标书|招标书|违约|废标|无效投标|第[一二三四五六七八九十百\d]+条'
+)
+_REORG_META_RE = re.compile(
+    r'整理|上一轮|上轮|刚才|刚刚|上述|前述|总结|摘要|汇总|转成表格|表格形式|对比表|清单|列出来|排版|改写'
+)
+_UNGROUNDED_BOUNCE_PROMPT = (
+    '检测到您的问题涉及具体招投标条款或文件内容核验，但当前尚未执行任何工具检索。'
+    '请至少调用 search_tender / search_bid / locate_chapter / cite_regulation 获取原文窗口后再作答，严禁未查正文直接回答。'
+)
 
 # E4 / E24：F7 允许调用的 7 大工具名称白名单
 ALLOWED_REACT_TOOLS = (
@@ -97,6 +112,12 @@ _REACT_SYSTEM_PROMPT = """你是招投标双书合规审查专家（ReAct Agent�
 7. "search_attachment"：在用户上传的会话补充附件（含文档与图片 OCR 文本）中检索关键词，action_input 为 {"keyword": "...", "attachment_id": "可选指定附件ID", "after_offset": 0}；
 8. "final"：当你已拿到充分原文证据（或已确认双书中确实未检出）准备给出最终回答时使用，action_input 为：
    {"answer": "最终解答正文", "quotes": [{"source": "tender"|"bid"|"attachment", "attachment_id": "当source为attachment时填附件ID", "quote": "逐字摘自原文的引用句"}]}
+
+   【快速通道例外（第 1 轮可零工具直出 final，需在 action_input 中额外声明 "route": "direct_meta" 且 quotes 留空）】仅限以下三类无需翻查本项目标书正文的问题：
+   (a) 系统能力与交互咨询（如“你能查什么”“这个标签什么含义”）；
+   (b) 通用招投标法规与流程概念题（不涉及本项目具体文件条款，如“质疑期限一般是几天”）；
+   (c) 仅对上方已有对话历史结果做重排/整理/格式转换（如“把上一轮结果整理成对比表格”）。
+   ⚠️ 明令禁止直答：凡涉及本项目金额/限价/报价、质保期/工期/交货期、资质/社保/证照、★/▲/偏离、开标时间或我方响应情况的问题，严禁第 1 轮直答，必须先调用检索工具核实原文！
 
 每轮你必须只输出一个合法的 JSON 对象（字符串内部严禁出现未转义的裸换行），支持【单动作】或【同轮并行多工具（最多 4 个）】：
 - 单动作格式（收口 final 或单工具调用）：
@@ -1265,6 +1286,40 @@ def _build_round_feedback_message(
     return "\n".join(parts)
 
 
+def _has_image_attachments(norm_atts: list[dict[str, Any]]) -> bool:
+    return any(bool(att.get('is_image')) for att in (norm_atts or []))
+
+
+def _should_bounce_first_round_ungrounded(
+    question: str,
+    *,
+    r_idx: int,
+    limit: int,
+    tool_steps_count: int,
+    bounce_count: int,
+    norm_atts: list[dict[str, Any]],
+    formatted_history: list[dict[str, Any]],
+    verified_quotes: list[dict[str, Any]],
+) -> bool:
+    """E34：Python 确定性防偷懒回弹护栏（单问回弹上限写死 MAX_UNGROUNDED_BOUNCE_PER_TURN=1）。"""
+    if bounce_count >= MAX_UNGROUNDED_BOUNCE_PER_TURN:
+        return False
+    if r_idx != 1 or r_idx >= limit:
+        return False
+    if tool_steps_count > 0:
+        return False
+    if _has_image_attachments(norm_atts):
+        return False
+    if any(bool(q.get('quote_verified')) for q in (verified_quotes or [])):
+        return False
+    q_text = (question or '').strip()
+    if not _PROJECT_VERIFY_SIGNAL_RE.search(q_text):
+        return False
+    if bool(formatted_history) and bool(_REORG_META_RE.search(q_text)):
+        return False
+    return True
+
+
 def ask_bid_expert_stream(
     tender_path: str | Path,
     bid_path: str | Path,
@@ -1393,6 +1448,9 @@ def ask_bid_expert_stream(
                 'steps': [fallback_step],
                 'rounds_used': 1,
                 'terminated_by_max_rounds': False,
+                'grounded': True,
+                'fast_path': False,
+                'route': None,
             },
         }
         return
@@ -1408,6 +1466,8 @@ def ask_bid_expert_stream(
     collected_tool_quotes: list[dict[str, Any]] = []
     seen_hit_buckets: set[tuple[str, int | str]] = set()
     stagnation_streak = 0
+    bounce_count = 0
+    has_img_att = _has_image_attachments(norm_atts)
 
     norm_effort, limit = _resolve_effort_and_rounds(reasoning_effort, max_rounds, client=client)
 
@@ -1431,6 +1491,20 @@ def ask_bid_expert_stream(
                     continue
                 ans_fallback = '已完成标书条款检索，但模型输出格式异常，请参考下方已提取的原文溯源卡片或重试。'
             else:
+                if _should_bounce_first_round_ungrounded(
+                    question,
+                    r_idx=r_idx,
+                    limit=limit,
+                    tool_steps_count=len(steps),
+                    bounce_count=bounce_count,
+                    norm_atts=norm_atts,
+                    formatted_history=formatted_history,
+                    verified_quotes=[],
+                ):
+                    bounce_count += 1
+                    messages.append({'role': 'assistant', 'content': raw_content})
+                    messages.append({'role': 'user', 'content': _UNGROUNDED_BOUNCE_PROMPT})
+                    continue
                 ans_fallback = raw_content.strip() or '未能生成有效回答。'
 
             end_step = {
@@ -1440,6 +1514,9 @@ def ask_bid_expert_stream(
                 'action_input': {},
                 'observation': None,
             }
+            has_tool_steps = len(steps) > 0
+            is_grounded = has_tool_steps or has_img_att
+            is_fast_path = (not has_tool_steps) and (not is_grounded)
             steps.append(end_step)
             yield {'type': 'step', 'data': end_step}
             for piece in _iter_answer_chunks(ans_fallback):
@@ -1454,17 +1531,23 @@ def ask_bid_expert_stream(
                     'steps': steps,
                     'rounds_used': r_idx,
                     'terminated_by_max_rounds': False,
+                    'grounded': is_grounded,
+                    'fast_path': is_fast_path,
+                    'route': 'direct_meta' if is_fast_path else None,
                 },
             }
             return
 
         thought, is_final_turn, final_payload, tool_calls = _extract_round_actions(parsed)
 
-        # E4 / E24：7 工具白名单检查与 final 收口
+        # E4 / E24 / E34：7 工具白名单检查与 final 收口（含第 1 轮确定性回弹护栏）
         if is_final_turn:
             final_payload = final_payload if isinstance(final_payload, dict) else parsed
             ans_text = str(final_payload.get('answer') or parsed.get('answer') or '').strip()
+            raw_route = str(final_payload.get('route') or parsed.get('route') or '').strip() or None
             raw_quotes = final_payload.get('quotes') if 'quotes' in final_payload else parsed.get('quotes', [])
+            if raw_route == 'direct_meta' and len(steps) == 0 and not formatted_history:
+                raw_quotes = []
             ans_text, verified_quotes = _finalize_answer_and_quotes(
                 ans_text,
                 raw_quotes,
@@ -1474,6 +1557,25 @@ def ask_bid_expert_stream(
                 bid_ctx=bid_ctx,
                 norm_atts=norm_atts,
             )
+
+            if _should_bounce_first_round_ungrounded(
+                question,
+                r_idx=r_idx,
+                limit=limit,
+                tool_steps_count=len(steps),
+                bounce_count=bounce_count,
+                norm_atts=norm_atts,
+                formatted_history=formatted_history,
+                verified_quotes=verified_quotes,
+            ):
+                bounce_count += 1
+                messages.append({'role': 'assistant', 'content': raw_content})
+                messages.append({'role': 'user', 'content': _UNGROUNDED_BOUNCE_PROMPT})
+                continue
+
+            has_tool_steps = len(steps) > 0
+            is_grounded = has_tool_steps or has_img_att or any(bool(q.get('quote_verified')) for q in verified_quotes)
+            is_fast_path = (not has_tool_steps) and (not is_grounded)
 
             final_step = {
                 'round': r_idx,
@@ -1497,6 +1599,9 @@ def ask_bid_expert_stream(
                     'steps': steps,
                     'rounds_used': r_idx,
                     'terminated_by_max_rounds': False,
+                    'grounded': is_grounded,
+                    'fast_path': is_fast_path,
+                    'route': raw_route if raw_route is not None else ('direct_meta' if is_fast_path else None),
                 },
             }
             return
@@ -1628,6 +1733,9 @@ def ask_bid_expert_stream(
                         'rounds_used': limit,
                         'terminated_by_max_rounds': True,
                         'forced_final': True,
+                        'grounded': len(steps) > 1 or has_img_att or any(bool(q.get('quote_verified')) for q in w_quotes),
+                        'fast_path': False,
+                        'route': None,
                     },
                 }
                 return
@@ -1640,6 +1748,7 @@ def ask_bid_expert_stream(
             'action_input': {},
             'observation': None,
         }
+        has_prior_tools = len(steps) > 0
         steps.append(wrap_step)
         yield {'type': 'step', 'data': wrap_step}
         for piece in _iter_answer_chunks(plain_ans):
@@ -1655,6 +1764,9 @@ def ask_bid_expert_stream(
                 'rounds_used': limit,
                 'terminated_by_max_rounds': True,
                 'forced_final': True,
+                'grounded': has_prior_tools or has_img_att,
+                'fast_path': False,
+                'route': None,
             },
         }
         return
@@ -1673,6 +1785,9 @@ def ask_bid_expert_stream(
             'rounds_used': limit,
             'terminated_by_max_rounds': True,
             'forced_final': False,
+            'grounded': len(steps) > 0 or has_img_att,
+            'fast_path': False,
+            'route': None,
         },
     }
 
