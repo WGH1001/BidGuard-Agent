@@ -27,6 +27,7 @@ from backend.schemas import (
     QaQuoteOut,
     QaSessionCreateRequest,
     QaSessionOut,
+    QaSessionRenameRequest,
 )
 from backend.worker import resolve_effective_llm_client, resolve_project_path
 from core.bid_react_agent import ask_bid_expert, ask_bid_expert_stream
@@ -49,6 +50,17 @@ _QA_DB_WRITE_LOCK = threading.Lock()
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _is_default_session_title(title: Optional[str]) -> bool:
+    t = (title or '').strip()
+    if not t:
+        return True
+    if t in ('新对话', '标书专家追问会话'):
+        return True
+    if t.endswith(' · 专家追问') or t.endswith('·专家追问'):
+        return True
+    return False
 
 
 def _att_dict_to_out(a: dict[str, Any]) -> QaAttachmentOut:
@@ -324,6 +336,42 @@ def get_qa_session(
     return _session_to_out(row, db)
 
 
+@router.patch('/sessions/{session_id}', response_model=QaSessionOut)
+@router.patch('/{session_id}', response_model=QaSessionOut, include_in_schema=False)
+def rename_qa_session(
+    session_id: int,
+    body: QaSessionRenameRequest,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> QaSessionOut:
+    """E28 §2.4：重命名问答会话标题（多租户隔离 + 写锁串行化 + 审计留痕）。"""
+    new_title = (body.title or '').strip()
+    if not new_title:
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'EMPTY_SESSION_TITLE', 'message': '会话标题不能为空'},
+        )
+    tenant_id = int(current_user.tenant_id)
+    with _QA_DB_WRITE_LOCK:
+        db.rollback()
+        db.expire_all()
+        row = _get_tenant_session_or_404(db, session_id, tenant_id)
+        old_title = row.title
+        row.title = new_title[:256]
+        row.updated_at = _utc_now()
+        db.commit()
+        db.refresh(row)
+        record_audit(
+            db,
+            action='qa_rename_session',
+            tenant_id=tenant_id,
+            user_id=current_user.get('id'),
+            target=f"qa_session:{session_id}",
+            detail_json={'old_title': old_title, 'new_title': row.title},
+        )
+        return _session_to_out(row, db)
+
+
 @router.post('/sessions/{session_id}/attachments', response_model=QaAttachmentOut)
 @router.post('/{session_id}/attachments', response_model=QaAttachmentOut, include_in_schema=False)
 def upload_qa_attachment(
@@ -567,8 +615,9 @@ def _persist_qa_turn_locked(
                     'steps': steps_payload,
                 })
                 row.messages_json = new_hist
-                if row.title in ('新对话', '标书专家追问会话'):
-                    row.title = question[:30]
+                clean_q = (question or '').strip()
+                if _is_default_session_title(row.title) and clean_q:
+                    row.title = clean_q[:30]
                 row.updated_at = _utc_now()
                 write_sess.commit()
 

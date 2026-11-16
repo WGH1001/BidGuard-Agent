@@ -1,4 +1,4 @@
-import { del, get, getStoredToken, post, put } from './http'
+import { del, get, getStoredToken, patch, post, put } from './http'
 import { downloadFromApi } from './download'
 import type {
   AuditLogListOut,
@@ -33,6 +33,7 @@ import type {
   QaLastTurnWithdrawOut,
   QaSessionCreatePayload,
   QaSessionOut,
+  QaSessionRenamePayload,
   RadarScanOut,
   RegulationCrawlOut,
   RegulationImportOut,
@@ -262,6 +263,9 @@ export const qaApi = {
   },
   getSession(sessionId: number): Promise<QaSessionOut> {
     return get<QaSessionOut>(`/qa/sessions/${sessionId}`)
+  },
+  renameSession(sessionId: number, payload: QaSessionRenamePayload): Promise<QaSessionOut> {
+    return patch<QaSessionOut>(`/qa/sessions/${sessionId}`, payload)
   },
   deleteSession(sessionId: number): Promise<OkResponse> {
     return del<OkResponse>(`/qa/sessions/${sessionId}`)

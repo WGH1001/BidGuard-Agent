@@ -146,6 +146,10 @@ const appStore = useAppStore()
 const authStore = useAuthStore()
 const loadingInit = localRef(false)
 const creatingForTaskId = localRef<number | null>(null)
+const editingSessionId = localRef<number | null>(null)
+const editingTitleDraft = localRef('')
+const editingSource = localRef<'sidebar' | 'header'>('sidebar')
+const renamingBusy = localRef(false)
 const sidebarFilterOpen = localRef(false)
 const sidebarSearchQuery = localRef('')
 const onlyActiveProjects = localRef(false)
@@ -584,6 +588,57 @@ async function handleDeleteSession(sess: QaSessionOut): Promise<void> {
   ElMessage.success('问答会话已删除')
 }
 
+function isDefaultSessionTitle(title?: string | null): boolean {
+  const t = (title || '').trim()
+  if (!t) return true
+  if (t === '新对话' || t === '标书专家追问会话') return true
+  if (t.endsWith(' · 专家追问') || t.endsWith('·专家追问')) return true
+  return false
+}
+
+function startRenameSession(sess: QaSessionOut, source: 'sidebar' | 'header' = 'sidebar'): void {
+  editingSessionId.value = sess.id
+  editingTitleDraft.value = sess.title || ''
+  editingSource.value = source
+  void nextTick(() => {
+    const input = document.querySelector<HTMLInputElement>('.sess-rename-input')
+    if (input) {
+      input.focus()
+      input.select()
+    }
+  })
+}
+
+function cancelRenameSession(): void {
+  editingSessionId.value = null
+  editingTitleDraft.value = ''
+}
+
+async function commitRenameSession(sess: QaSessionOut): Promise<void> {
+  if (editingSessionId.value !== sess.id || renamingBusy.value) return
+  const nextTitle = editingTitleDraft.value.trim()
+  editingSessionId.value = null
+  editingTitleDraft.value = ''
+  if (!nextTitle || nextTitle === (sess.title || '').trim()) {
+    return
+  }
+  renamingBusy.value = true
+  try {
+    const updated = await qaApi.renameSession(sess.id, { title: nextTitle })
+    const idx = sessions.value.findIndex((item) => item.id === sess.id)
+    if (idx >= 0) {
+      sessions.value[idx] = {
+        ...sessions.value[idx],
+        title: updated.title,
+        updated_at: updated.updated_at || sessions.value[idx].updated_at,
+      }
+    }
+    ElMessage.success('会话标题已更新')
+  } finally {
+    renamingBusy.value = false
+  }
+}
+
 async function handleUploadAttachment(file: File): Promise<void> {
   let sid = activeSessionId.value
   if (sid && isSessionAsking(sid)) return
@@ -701,6 +756,11 @@ async function handleSendQuestion(question: string, attachmentIds: string[] = []
     attachment_ids: validIds,
     attachments: pickedSummaries,
   })
+  const targetSessRow = sessions.value.find((s) => s.id === targetSessionId)
+  const trimmedQuestion = question.trim()
+  if (targetSessRow && isDefaultSessionTitle(targetSessRow.title) && trimmedQuestion) {
+    targetSessRow.title = trimmedQuestion.slice(0, 30)
+  }
   rt.messages.push({
     role: 'assistant',
     content: '',
@@ -979,38 +1039,66 @@ onBeforeUnmount(() => {
               @click="selectSession(s)"
             >
               <div class="tsc-top">
-                <span class="tsc-title" :title="s.title">{{ s.title }}</span>
-                <div class="tsc-right">
+                <input
+                  v-if="editingSessionId === s.id && editingSource === 'sidebar'"
+                  v-model="editingTitleDraft"
+                  type="text"
+                  class="sess-rename-input"
+                  maxlength="256"
+                  @click.stop
+                  @dblclick.stop
+                  @keydown.enter.prevent="commitRenameSession(s)"
+                  @keydown.esc.prevent="cancelRenameSession"
+                  @blur="commitRenameSession(s)"
+                />
+                <template v-else>
                   <span
-                    v-if="isSessionAsking(s.id)"
-                    class="stream-grid-spinner"
-                    title="该会话正在流式检索生成中（可随时切去其他会话）"
+                    class="tsc-title"
+                    :title="`${s.title}（双击可重命名）`"
+                    @dblclick.stop="startRenameSession(s, 'sidebar')"
                   >
-                    <i></i><i></i><i></i><i></i>
+                    {{ s.title }}
                   </span>
-                  <span v-else class="tsc-time mono-num">
-                    {{ formatRelativeTime(s.updated_at || s.created_at) }}
-                  </span>
-                  <div class="tsc-actions">
-                    <button
-                      type="button"
-                      class="tsc-icon-btn is-pinned"
-                      title="取消置顶"
-                      @click.stop="togglePinSession(s)"
+                  <div class="tsc-right">
+                    <span
+                      v-if="isSessionAsking(s.id)"
+                      class="stream-grid-spinner"
+                      title="该会话正在流式检索生成中（可随时切去其他会话）"
                     >
-                      📌
-                    </button>
-                    <button
-                      type="button"
-                      class="tsc-icon-btn is-del"
-                      title="删除会话"
-                      :disabled="isSessionAsking(s.id)"
-                      @click.stop="handleDeleteSession(s)"
-                    >
-                      ×
-                    </button>
+                      <i></i><i></i><i></i><i></i>
+                    </span>
+                    <span v-else class="tsc-time mono-num">
+                      {{ formatRelativeTime(s.updated_at || s.created_at) }}
+                    </span>
+                    <div class="tsc-actions">
+                      <button
+                        type="button"
+                        class="tsc-icon-btn"
+                        title="重命名会话"
+                        @click.stop="startRenameSession(s, 'sidebar')"
+                      >
+                        ✎
+                      </button>
+                      <button
+                        type="button"
+                        class="tsc-icon-btn is-pinned"
+                        title="取消置顶"
+                        @click.stop="togglePinSession(s)"
+                      >
+                        📌
+                      </button>
+                      <button
+                        type="button"
+                        class="tsc-icon-btn is-del"
+                        title="删除会话"
+                        :disabled="isSessionAsking(s.id)"
+                        @click.stop="handleDeleteSession(s)"
+                      >
+                        ×
+                      </button>
+                    </div>
                   </div>
-                </div>
+                </template>
               </div>
               <div class="tsc-proj">
                 <span class="folder-glyph">📁</span>
@@ -1110,38 +1198,66 @@ onBeforeUnmount(() => {
                   :class="{ active: s.id === activeSessionId }"
                   @click="selectSession(s)"
                 >
-                  <span class="tsr-title" :title="s.title">{{ s.title }}</span>
-                  <div class="tsr-right">
+                  <input
+                    v-if="editingSessionId === s.id && editingSource === 'sidebar'"
+                    v-model="editingTitleDraft"
+                    type="text"
+                    class="sess-rename-input"
+                    maxlength="256"
+                    @click.stop
+                    @dblclick.stop
+                    @keydown.enter.prevent="commitRenameSession(s)"
+                    @keydown.esc.prevent="cancelRenameSession"
+                    @blur="commitRenameSession(s)"
+                  />
+                  <template v-else>
                     <span
-                      v-if="isSessionAsking(s.id)"
-                      class="stream-grid-spinner"
-                      title="正在流式检索生成中"
+                      class="tsr-title"
+                      :title="`${s.title}（双击可重命名）`"
+                      @dblclick.stop="startRenameSession(s, 'sidebar')"
                     >
-                      <i></i><i></i><i></i><i></i>
+                      {{ s.title }}
                     </span>
-                    <span v-else class="tsc-time mono-num">
-                      {{ formatRelativeTime(s.updated_at || s.created_at) }}
-                    </span>
-                    <div class="tsc-actions">
-                      <button
-                        type="button"
-                        class="tsc-icon-btn"
-                        title="置顶到 Pinned Conversations"
-                        @click.stop="togglePinSession(s)"
+                    <div class="tsr-right">
+                      <span
+                        v-if="isSessionAsking(s.id)"
+                        class="stream-grid-spinner"
+                        title="正在流式检索生成中"
                       >
-                        📌
-                      </button>
-                      <button
-                        type="button"
-                        class="tsc-icon-btn is-del"
-                        title="删除该会话"
-                        :disabled="isSessionAsking(s.id)"
-                        @click.stop="handleDeleteSession(s)"
-                      >
-                        ×
-                      </button>
+                        <i></i><i></i><i></i><i></i>
+                      </span>
+                      <span v-else class="tsc-time mono-num">
+                        {{ formatRelativeTime(s.updated_at || s.created_at) }}
+                      </span>
+                      <div class="tsc-actions">
+                        <button
+                          type="button"
+                          class="tsc-icon-btn"
+                          title="重命名会话"
+                          @click.stop="startRenameSession(s, 'sidebar')"
+                        >
+                          ✎
+                        </button>
+                        <button
+                          type="button"
+                          class="tsc-icon-btn"
+                          title="置顶到 Pinned Conversations"
+                          @click.stop="togglePinSession(s)"
+                        >
+                          📌
+                        </button>
+                        <button
+                          type="button"
+                          class="tsc-icon-btn is-del"
+                          title="删除该会话"
+                          :disabled="isSessionAsking(s.id)"
+                          @click.stop="handleDeleteSession(s)"
+                        >
+                          ×
+                        </button>
+                      </div>
                     </div>
-                  </div>
+                  </template>
                 </div>
 
                 <div
@@ -1178,9 +1294,35 @@ onBeforeUnmount(() => {
       <div class="qst-header">
         <div class="qst-title-line">
           <h2>F7 · 标书专家多轮 ReAct 追问工作台</h2>
-          <span v-if="activeSession" class="sess-tag mono-num" :title="activeSession.title">
-            #{{ activeSession.id }} {{ activeSession.title }}
-          </span>
+          <template v-if="activeSession">
+            <input
+              v-if="editingSessionId === activeSession.id && editingSource === 'header'"
+              v-model="editingTitleDraft"
+              type="text"
+              class="sess-rename-input in-header"
+              maxlength="256"
+              @keydown.enter.prevent="commitRenameSession(activeSession)"
+              @keydown.esc.prevent="cancelRenameSession"
+              @blur="commitRenameSession(activeSession)"
+            />
+            <span
+              v-else
+              class="sess-tag mono-num"
+              :title="`${activeSession.title}（双击可重命名）`"
+              @dblclick="startRenameSession(activeSession, 'header')"
+            >
+              #{{ activeSession.id }} {{ activeSession.title }}
+            </span>
+            <button
+              v-if="editingSessionId !== activeSession.id || editingSource !== 'header'"
+              type="button"
+              class="tsc-icon-btn header-rename-btn"
+              title="重命名当前会话"
+              @click="startRenameSession(activeSession, 'header')"
+            >
+              ✎
+            </button>
+          </template>
           <span v-else-if="selectedTask" class="sess-tag mono-num">
             当前项目：#{{ selectedTask.id }} {{ selectedTask.title }}（直接提问自动新建会话）
           </span>
@@ -1594,6 +1736,31 @@ onBeforeUnmount(() => {
 .tsc-icon-btn:disabled {
   opacity: 0.35;
   cursor: not-allowed;
+}
+
+.sess-rename-input {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 5px;
+  border: 1px solid var(--brand);
+  background: #ffffff;
+  color: var(--txt-strong);
+  font-size: 12px;
+  font-weight: 600;
+  outline: none;
+}
+
+.sess-rename-input.in-header {
+  max-width: 320px;
+  height: 26px;
+  font-size: 12.5px;
+}
+
+.header-rename-btn {
+  flex-shrink: 0;
+  font-size: 12.5px;
 }
 
 /* Antigravity 风格 2×2 呼吸并发运行徽标 */

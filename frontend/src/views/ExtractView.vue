@@ -577,43 +577,55 @@ onBeforeUnmount(() => {
     <template v-if="result">
       <!-- 提取结果概览条 -->
       <div class="ext-summary-strip bg-panel">
-        <div><b>文档名称：</b>{{ result.filename }} ({{ result.source_type.toUpperCase() }})</div>
-        <div><b>文档规模：</b><span class="mono-num">{{ result.chars }}</span> 字符</div>
-        <div>
-          <b>开标日期：</b>
+        <div class="ess-doc-row">
+          <b class="ess-label">文档名称：</b>
           <span
-            class="sev-pill mono-num"
-            :class="result.open_date ? 'info' : 'neutral'"
-            :title="result.open_date_quote ? `原文摘录：${result.open_date_quote}` : undefined"
+            class="ess-doc-name"
+            :title="`${result.filename} (${result.source_type.toUpperCase()})`"
           >
-            {{
-              result.open_date
-                ? `${result.open_date}（${result.open_date_source === 'tender_llm' ? 'AI 局部窗' : '正文识别'}）`
-                : '未识别'
-            }}
+            {{ result.filename }} ({{ result.source_type.toUpperCase() }})
           </span>
         </div>
-        <div>
-          <b>★/▲ 实质要求：</b>
-          <span class="sev-pill ok">{{ reqCount }} 条</span>
-          <span class="muted-note">（另过滤非要求说明语/碎片 {{ nonReqCount }} 条）</span>
-        </div>
-        <div>
-          <b>无标记废标措辞（模式 A/B）：</b>
-          <span class="sev-pill error">{{ result.invalid_bid_clauses.length }} 条</span>
-        </div>
-        <div>
-          <b>评分细则项：</b>
-          <span class="sev-pill info">
-            {{ result.scoring_tables.length + result.scoring_prose.length }} 项
-          </span>
-        </div>
-        <div>
-          <b>所需证照：</b>
-          <span class="sev-pill" :class="gapCertCount > 0 ? 'warning' : 'ok'">
-            {{ requiredCertsList.length }} 项
-          </span>
-          <span class="muted-note">（门槛 {{ mandatoryCertCount }} / 缺口或临期 {{ gapCertCount }}）</span>
+        <div class="ess-metrics-grid">
+          <div class="ess-metric-item">
+            <b>文档规模：</b><span class="mono-num">{{ result.chars }}</span> 字符
+          </div>
+          <div class="ess-metric-item">
+            <b>开标日期：</b>
+            <span
+              class="sev-pill mono-num"
+              :class="result.open_date ? 'info' : 'neutral'"
+              :title="result.open_date_quote ? `原文摘录：${result.open_date_quote}` : undefined"
+            >
+              {{
+                result.open_date
+                  ? `${result.open_date}（${result.open_date_source === 'tender_llm' ? 'AI 局部窗' : '正文识别'}）`
+                  : '未识别'
+              }}
+            </span>
+          </div>
+          <div class="ess-metric-item">
+            <b>★/▲ 实质要求：</b>
+            <span class="sev-pill ok">{{ reqCount }} 条</span>
+            <span class="muted-note">（另过滤非要求说明语/碎片 {{ nonReqCount }} 条）</span>
+          </div>
+          <div class="ess-metric-item">
+            <b>无标记废标措辞（模式 A/B）：</b>
+            <span class="sev-pill error">{{ result.invalid_bid_clauses.length }} 条</span>
+          </div>
+          <div class="ess-metric-item">
+            <b>评分细则项：</b>
+            <span class="sev-pill info">
+              {{ result.scoring_tables.length + result.scoring_prose.length }} 项
+            </span>
+          </div>
+          <div class="ess-metric-item">
+            <b>所需证照：</b>
+            <span class="sev-pill" :class="gapCertCount > 0 ? 'warning' : 'ok'">
+              {{ requiredCertsList.length }} 项
+            </span>
+            <span class="muted-note">（门槛 {{ mandatoryCertCount }} / 缺口或临期 {{ gapCertCount }}）</span>
+          </div>
         </div>
       </div>
 
@@ -1103,11 +1115,51 @@ onBeforeUnmount(() => {
 .ext-summary-strip {
   padding: 13px 20px;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
+  flex-direction: column;
+  gap: 10px;
   font-size: 13px;
+}
+
+.ess-doc-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding-bottom: 9px;
+  border-bottom: 1px dashed var(--border-line);
+}
+
+.ess-label {
+  flex-shrink: 0;
+}
+
+.ess-doc-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--txt-strong);
+}
+
+.ess-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 20px;
+  align-items: center;
+}
+
+.ess-metric-item {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  min-width: 0;
+}
+
+@media (max-width: 1180px) {
+  .ess-metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .muted-note {

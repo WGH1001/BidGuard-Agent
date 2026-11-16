@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from backend.auth import hash_password
 import backend.database as db_mod
 from backend.main import create_app
-from backend.models import Tenant, User
+from backend.models import AuditLog, Tenant, User
 import backend.routers.qa as qa_router_mod
 
 
@@ -377,5 +377,143 @@ def test_e28_persist_lock_serializes_same_session_and_stream_error_releases_lock
             assert qa_router_mod._QA_DB_WRITE_LOCK.locked() is False
             msgs_after = tc.get(f'/api/qa/sessions/{sid}', headers=hdrs).json()['messages_json']
             assert len(msgs_after) == 16
+    finally:
+        _restore_db_globals(prev_engine, prev_session_local)
+
+
+def test_e28_project_session_auto_title_and_manual_rename(tmp_path, monkeypatch):
+    prev_engine, prev_session_local = db_mod.engine, db_mod.SessionLocal
+    try:
+        db_file = tmp_path / 'test_e28_rename.db'
+        app = create_app(database_url=f"sqlite:///{db_file.as_posix()}", auto_init_db=True)
+
+        t_bytes = _make_docx_bytes(['第一章 商务要求', '★1. 免费质保期不少于24个月。'])
+        b_bytes = _make_docx_bytes(['第一章 投标响应', '★1. 我方提供24个月免费质保。'])
+
+        def _fake_stream(*, question, **kwargs):
+            yield {'type': 'answer_delta', 'data': {'delta': f'回答：{question}'}}
+            yield {
+                'type': 'done',
+                'data': {
+                    'answer': f'回答：{question}',
+                    'mode': 'react',
+                    'quotes': [{'source': 'tender', 'quote': '★1. 免费质保期不少于24个月。'}],
+                    'steps': [],
+                },
+            }
+
+        def _fake_sync(*, question, **kwargs):
+            return {
+                'answer': f'同步回答：{question}',
+                'mode': 'react',
+                'quotes': [{'source': 'tender', 'quote': '★1. 免费质保期不少于24个月。'}],
+                'steps': [],
+            }
+
+        monkeypatch.setattr(qa_router_mod, 'ask_bid_expert_stream', _fake_stream)
+        monkeypatch.setattr(qa_router_mod, 'ask_bid_expert', _fake_sync)
+        monkeypatch.setattr(qa_router_mod, 'resolve_effective_llm_client', lambda db, uid: (SimpleNamespace(), 'done'))
+
+        with TestClient(app) as tc:
+            r_login = tc.post('/api/auth/login', json={'username': 'admin', 'password': 'BidGuard2026!'})
+            assert r_login.status_code == 200
+            hdrs = {'Authorization': f"Bearer {r_login.json()['token']}"}
+
+            r_task = tc.post(
+                '/api/checks',
+                headers=hdrs,
+                files={
+                    'tender_file': ('t.docx', t_bytes, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+                    'bid_file': ('b.docx', b_bytes, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+                },
+                data={'title': '安易—02包', 'auto_run': 'false'},
+            )
+            assert r_task.status_code == 200
+            tid = r_task.json()['id']
+
+            r_sess = tc.post('/api/qa/sessions', headers=hdrs, json={'task_id': tid})
+            assert r_sess.status_code == 200
+            sess_data = r_sess.json()
+            sid = sess_data['id']
+            assert sess_data['title'] == '安易—02包 · 专家追问'
+
+            q1 = '招标文件要求的免费质保期是多久？我方投标书在哪响应的？'
+            r_s1 = tc.post(f'/api/qa/sessions/{sid}/ask/stream', headers=hdrs, json={'question': q1})
+            assert r_s1.status_code == 200
+            evs = _parse_sse_events(r_s1.text)
+            assert evs and evs[-1][0] == 'done'
+
+            after_q1 = tc.get(f'/api/qa/sessions/{sid}', headers=hdrs).json()
+            expected_q1_title = q1[:30]
+            assert after_q1['title'] == expected_q1_title
+
+            # 第 2 轮提问不得覆盖第 1 轮已自动命名的标题
+            r_s2 = tc.post(f'/api/qa/sessions/{sid}/ask', headers=hdrs, json={'question': '那交付期是多久？'})
+            assert r_s2.status_code == 200
+            after_q2 = tc.get(f'/api/qa/sessions/{sid}', headers=hdrs).json()
+            assert after_q2['title'] == expected_q1_title
+
+            # PATCH /api/qa/sessions/{sid} 手动重命名（自动 trim）
+            r_ren = tc.patch(
+                f'/api/qa/sessions/{sid}',
+                headers=hdrs,
+                json={'title': '  02包·质保与交付核对  '},
+            )
+            assert r_ren.status_code == 200, r_ren.text
+            assert r_ren.json()['title'] == '02包·质保与交付核对'
+
+            # 隐藏别名 PATCH /api/qa/{sid} 同样生效
+            r_ren_alias = tc.patch(
+                f'/api/qa/{sid}',
+                headers=hdrs,
+                json={'title': '02包·终审定稿'},
+            )
+            assert r_ren_alias.status_code == 200, r_ren_alias.text
+            assert r_ren_alias.json()['title'] == '02包·终审定稿'
+
+            # 纯空白标题校验拦截 422 EMPTY_SESSION_TITLE
+            r_empty = tc.patch(
+                f'/api/qa/sessions/{sid}',
+                headers=hdrs,
+                json={'title': '   '},
+            )
+            assert r_empty.status_code == 422
+            assert r_empty.json()['detail']['code'] == 'EMPTY_SESSION_TITLE'
+
+            # 跨租户重命名返回 404
+            with db_mod.SessionLocal() as s:
+                t2 = Tenant(name='E28改名隔离第二部', is_active=True)
+                s.add(t2)
+                s.flush()
+                u2 = User(
+                    tenant_id=t2.id,
+                    username='e28_rename_t2',
+                    password_hash=hash_password('Tenant2Pass!'),
+                    display_name='二部成员',
+                    role='member',
+                    is_active=True,
+                )
+                s.add(u2)
+                s.commit()
+
+            r_login2 = tc.post('/api/auth/login', json={'username': 'e28_rename_t2', 'password': 'Tenant2Pass!'})
+            assert r_login2.status_code == 200
+            hdrs2 = {'Authorization': f"Bearer {r_login2.json()['token']}"}
+            assert tc.patch(
+                f'/api/qa/sessions/{sid}',
+                headers=hdrs2,
+                json={'title': '越权改名'},
+            ).status_code == 404
+
+            # 验证审计日志记录 qa_rename_session
+            with db_mod.SessionLocal() as s:
+                logs = (
+                    s.query(AuditLog)
+                    .filter_by(action='qa_rename_session', target=f'qa_session:{sid}')
+                    .all()
+                )
+                assert len(logs) == 2
+                assert logs[0].detail_json == {'old_title': expected_q1_title, 'new_title': '02包·质保与交付核对'}
+                assert logs[1].detail_json == {'old_title': '02包·质保与交付核对', 'new_title': '02包·终审定稿'}
     finally:
         _restore_db_globals(prev_engine, prev_session_local)

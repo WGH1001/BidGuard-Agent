@@ -463,6 +463,10 @@ export interface QaSessionCreatePayload {
   bid_path?: string
 }
 
+export interface QaSessionRenamePayload {
+  title: string
+}
+
 export interface QaSessionOut {
   id: number
   tenant_id: number

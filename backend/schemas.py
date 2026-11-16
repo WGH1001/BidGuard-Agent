@@ -297,6 +297,10 @@ class QaSessionCreateRequest(BaseModel):
     bid_path: Optional[str] = None
 
 
+class QaSessionRenameRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=256)
+
+
 class QaAttachmentOut(BaseModel):
     attachment_id: str
     filename: str
