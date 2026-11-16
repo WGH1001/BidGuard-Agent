@@ -74,6 +74,14 @@ def get_auth_secret() -> str:
     return _DEV_DEFAULT_SECRET
 
 
+def resolve_show_demo_login() -> bool:
+    """E32：判断登录页是否允许显示预置演示账号凭证卡片（SHOW_DEMO_LOGIN 与 SEED_DEMO_DATA 须同时开启）。"""
+    raw_seed = os.environ.get('SEED_DEMO_DATA', '1').strip().lower()
+    raw_demo = os.environ.get('SHOW_DEMO_LOGIN', '1').strip().lower()
+    off_vals = ('0', 'false', 'no', 'off')
+    return (raw_seed not in off_vals) and (raw_demo not in off_vals)
+
+
 # ============================================================================
 # B1 向下追加：完整鉴权层（bcrypt 密码哈希 / HMAC-SHA256 令牌 / FastAPI 依赖 / 审计）
 # ============================================================================
@@ -317,6 +325,7 @@ def get_current_user(
                 'role': user_obj.role,
                 'tenant': user_obj.tenant_id,
                 'tenant_id': user_obj.tenant_id,
+                'tenant_name': tenant_obj.name if tenant_obj is not None else '',
                 'is_active': user_obj.is_active,
                 'exp': payload.get('exp'),
             })
@@ -331,6 +340,7 @@ def get_current_user(
         'role': payload.get('role', 'member'),
         'tenant': tenant_id,
         'tenant_id': tenant_id,
+        'tenant_name': '',
         'is_active': True,
         'exp': payload.get('exp'),
     })

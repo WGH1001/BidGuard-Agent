@@ -12,6 +12,7 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     CheckTaskList: typeof import('./components/CheckTaskList.vue')['default']
+    ElAlert: typeof import('element-plus/es/components/alert/index')['ElAlert']
     ElButton: typeof import('element-plus/es/components/button/index')['ElButton']
     ElCheckbox: typeof import('element-plus/es/components/checkbox/index')['ElCheckbox']
     ElCheckboxGroup: typeof import('element-plus/es/components/checkbox/index')['ElCheckboxGroup']
@@ -32,6 +33,7 @@ declare module 'vue' {
     ElTableColumn: typeof import('element-plus/es/components/table/index')['ElTableColumn']
     ElTabPane: typeof import('element-plus/es/components/tabs/index')['ElTabPane']
     ElTabs: typeof import('element-plus/es/components/tabs/index')['ElTabs']
+    ElTag: typeof import('element-plus/es/components/tag/index')['ElTag']
     PriceManualDialog: typeof import('./components/PriceManualDialog.vue')['default']
     QaMessageList: typeof import('./components/QaMessageList.vue')['default']
     ReActSteps: typeof import('./components/ReActSteps.vue')['default']

@@ -53,10 +53,12 @@ export const useAuthStore = defineStore('auth', () => {
   const isAuthenticated = computed(() => Boolean(token.value))
   const isAdmin = computed(() => user.value?.role === 'admin')
   const tenantName = computed(() => {
+    const tName = user.value?.tenant_name?.trim()
+    if (tName) return tName
     const tid = user.value?.tenant_id
     if (tid === 2) return '弱电智能化工程部'
     if (tid === 3) return '智能装备销售中心'
-    return '政企系统集成投标部'
+    return tid ? `部门 #${tid}` : '政企系统集成投标部'
   })
 
   function persist(): void {

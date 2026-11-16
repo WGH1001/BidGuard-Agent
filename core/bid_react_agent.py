@@ -946,6 +946,69 @@ def _build_current_user_message(
     return {'role': 'user', 'content': text_prompt}
 
 
+def _call_react_chat(client: Any, messages: list[dict[str, Any]], norm_effort: Optional[str]) -> Any:
+    """兼容调用 client.chat（透传 reasoning_effort 并在老接口不支持时降级重试）。"""
+    if norm_effort is not None:
+        try:
+            return client.chat(messages, model_tier='flash', reasoning_effort=norm_effort)
+        except TypeError:
+            return client.chat(messages, model_tier='flash')
+    return client.chat(messages, model_tier='flash')
+
+
+def _finalize_answer_and_quotes(
+    ans_text: str,
+    raw_quotes: Any,
+    *,
+    tender_text: str,
+    bid_text: str,
+    tender_ctx: Any,
+    bid_ctx: Any,
+    norm_atts: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
+    """对 final 答案附带的引用执行强制 verify_quote 溯源并在缺出处标注时补全定位。"""
+    if not isinstance(raw_quotes, list):
+        raw_quotes = [raw_quotes] if raw_quotes else []
+
+    verified_quotes = _verify_and_locate_quotes(
+        raw_quotes=raw_quotes,
+        tender_text=tender_text,
+        bid_text=bid_text,
+        tender_pages=tender_ctx,
+        bid_pages=bid_ctx,
+        attachments=norm_atts,
+    )
+    valid_locs = []
+    for vq in verified_quotes:
+        if vq.get('quote_verified') and vq.get('quote'):
+            if vq['source'] == 'attachment':
+                src_zh = f"附件《{vq.get('attachment_name') or vq.get('attachment_id') or ''}》"
+            elif vq['source'] == 'tender':
+                src_zh = '招标书'
+            else:
+                src_zh = '投标书'
+            if vq.get('page') is not None:
+                valid_locs.append(f"{src_zh}第 {vq['page']} 页(@字符{vq['offset']})")
+            else:
+                valid_locs.append(f"{src_zh}@字符{vq['offset']}")
+    out_ans = ans_text
+    if valid_locs and '字符' not in out_ans and '页' not in out_ans:
+        out_ans = f"{out_ans}（出处定位：{'；'.join(valid_locs)}）"
+    return out_ans, verified_quotes
+
+
+_FORCED_WRAPUP_PROMPT = (
+    "【系统强制收口指令】已达到最大工具检索轮数上限，严禁再调用 search_tender / search_bid / "
+    "locate_chapter 等任何工具！请立即严格基于上方已经检索到的工具 observation 原文窗口给出最终结论：\n"
+    "1. 如已在招标文件/投标文件中检索到针对本项目的明确条款，直接引用并标明页码/字符偏移；\n"
+    "2. 严禁张冠李戴：务必区分“我方针对本项目的投标响应”与“过往业绩/他人历史合同扫描件（如外部项目合同等）”。"
+    "若投标文件中仅命中其他历史项目文本、未检出针对本项目的对应响应，必须如实向用户说明未检出本项目响应、"
+    "点明命中片段的实际归属，并明确提示存在漏应答/负偏离风险，严禁把历史合同当成我方响应或编造内容；\n"
+    "3. 只输出一个合法 JSON 对象：{\"thought\": \"汇总思考\", \"action\": \"final\", "
+    "\"action_input\": {\"answer\": \"完整解答\", \"quotes\": [{\"source\": \"tender\"|\"bid\"|\"attachment\", \"quote\": \"逐字抄录自工具窗口的原文\"}]}}。"
+)
+
+
 def ask_bid_expert_stream(
     tender_path: str | Path,
     bid_path: str | Path,
@@ -1091,13 +1154,7 @@ def ask_bid_expert_stream(
     norm_effort, limit = _resolve_effort_and_rounds(reasoning_effort, max_rounds, client=client)
 
     for r_idx in range(1, limit + 1):
-        if norm_effort is not None:
-            try:
-                resp = client.chat(messages, model_tier='flash', reasoning_effort=norm_effort)
-            except TypeError:
-                resp = client.chat(messages, model_tier='flash')
-        else:
-            resp = client.chat(messages, model_tier='flash')
+        resp = _call_react_chat(client, messages, norm_effort)
         raw_content = getattr(resp, 'content', '') or ''
         parsed = _parse_llm_json(raw_content)
 
@@ -1152,33 +1209,15 @@ def ask_bid_expert_stream(
             final_payload = action_input if isinstance(action_input, dict) else parsed
             ans_text = str(final_payload.get('answer') or parsed.get('answer') or '').strip()
             raw_quotes = final_payload.get('quotes') if 'quotes' in final_payload else parsed.get('quotes', [])
-            if not isinstance(raw_quotes, list):
-                raw_quotes = [raw_quotes] if raw_quotes else []
-
-            verified_quotes = _verify_and_locate_quotes(
-                raw_quotes=raw_quotes,
+            ans_text, verified_quotes = _finalize_answer_and_quotes(
+                ans_text,
+                raw_quotes,
                 tender_text=tender_text,
                 bid_text=bid_text,
-                tender_pages=tender_ctx,
-                bid_pages=bid_ctx,
-                attachments=norm_atts,
+                tender_ctx=tender_ctx,
+                bid_ctx=bid_ctx,
+                norm_atts=norm_atts,
             )
-
-            valid_locs = []
-            for vq in verified_quotes:
-                if vq.get('quote_verified') and vq.get('quote'):
-                    if vq['source'] == 'attachment':
-                        src_zh = f"附件《{vq.get('attachment_name') or vq.get('attachment_id') or ''}》"
-                    elif vq['source'] == 'tender':
-                        src_zh = '招标书'
-                    else:
-                        src_zh = '投标书'
-                    if vq.get('page') is not None:
-                        valid_locs.append(f"{src_zh}第 {vq['page']} 页(@字符{vq['offset']})")
-                    else:
-                        valid_locs.append(f"{src_zh}@字符{vq['offset']}")
-            if valid_locs and '字符' not in ans_text and '页' not in ans_text:
-                ans_text = f"{ans_text}（出处定位：{'；'.join(valid_locs)}）"
 
             final_step = {
                 'round': r_idx,
@@ -1337,6 +1376,94 @@ def ask_bid_expert_stream(
             'content': f"工具 {action} 返回结果：{json.dumps(observation, ensure_ascii=False)}\n请继续下一步或输出 action='final'。",
         })
 
+    # E32：工具检索轮数耗尽后追加 1 次强制收口 LLM 调用（禁再调工具，基于已有观察作答）
+    wrap_messages = list(messages)
+    wrap_messages.append({'role': 'user', 'content': _FORCED_WRAPUP_PROMPT})
+    try:
+        wrap_resp = _call_react_chat(client, wrap_messages, norm_effort)
+        raw_wrap = getattr(wrap_resp, 'content', '') or ''
+    except Exception:
+        raw_wrap = ''
+
+    wrap_parsed = _parse_llm_json(raw_wrap)
+    if isinstance(wrap_parsed, dict):
+        w_thought = str(wrap_parsed.get('thought') or '').strip()
+        w_action = str(wrap_parsed.get('action') or '').strip()
+        w_input = _coerce_action_input(wrap_parsed.get('action_input'))
+        w_payload = w_input if isinstance(w_input, dict) else wrap_parsed
+        if w_action == 'final' or (
+            w_action not in ALLOWED_REACT_TOOLS
+            and ('answer' in w_payload or 'answer' in wrap_parsed)
+        ):
+            w_ans = str(w_payload.get('answer') or wrap_parsed.get('answer') or '').strip()
+            if w_ans:
+                w_raw_quotes = (
+                    w_payload.get('quotes')
+                    if 'quotes' in w_payload
+                    else wrap_parsed.get('quotes', [])
+                )
+                w_ans, w_quotes = _finalize_answer_and_quotes(
+                    w_ans,
+                    w_raw_quotes,
+                    tender_text=tender_text,
+                    bid_text=bid_text,
+                    tender_ctx=tender_ctx,
+                    bid_ctx=bid_ctx,
+                    norm_atts=norm_atts,
+                )
+                wrap_step = {
+                    'round': limit + 1,
+                    'thought': w_thought or '已达最大检索轮数，强制收口输出最终结论',
+                    'action': 'final',
+                    'action_input': w_payload,
+                    'observation': None,
+                }
+                steps.append(wrap_step)
+                yield {'type': 'step', 'data': wrap_step}
+                for piece in _iter_answer_chunks(w_ans):
+                    yield {'type': 'answer_delta', 'data': {'text': piece}}
+                yield {
+                    'type': 'done',
+                    'data': {
+                        'mode': 'react',
+                        'question': question,
+                        'answer': w_ans,
+                        'quotes': w_quotes,
+                        'steps': steps,
+                        'rounds_used': limit,
+                        'terminated_by_max_rounds': True,
+                        'forced_final': True,
+                    },
+                }
+                return
+    elif raw_wrap.strip() and not _looks_like_unparsed_tool_json(raw_wrap):
+        plain_ans = raw_wrap.strip()
+        wrap_step = {
+            'round': limit + 1,
+            'thought': '已达最大检索轮数，模型以纯文本收口输出结论',
+            'action': 'final',
+            'action_input': {},
+            'observation': None,
+        }
+        steps.append(wrap_step)
+        yield {'type': 'step', 'data': wrap_step}
+        for piece in _iter_answer_chunks(plain_ans):
+            yield {'type': 'answer_delta', 'data': {'text': piece}}
+        yield {
+            'type': 'done',
+            'data': {
+                'mode': 'react',
+                'question': question,
+                'answer': plain_ans,
+                'quotes': collected_tool_quotes,
+                'steps': steps,
+                'rounds_used': limit,
+                'terminated_by_max_rounds': True,
+                'forced_final': True,
+            },
+        }
+        return
+
     fallback_ans = f'已达到最大工具检索轮数上限（{limit}轮），以下为已检索到的原文证据汇总。'
     for piece in _iter_answer_chunks(fallback_ans):
         yield {'type': 'answer_delta', 'data': {'text': piece}}
@@ -1350,6 +1477,7 @@ def ask_bid_expert_stream(
             'steps': steps,
             'rounds_used': limit,
             'terminated_by_max_rounds': True,
+            'forced_final': False,
         },
     }
 

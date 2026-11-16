@@ -109,7 +109,8 @@ vim .env
 | `AUTH_SECRET` | 32 位以上随机字符串 | 可在 Linux 运行 `openssl rand -hex 32` 生成；配合 `DEBUG=0` 使用 |
 | `DEBUG` | `0` | 设为 `0` 时 `backend/auth.py` 会强校验 `AUTH_SECRET`，未改默认值会直接拒绝启动 |
 | `ADMIN_INITIAL_PASSWORD` | 自定义强密码 | 默认是 `BidGuard2026!`，首次建库前务必改成内部管理员初始密码 |
-| `SEED_DEMO_DATA` | **首次 `1`，建库后改 `0`** | **⚠️ 首次部署必保持 `1`**：`SEED_DEMO_DATA=0` 会跳过默认租户与 `admin` 账号初始化，导致空库无账号登录；首次启动登录确认后再改为 `0` 并重建 `app` |
+| `SEED_DEMO_DATA` | **首次 `1`，建库后按需 `0`** | **⚠️ 首次部署必保持 `1`**：`SEED_DEMO_DATA=0` 会跳过默认租户与 `admin` 账号初始化，导致空库无账号登录；首次启动登录确认后可改为 `0` 并重建 `app`（生产三件套之一：按需建库后关闭） |
+| `SHOW_DEMO_LOGIN` | **`0`**（生产必关） | 控制登录页演示账号一键填充区显隐（默认未显式置 `0` 时开启，且仅在 `SEED_DEMO_DATA!=0` 时生效）。`docker-compose.yml` 默认透传 `${SHOW_DEMO_LOGIN:-1}`，生产务必在 `.env` 显式设为 `0`（生产三件套：**`SEED_DEMO_DATA` 按需 + `ADMIN_INITIAL_PASSWORD` 自定义 + `SHOW_DEMO_LOGIN=0`**） |
 | `ENABLE_API_DOCS` | `0` | 关闭 `/docs`、`/redoc` 与 `/openapi.json`，防止接口信息枚举 |
 | `MODEL_ENV` | `prod` | 对应 `config/models.yaml` 内网网关地址（按公司实际地址调整 `config/models.yaml`）；如用各人前端自填 Key，可留默认并在网页端配 |
 | `PRIVATE_API_KEY` | 内网模型密钥 | 与 `MODEL_ENV=prod` 配套使用（也可在网页「私有模型服务配置」按用户单独加密绑定） |

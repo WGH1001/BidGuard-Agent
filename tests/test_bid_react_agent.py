@@ -184,9 +184,11 @@ def test_react_max_rounds_cap_prevents_infinite_loop():
     try:
         client = MockReActLLMClient(_endless_tool_handler)
         res = ask_bid_expert(tender_p, bid_p, '质保期多久？', client=client, max_rounds=6)
-        assert client.calls == 6
+        # E32：达到 max_rounds 后会追加 1 轮强制收口 LLM 调用（本桩持续返 tool 故收口仍记 1 次调用）
+        assert client.calls == 7
         assert res['rounds_used'] == 6
         assert res['terminated_by_max_rounds'] is True
+        assert res['forced_final'] is False
         assert len(res['steps']) == 6
     finally:
         tender_p.unlink(missing_ok=True)

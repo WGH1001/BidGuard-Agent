@@ -18,6 +18,7 @@ interface NavItem {
   label: string
   badge?: string
   group: 'core' | 'asset' | 'system'
+  adminOnly?: boolean
 }
 
 const NAV_ITEMS: NavItem[] = [
@@ -29,13 +30,16 @@ const NAV_ITEMS: NavItem[] = [
   { path: '/qa', label: '标书专家追问', badge: 'F7', group: 'core' },
   { path: '/rules', label: '废标规则与证照底表', group: 'asset' },
   { path: '/reports', label: '封标交付中心与审计', group: 'asset' },
+  { path: '/users', label: '部门与账号管理', group: 'system', adminOnly: true },
   { path: '/model-settings', label: '私有模型服务配置', group: 'system' },
   { path: '/change-password', label: '修改登录密码', group: 'system' },
 ]
 
 const coreNavs = computed(() => NAV_ITEMS.filter((i) => i.group === 'core'))
 const assetNavs = computed(() => NAV_ITEMS.filter((i) => i.group === 'asset'))
-const systemNavs = computed(() => NAV_ITEMS.filter((i) => i.group === 'system'))
+const systemNavs = computed(() =>
+  NAV_ITEMS.filter((i) => i.group === 'system' && (!i.adminOnly || authStore.isAdmin)),
+)
 
 const currentPageTitle = computed(() => (route.meta.title as string) || '防废标体检工作台')
 const roleLabel = computed(() => (authStore.isAdmin ? '系统管理员' : '投标商务专员'))

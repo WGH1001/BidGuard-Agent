@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
+import { authApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 
 defineOptions({ name: 'LoginView' })
@@ -11,9 +12,20 @@ const route = useRoute()
 const authStore = useAuthStore()
 
 const loading = ref(false)
+// Fail-closed：默认隐藏演示账号快捷填充区，仅在服务端 /api/auth/health 明确返回 show_demo_login === true 时展示
+const showDemoLogin = ref(false)
 const form = reactive({
   username: '',
   password: '',
+})
+
+onMounted(async () => {
+  try {
+    const health = await authApi.health()
+    showDemoLogin.value = health?.show_demo_login === true
+  } catch {
+    showDemoLogin.value = false
+  }
 })
 
 interface DemoAccountPreset {
@@ -108,7 +120,13 @@ async function handleLogin(): Promise<void> {
       <div class="vault-card">
         <div class="vault-hd">
           <h2>登录投标防废标工作台</h2>
-          <p>请输入投标部授权账号或点击下方演示账号一键填入</p>
+          <p>
+            {{
+              showDemoLogin
+                ? '请输入投标部授权账号或点击下方演示账号一键填入'
+                : '请输入部门管理员分配的授权账号与安全密码'
+            }}
+          </p>
         </div>
 
         <form class="vault-form" @submit.prevent="handleLogin">
@@ -116,7 +134,7 @@ async function handleLogin(): Promise<void> {
             <label>登录账号 (Username)</label>
             <el-input
               v-model.trim="form.username"
-              placeholder="请输入用户名（如 liming / admin）"
+              :placeholder="showDemoLogin ? '请输入用户名（如 liming / admin）' : '请输入登录账号'"
               size="large"
             />
           </div>
@@ -144,8 +162,8 @@ async function handleLogin(): Promise<void> {
           </el-button>
         </form>
 
-        <!-- 预置演示账号一键填充区 -->
-        <div class="demo-preset-zone">
+        <!-- 预置演示账号一键填充区（仅 SHOW_DEMO_LOGIN=1 且 SEED_DEMO_DATA!=0 时显示） -->
+        <div v-if="showDemoLogin" class="demo-preset-zone">
           <div class="dp-title">预置种子账号（点击一键填充账号与密码）</div>
           <div class="dp-list">
             <div

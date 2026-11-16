@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from backend.auth import AuthUser, get_current_user, record_audit
+from backend.auth import AuthUser, get_current_user, record_audit, resolve_show_demo_login
 import backend.database as db_mod
 from backend.database import PROJECT_ROOT, get_db, init_db
 from backend.models import BidCheckTask, ensure_bid_check_tasks_columns
@@ -200,7 +200,12 @@ def create_app(
 
     @app.get('/api/health', response_model=HealthOut)
     def root_health() -> HealthOut:
-        return HealthOut(status='ok', service='bidguard-agent', version='1.0.0')
+        return HealthOut(
+            status='ok',
+            service='bidguard-agent',
+            version='1.0.0',
+            show_demo_login=resolve_show_demo_login(),
+        )
 
     @app.get('/api/files/{file_path:path}')
     def download_stored_file(

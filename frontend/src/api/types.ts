@@ -30,6 +30,7 @@ export interface UserProfileOut {
   display_name: string
   role: UserRole
   tenant_id: number | null
+  tenant_name?: string | null
   is_active: boolean
 }
 
@@ -52,6 +53,49 @@ export interface HealthOut {
   status: string
   service: string
   version: string
+  show_demo_login?: boolean
+}
+
+export interface TenantOut {
+  id: number
+  name: string
+  is_active: boolean
+  created_at?: string | null
+}
+
+export interface TenantCreateRequest {
+  name: string
+}
+
+export interface AdminUserOut {
+  id: number
+  username: string
+  display_name: string
+  role: UserRole
+  tenant_id: number
+  tenant_name: string
+  is_active: boolean
+  last_login_at?: string | null
+  created_at?: string | null
+}
+
+export interface AdminUserCreateRequest {
+  username: string
+  password: string
+  display_name?: string
+  role?: UserRole
+  tenant_id: number
+}
+
+export interface AdminUserUpdateRequest {
+  display_name?: string
+  role?: UserRole
+  tenant_id?: number
+  is_active?: boolean
+}
+
+export interface AdminUserResetPasswordRequest {
+  new_password: string
 }
 
 // ── 2. 防废标体检任务与发现明细 (/api/checks) ───────────────────────────

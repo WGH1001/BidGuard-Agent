@@ -39,6 +39,7 @@ class UserProfileOut(BaseModel):
     display_name: str = ''
     role: str
     tenant_id: Optional[int] = None
+    tenant_name: Optional[str] = None
     is_active: bool = True
 
 
@@ -56,6 +57,49 @@ class HealthOut(BaseModel):
     status: str = 'ok'
     service: str = 'bidguard-agent'
     version: str = '1.0.0'
+    show_demo_login: bool = False
+
+
+class TenantOut(BaseModel):
+    id: int
+    name: str
+    is_active: bool = True
+    created_at: Optional[str] = None
+
+
+class TenantCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+
+
+class AdminUserOut(BaseModel):
+    id: int
+    username: str
+    display_name: str = ''
+    role: str
+    tenant_id: int
+    tenant_name: str = ''
+    is_active: bool = True
+    last_login_at: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class AdminUserCreateRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+    display_name: str = Field(default='', max_length=128)
+    role: str = 'member'
+    tenant_id: int
+
+
+class AdminUserUpdateRequest(BaseModel):
+    display_name: Optional[str] = Field(default=None, max_length=128)
+    role: Optional[str] = None
+    tenant_id: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+class AdminUserResetPasswordRequest(BaseModel):
+    new_password: str = Field(min_length=1, max_length=128)
 
 
 # ── 2. /api/dashboard 契约 ───────────────────────────────────────────────

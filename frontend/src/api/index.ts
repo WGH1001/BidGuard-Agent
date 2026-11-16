@@ -1,6 +1,10 @@
 import { del, get, getStoredToken, patch, post, put } from './http'
 import { downloadFromApi } from './download'
 import type {
+  AdminUserCreateRequest,
+  AdminUserOut,
+  AdminUserResetPasswordRequest,
+  AdminUserUpdateRequest,
   AuditLogListOut,
   BatchDeliverZipOut,
   BidFindingOut,
@@ -41,6 +45,8 @@ import type {
   RegulationLawDetailOut,
   RegulationLawOut,
   RunTaskTriggerOut,
+  TenantCreateRequest,
+  TenantOut,
   UserProfileOut,
   VerifyArticleOut,
   QaAttachmentOut,
@@ -116,6 +122,27 @@ export const authApi = {
   },
   changePassword(payload: ChangePasswordRequest): Promise<OkResponse> {
     return post<OkResponse>('/auth/change_password', payload)
+  },
+  listTenants(): Promise<TenantOut[]> {
+    return get<TenantOut[]>('/auth/tenants')
+  },
+  createTenant(payload: TenantCreateRequest): Promise<TenantOut> {
+    return post<TenantOut>('/auth/tenants', payload)
+  },
+  listUsers(tenantId?: number): Promise<AdminUserOut[]> {
+    return get<AdminUserOut[]>(
+      '/auth/users',
+      tenantId !== undefined ? { params: { tenant_id: tenantId } } : undefined,
+    )
+  },
+  createUser(payload: AdminUserCreateRequest): Promise<AdminUserOut> {
+    return post<AdminUserOut>('/auth/users', payload)
+  },
+  updateUser(userId: number, payload: AdminUserUpdateRequest): Promise<AdminUserOut> {
+    return patch<AdminUserOut>(`/auth/users/${userId}`, payload)
+  },
+  resetUserPassword(userId: number, payload: AdminUserResetPasswordRequest): Promise<OkResponse> {
+    return post<OkResponse>(`/auth/users/${userId}/reset-password`, payload)
   },
 }
 

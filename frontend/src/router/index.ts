@@ -12,6 +12,7 @@ import RulesAndCertsView from '@/views/RulesAndCertsView.vue'
 import ReportsAndAuditView from '@/views/ReportsAndAuditView.vue'
 import ChangePasswordView from '@/views/ChangePasswordView.vue'
 import ModelSettingsView from '@/views/ModelSettingsView.vue'
+import UsersManageView from '@/views/UsersManageView.vue'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -105,6 +106,12 @@ const routes: RouteRecordRaw[] = [
     component: ChangePasswordView,
     meta: { title: '修改账户密码', group: '系统与安全' },
   },
+  {
+    path: '/users',
+    name: 'users',
+    component: UsersManageView,
+    meta: { title: '部门与账号管理', group: '系统与安全', requiresAdmin: true },
+  },
 ]
 
 const router = createRouter({
@@ -124,6 +131,10 @@ router.beforeEach((to) => {
 
   if (!authStore.isAuthenticated) {
     return { path: '/login', query: { redirect: to.fullPath } }
+  }
+
+  if (to.meta.requiresAdmin && !authStore.isAdmin) {
+    return { path: '/dashboard' }
   }
 
   return true
