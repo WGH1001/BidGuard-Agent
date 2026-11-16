@@ -31,6 +31,9 @@ const queueTotal = ref(0)
 const queueDone = ref(0)
 const currentExtractingName = ref('')
 
+let extractAbortController: AbortController | null = null
+let extractStopRequested = false
+
 interface ExtractHistoryItem {
   id: string
   createdAt: string
@@ -260,27 +263,33 @@ async function handleRunExtract(): Promise<void> {
   loading.value = true
   queueTotal.value = pendingFiles.value.length
   queueDone.value = 0
+  extractStopRequested = false
   let successCount = 0
 
   try {
-    while (pendingFiles.value.length > 0) {
+    while (pendingFiles.value.length > 0 && !extractStopRequested) {
       const nextFile = pendingFiles.value[0]
       if (!nextFile) break
       currentExtractingName.value = nextFile.name
+      extractAbortController = new AbortController()
       try {
-        const extracted = await extractApi.extract(nextFile)
+        const extracted = await extractApi.extract(nextFile, extractAbortController.signal)
         result.value = extracted
         saveToSessionStorage(extracted)
         pushToHistory(extracted)
         successCount += 1
       } catch {
+        if (extractStopRequested) {
+          break
+        }
         // 单文件失败由全局拦截器提示，继续队列后续文件
       } finally {
+        extractAbortController = null
         pendingFiles.value.shift()
         queueDone.value += 1
       }
     }
-    if (successCount > 0) {
+    if (successCount > 0 && !extractStopRequested) {
       ElMessage.success(
         successCount === 1
           ? `成功提取「${result.value?.filename}」四张必审红线清单`
@@ -288,9 +297,19 @@ async function handleRunExtract(): Promise<void> {
       )
     }
   } finally {
+    extractAbortController = null
     loading.value = false
     currentExtractingName.value = ''
   }
+}
+
+function handleCancelExtract(): void {
+  extractStopRequested = true
+  pendingFiles.value = []
+  extractAbortController?.abort()
+  loading.value = false
+  currentExtractingName.value = ''
+  ElMessage.info('已取消当前提取并清空待提取队列')
 }
 
 /**
@@ -487,6 +506,15 @@ onBeforeUnmount(() => {
               ? `正在提取 (${queueDone + 1}/${queueTotal})…`
               : `立即提取四张清单${pendingFiles.length > 0 ? ` (${pendingFiles.length})` : ''}`
           }}
+        </el-button>
+        <el-button
+          v-if="loading"
+          type="danger"
+          size="large"
+          plain
+          @click="handleCancelExtract"
+        >
+          ⏹ 取消提取
         </el-button>
       </div>
 

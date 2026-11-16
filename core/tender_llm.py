@@ -18,7 +18,7 @@ from datetime import date
 import json
 import os
 import re
-from typing import Optional
+from typing import Callable, Optional
 
 from core.llm_gateway import get_llm_client
 from core.quote_verifier import verify_quote
@@ -127,6 +127,7 @@ def extract_tender_with_llm(
     env: Optional[str] = None,
     *,
     open_date_fallback: bool = False,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> dict:
     """F1 主入口：确定性层圈选 → LLM 逐段结构化。
 
@@ -176,10 +177,19 @@ def extract_tender_with_llm(
 
     full_text = _get_full_text()
 
+    candidates = reqs + wording
+    total_cands = len(candidates)
+    if progress_cb is not None and total_cands > 0:
+        progress_cb(0, total_cands)
+
     structured = []
-    for cand in reqs + wording:
+    for idx, cand in enumerate(candidates, start=1):
+        if progress_cb is not None and idx > 1:
+            progress_cb(idx - 1, total_cands)
         window = _expand_window(full_text, cand['start'], cand['end'])
         structured.append(structure_candidate(window, cand, client))
+        if progress_cb is not None:
+            progress_cb(idx, total_cands)
 
     extra_calls = 0
     if open_date_fallback and not result.get('open_date'):

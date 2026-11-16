@@ -85,6 +85,7 @@ function startBackgroundPolling(targetTaskId: number): void {
         progress: t.progress,
         stage_detail: t.stage_detail || undefined,
         started_at: (t as { started_at?: string | null }).started_at ?? null,
+        updated_at: t.updated_at ?? null,
       })
 
       if (t.status === 'delivered' || t.status === 'need_manual') {
@@ -165,6 +166,7 @@ function startStream(resetZero = true): void {
         streamExhaustedForTask.value = props.taskId
         localStatus.value = 'failed'
         const msg = errOrFrame.error_msg || '核验流水线异常中断'
+        localDetail.value = errOrFrame.stage_detail || msg
         localError.value = msg
         emit('error', msg)
       } else {

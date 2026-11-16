@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from core.bid_aligner import compare_contracts, _build_clause_units
 from core.hybrid_retriever import hybrid_retrieve_windows
@@ -1131,6 +1131,7 @@ def check_star_responses(
     tender_path: Optional[str | Path] = None,
     bid_path: Optional[str | Path] = None,
     bid_media_ocr_spans: Optional[list[dict[str, int]]] = None,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> dict[str, Any]:
     """执行招标 ★/▲ 要求 ↔ 投标响应逐条勾稽核验（公共签名与返回结构保持一字不变，E19 升级双阶段并发）。"""
     if requirements is None:
@@ -1158,6 +1159,8 @@ def check_star_responses(
 
     # ── 阶段 A（按原序串行预定位，严禁进线程池，保护 hybrid 向量缓存 np.load/np.save）──
     for idx, req in enumerate(valid_reqs, start=1):
+        if progress_cb is not None:
+            progress_cb(0, len(valid_reqs))
         expanded_req_text, r_start, r_end = _expand_req_text(tender_text, req)
         t_lo = max(0, r_start - _REQ_EXPAND_BEFORE)
         t_hi = min(len(tender_text), r_end + _REQ_EXPAND_AFTER) if tender_text else r_end
@@ -1397,17 +1400,26 @@ def check_star_responses(
         except ValueError:
             raw_conc = 4
         max_workers = max(1, min(raw_conc, len(llm_tasks)))
+        total_llm = len(llm_tasks)
+        if progress_cb is not None:
+            progress_cb(0, total_llm)
 
         if max_workers == 1:
-            for t_ctx in llm_tasks:
+            for done_i, t_ctx in enumerate(llm_tasks, start=1):
+                if progress_cb is not None:
+                    progress_cb(done_i - 1, total_llm)
                 r_idx, rec_out, f_out = _evaluate_single_llm_req(
                     t_ctx, tender_text, bid_text, bid_ctx, client
                 )
                 results_by_idx[r_idx] = rec_out
                 if f_out is not None:
                     findings_by_idx[r_idx] = f_out
+                if progress_cb is not None:
+                    progress_cb(done_i, total_llm)
         else:
-            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='f4_llm') as pool:
+            pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='f4_llm')
+            cancelled_exc = False
+            try:
                 futures = [
                     pool.submit(
                         _evaluate_single_llm_req,
@@ -1419,11 +1431,22 @@ def check_star_responses(
                     )
                     for t_ctx in llm_tasks
                 ]
-                for fut in futures:
+                done_i = 0
+                for fut in as_completed(futures):
                     r_idx, rec_out, f_out = fut.result()
                     results_by_idx[r_idx] = rec_out
                     if f_out is not None:
                         findings_by_idx[r_idx] = f_out
+                    done_i += 1
+                    if progress_cb is not None:
+                        progress_cb(done_i, total_llm)
+            except BaseException:
+                cancelled_exc = True
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            finally:
+                if not cancelled_exc:
+                    pool.shutdown(wait=True, cancel_futures=False)
 
     total_reqs = len(valid_reqs)
     results: list[dict] = [results_by_idx[i] for i in range(1, total_reqs + 1) if i in results_by_idx]
@@ -1508,6 +1531,7 @@ def run_response_check(
     *,
     tender_parsed_doc: Any = None,
     bid_parsed_doc: Any = None,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> dict[str, Any]:
     """F4 端到端主入口：双书 ★/▲ 条款逐条响应核验 + 投标书内部前后矛盾检测。"""
     tender_doc = tender_parsed_doc if tender_parsed_doc is not None else parse_document(str(tender_path))
@@ -1526,6 +1550,7 @@ def run_response_check(
         tender_path=tender_path,
         bid_path=bid_path,
         bid_media_ocr_spans=bid_media_spans,
+        progress_cb=progress_cb,
     )
 
     internal_contradictions = check_bid_self_contradictions(

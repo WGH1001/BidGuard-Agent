@@ -29,7 +29,7 @@ from backend.schemas import (
     PriceManualBackfillRequest,
     RunTaskTriggerOut,
 )
-from backend.worker import _cleanup_task_deviation_artifacts, get_worker
+from backend.worker import _cleanup_task_deviation_artifacts, _utc_now, get_worker
 from core.price_sandbox import PriceSandbox
 
 router = APIRouter(prefix='/api/checks', tags=['checks'])
@@ -339,6 +339,68 @@ def trigger_check_pipeline(
     )
 
 
+@router.post('/{task_id}/cancel', response_model=OkResponse)
+def cancel_check_task(
+    task_id: int,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> OkResponse:
+    """E30：协作式中断运行中核验流水线（含控标雷达），置 failed('用户中断') 并清理半程产物。"""
+    tenant_id = int(current_user.tenant_id)
+    task = _get_tenant_task_or_404(db, task_id, tenant_id)
+    worker = get_worker()
+
+    is_running = (
+        task.status in ('extracting', 'checking', 'grading')
+        or task_id in worker._in_flight
+    )
+    if not is_running:
+        raise HTTPException(
+            status_code=409,
+            detail={'code': 'TASK_NOT_RUNNING', 'message': '当前任务不在运行中，无需中断'},
+        )
+
+    worker.request_cancel(task_id)
+    now_utc = _utc_now()
+    db.query(BidFinding).filter_by(task_id=task_id).delete(synchronize_session=False)
+    task.status = 'failed'
+    task.stage_detail = '用户中断'
+    task.error_msg = '用户中断'
+    task.stats_json = None
+    if task.started_at is None:
+        task.started_at = now_utc
+    task.finished_at = now_utc
+    task.updated_at = now_utc
+    cfg = dict(task.config_json or {})
+    cfg['cancelled_by_user'] = True
+    task.config_json = cfg
+    db.commit()
+
+    _cleanup_task_deviation_artifacts(task_id)
+    worker.broadcaster.publish(
+        task_id,
+        'error',
+        {
+            'task_id': task_id,
+            'status': 'failed',
+            'stage_detail': '用户中断',
+            'error_msg': '用户中断',
+            'finished_at': now_utc.isoformat(),
+            'updated_at': now_utc.isoformat(),
+        },
+    )
+
+    record_audit(
+        db,
+        action='cancel_check_task',
+        tenant_id=tenant_id,
+        user_id=current_user.get('id'),
+        target=f"task:{task_id}",
+        detail_json={'previous_status': 'running'},
+    )
+    return OkResponse(ok=True, message=f"任务 #{task_id} 已发送中断指令")
+
+
 @router.get('/{task_id}/stream')
 def stream_check_progress(
     task_id: int,
@@ -354,6 +416,7 @@ def stream_check_progress(
     init_stats = task.stats_json or {}
     init_err = task.error_msg or ''
     init_started_at = task.started_at.isoformat() if getattr(task, 'started_at', None) else None
+    init_updated_at = task.updated_at.isoformat() if getattr(task, 'updated_at', None) else init_started_at
 
     # 连接池防耗尽（生产实锤：SSE 流存活整段任务期，yield 依赖的 db 会话要等响应结束才释放，
     # 每条 SSE 流白占 1 个池连接；3 条流水线 + 前端多页签并发即打满 QueuePool）。
@@ -389,6 +452,7 @@ def stream_check_progress(
                     'progress': init_progress,
                     'stage_detail': init_detail,
                     'started_at': init_started_at,
+                    'updated_at': init_updated_at,
                 },
                 ensure_ascii=False,
             )
@@ -604,10 +668,12 @@ def delete_check_task(
     task = _get_tenant_task_or_404(db, task_id, tenant_id)
 
     worker = get_worker()
-    if task.status in ('extracting', 'checking', 'grading') or task_id in worker._in_flight:
+    if task.status in ('extracting', 'checking', 'grading') or (
+        task_id in worker._in_flight and not worker.is_cancel_requested(task_id)
+    ):
         raise HTTPException(
             status_code=409,
-            detail={'code': 'TASK_RUNNING', 'message': '任务正在运行中，请先等待完成或取消'},
+            detail={'code': 'TASK_RUNNING', 'message': '运行中任务请先中断后再删除'},
         )
 
     db.query(QaSession).filter_by(task_id=task_id).delete(synchronize_session=False)

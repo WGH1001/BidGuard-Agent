@@ -62,6 +62,14 @@ from core.tender_extractor import (
 from core.tender_llm import extract_open_date_fallback_with_llm, extract_tender_with_llm
 
 DEFAULT_FALLBACK_OPEN_DATE = '2026-11-05'
+_DEFAULT_F1_HEARTBEAT_SEC = 5.0
+
+
+class _PipelineCancelled(BaseException):
+    """协作式取消异常：继承 BaseException 以穿透内部降级 except Exception 块，杜绝静默降级产出半残报告。"""
+
+
+PipelineCancelled = _PipelineCancelled
 
 
 # E15 §2.3：报价相关章节锚点词（用于定位投标书中的报价表区域中心偏移）
@@ -441,12 +449,62 @@ class BidTaskWorker:
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='bidguard_worker')
         self._lock = threading.Condition(threading.Lock())
         self._in_flight: set[int] = set()
+        self._cancel_flags: dict[int, threading.Event] = {}
+        self._f1_heartbeat_interval_sec: float = _DEFAULT_F1_HEARTBEAT_SEC
         self._shutdown = False
 
+    def register_task_execution(self, task_id: int) -> threading.Event:
+        """为指定任务注册本次运行的取消信号并标记在途。"""
+        tid = int(task_id)
+        with self._lock:
+            ev = threading.Event()
+            self._cancel_flags[tid] = ev
+            self._in_flight.add(tid)
+            return ev
+
+    def unregister_task_execution(self, task_id: int, ev: Optional[threading.Event] = None) -> None:
+        """任务退出时清理本次运行态（比对 Event 实例防旧线程误删新一轮重跑令牌）。"""
+        tid = int(task_id)
+        with self._lock:
+            cur_ev = self._cancel_flags.get(tid)
+            if ev is None or cur_ev is ev or cur_ev is None:
+                self._cancel_flags.pop(tid, None)
+                self._in_flight.discard(tid)
+                self._lock.notify_all()
+
+    def request_cancel(self, task_id: int) -> bool:
+        """向在途任务发出协作式中断请求，返回是否命中活跃或注册中任务。"""
+        tid = int(task_id)
+        with self._lock:
+            ev = self._cancel_flags.get(tid)
+            if ev is not None:
+                ev.set()
+                return True
+            if tid in self._in_flight:
+                ev = threading.Event()
+                ev.set()
+                self._cancel_flags[tid] = ev
+                return True
+            return False
+
+    def is_cancel_requested(self, task_id: int) -> bool:
+        tid = int(task_id)
+        with self._lock:
+            ev = self._cancel_flags.get(tid)
+            return bool(ev is not None and ev.is_set())
+
+    def check_cancelled(self, task_id: int, ev: Optional[threading.Event] = None) -> None:
+        """协作式取消检查点：命中即抛出 _PipelineCancelled(BaseException)。"""
+        if ev is not None and ev.is_set():
+            raise _PipelineCancelled('用户中断')
+        if self.is_cancel_requested(task_id):
+            raise _PipelineCancelled('用户中断')
+
     def _reset_task_for_rerun(self, task_id: int) -> None:
-        """E3R 实锤 B + E11 + E25：启动/重跑任务前，同步清除 SSE 上一轮终态帧、清理旧偏离表缓存、清空旧耗时字段并将 DB 状态置为 extracting(progress=0)。"""
+        """E3R 实锤 B + E11 + E25 + E30：启动/重跑前清 SSE 终态缓存、清旧偏离表、置空旧 stats_json 并置 extracting(progress=0)。"""
         self.broadcaster.clear(task_id)
         _cleanup_task_deviation_artifacts(task_id)
+        reset_utc = _utc_now()
         session: Session = self.session_factory()
         try:
             ensure_bid_check_tasks_columns(session.get_bind())
@@ -456,10 +514,15 @@ class BidTaskWorker:
                 task.progress = 0
                 task.stage_detail = '正在启动新一轮防废标核验流水线…'
                 task.error_msg = None
+                task.stats_json = None
                 task.started_at = None
                 task.finished_at = None
                 task.duration_json = None
-                task.updated_at = _utc_now()
+                task.updated_at = reset_utc
+                if isinstance(task.config_json, dict) and task.config_json.get('cancelled_by_user'):
+                    cfg_copy = dict(task.config_json)
+                    cfg_copy.pop('cancelled_by_user', None)
+                    task.config_json = cfg_copy
                 session.commit()
         except Exception:
             session.rollback()
@@ -474,47 +537,53 @@ class BidTaskWorker:
                 'status': 'extracting',
                 'progress': 0,
                 'stage_detail': '正在启动新一轮防废标核验流水线…',
+                'updated_at': reset_utc.isoformat(),
             },
         )
 
     def submit_check_task(self, task_id: int, sync: bool = False) -> None:
         tid = int(task_id)
         if sync:
+            ev = self.register_task_execution(tid)
             self._reset_task_for_rerun(tid)
-            self._run_pipeline(tid)
+            self._run_pipeline(tid, cancel_ev=ev)
             return
         with self._lock:
-            if self._shutdown or tid in self._in_flight:
+            if self._shutdown or (tid in self._in_flight and not self.is_cancel_requested(tid)):
                 return
+            ev = threading.Event()
+            self._cancel_flags[tid] = ev
             self._in_flight.add(tid)
 
         self._reset_task_for_rerun(tid)
 
         try:
-            self._executor.submit(self._run_pipeline, tid)
+            self._executor.submit(self._run_pipeline, tid, ev)
         except Exception:
-            with self._lock:
-                self._in_flight.discard(tid)
-                self._lock.notify_all()
+            self.unregister_task_execution(tid, ev)
             raise
 
     def _emit_stage(self, session: Session, task: BidCheckTask, status: str, progress: int, detail: str) -> None:
+        now_utc = _utc_now()
         task.status = status
         task.progress = int(progress)
         task.stage_detail = detail
-        task.updated_at = _utc_now()
+        task.updated_at = now_utc
         session.commit()
         frame_data: dict[str, Any] = {
             'task_id': task.id,
             'status': status,
             'progress': int(progress),
             'stage_detail': detail,
+            'updated_at': now_utc.isoformat(),
         }
         if task.started_at is not None:
             frame_data['started_at'] = task.started_at.isoformat()
         self.broadcaster.publish(task.id, 'progress', frame_data)
 
-    def _run_pipeline(self, task_id: int) -> None:
+    def _run_pipeline(self, task_id: int, cancel_ev: Optional[threading.Event] = None) -> None:
+        if cancel_ev is None:
+            cancel_ev = self.register_task_execution(task_id)
         session: Session = self.session_factory()
         pipeline_t0 = time.perf_counter()
         duration_record: dict[str, Optional[int]] = {
@@ -527,6 +596,7 @@ class BidTaskWorker:
             'total_ms': None,
         }
         try:
+            self.check_cancelled(task_id, cancel_ev)
             ensure_bid_check_tasks_columns(session.get_bind())
             task = session.query(BidCheckTask).filter_by(id=task_id).first()
             if task is None:
@@ -583,16 +653,48 @@ class BidTaskWorker:
             )
 
             # ── 阶段 1：extracting（F1 招标红线与 ★/▲ 条款提取 + E15/E23 开标日期自动识别回填）──
+            self.check_cancelled(task_id, cancel_ev)
             self._emit_stage(session, task, 'extracting', 20, 'F1 正在提取招标文件废标红线与 ★/▲ 实质性条款')
             t_f1 = time.perf_counter()
+            last_f1_emit = [0.0]
+
+            def _on_f1_clause_progress(done_cnt: int, total_cnt: int) -> None:
+                self.check_cancelled(task_id, cancel_ev)
+                if total_cnt <= 0 or done_cnt <= 0:
+                    return
+                now_ts = time.perf_counter()
+                if (
+                    done_cnt < total_cnt
+                    and last_f1_emit[0] > 0.0
+                    and (now_ts - last_f1_emit[0]) < self._f1_heartbeat_interval_sec
+                ):
+                    return
+                last_f1_emit[0] = now_ts
+                self._emit_stage(
+                    session,
+                    task,
+                    'extracting',
+                    20,
+                    f"F1 正在逐条判定废标红线与实质性条款（已判定 {done_cnt} / {total_cnt} 条）",
+                )
+
             if client is not None:
                 try:
-                    f1_res = extract_tender_with_llm(str(tender_abs), client=client)
+                    f1_res = extract_tender_with_llm(
+                        str(tender_abs),
+                        client=client,
+                        progress_cb=_on_f1_clause_progress,
+                    )
+                except _PipelineCancelled:
+                    raise
                 except Exception:
+                    self.check_cancelled(task_id, cancel_ev)
                     f1_res = build_review_checklist(str(tender_abs))
                     llm_status = 'skipped'
             else:
                 f1_res = build_review_checklist(str(tender_abs))
+
+            self.check_cancelled(task_id, cancel_ev)
 
             marked_clauses = list(f1_res.get('marked_clauses') or [])
             invalid_bid_clauses = list(f1_res.get('invalid_bid_clauses') or [])
@@ -703,6 +805,7 @@ class BidTaskWorker:
             duration_record['f1_ms'] = max(0, int(round((time.perf_counter() - t_f1) * 1000)))
 
             # ── 阶段 1.5：投标书全文与内嵌扫描图预解析（冷 OCR 耗时独立归属 f_parse_ms，F2/F3/F4 共享缓存）──
+            self.check_cancelled(task_id, cancel_ev)
             self._emit_stage(
                 session,
                 task,
@@ -718,6 +821,7 @@ class BidTaskWorker:
             flush_step = 5 if is_bid_pdf else 10
 
             def _on_bid_ocr_progress(done_items: int, total_items: int, _cached_hits: int) -> None:
+                self.check_cancelled(task_id, cancel_ev)
                 if total_items <= 0:
                     if _cached_hits > 0:
                         self._emit_stage(
@@ -755,6 +859,7 @@ class BidTaskWorker:
             duration_record['f_parse_ms'] = max(0, int(round((time.perf_counter() - t_parse) * 1000)))
 
             # ── 阶段 2：checking（F2 报价沙盒 + F3 证照/串名 + F4 双书逐条响应核验）──
+            self.check_cancelled(task_id, cancel_ev)
             self._emit_stage(session, task, 'checking', 55, 'F2/F3/F4 正在并行执行报价算术、证照效期与 ★/▲ 条款逐条核验')
 
             t_f2 = time.perf_counter()
@@ -767,6 +872,7 @@ class BidTaskWorker:
             )
             duration_record['f2_ms'] = max(0, int(round((time.perf_counter() - t_f2) * 1000)))
 
+            self.check_cancelled(task_id, cancel_ev)
             t_f3 = time.perf_counter()
             # E15 §2.1：一次性构建投标书统一双轨页码上下文（直接复用 response_checker 单一事实源，自动适配 pdf/docx）
             bid_page_ctx = _build_unified_page_context(bid_abs)
@@ -801,7 +907,12 @@ class BidTaskWorker:
                 })
             duration_record['f3_ms'] = max(0, int(round((time.perf_counter() - t_f3) * 1000)))
 
+            self.check_cancelled(task_id, cancel_ev)
             t_f4 = time.perf_counter()
+
+            def _on_f4_progress(done_cnt: int, total_cnt: int) -> None:
+                self.check_cancelled(task_id, cancel_ev)
+
             f4_res = run_response_check(
                 tender_path=tender_abs,
                 bid_path=bid_abs,
@@ -809,10 +920,12 @@ class BidTaskWorker:
                 client=client,
                 tender_parsed_doc=tender_parsed,
                 bid_parsed_doc=bid_parsed,
+                progress_cb=_on_f4_progress,
             )
             duration_record['f4_ms'] = max(0, int(round((time.perf_counter() - t_f4) * 1000)))
 
             # ── 阶段 3：grading（风险分级汇总与自定义红线扫描）──
+            self.check_cancelled(task_id, cancel_ev)
             self._emit_stage(session, task, 'grading', 85, '正在汇总一票否决废标项与扣分项分级')
             t_grading = time.perf_counter()
 
@@ -1057,6 +1170,7 @@ class BidTaskWorker:
             }
 
             # E27 补强：F4 完成后零 LLM 预生成 F5 偏离表与统计快照，确保点进 F5 与交付打包秒开
+            self.check_cancelled(task_id, cancel_ev)
             try:
                 build_and_cache_deviation_artifacts(
                     task_id=task.id,
@@ -1070,6 +1184,7 @@ class BidTaskWorker:
                 _logger.warning("Task %s F5 偏离表预生成跳过（回退按需生成）: %s", task.id, dev_exc)
 
             # ── 阶段 4：delivered（核验完成）──
+            self.check_cancelled(task_id, cancel_ev)
             finished_utc = _utc_now()
             if task.started_at is not None and finished_utc < task.started_at:
                 finished_utc = task.started_at
@@ -1093,6 +1208,53 @@ class BidTaskWorker:
                     'stats': stats_payload,
                     'started_at': task.started_at.isoformat() if task.started_at else None,
                     'finished_at': finished_utc.isoformat(),
+                    'updated_at': finished_utc.isoformat(),
+                    'duration': duration_record,
+                },
+            )
+        except _PipelineCancelled:
+            session.rollback()
+            with self._lock:
+                is_latest_run = self._cancel_flags.get(task_id) is cancel_ev
+            if not is_latest_run:
+                return
+            _cleanup_task_deviation_artifacts(task_id)
+            stage_sum_ms = sum(
+                v for k, v in duration_record.items() if k != 'total_ms' and isinstance(v, int)
+            )
+            duration_record['total_ms'] = max(stage_sum_ms, int(round((time.perf_counter() - pipeline_t0) * 1000)))
+            finished_utc = _utc_now()
+            try:
+                session.query(BidFinding).filter_by(task_id=task_id).delete(synchronize_session=False)
+                task = session.query(BidCheckTask).filter_by(id=task_id).first()
+                if task is not None:
+                    if task.started_at is None:
+                        task.started_at = finished_utc
+                    elif finished_utc < task.started_at:
+                        finished_utc = task.started_at
+                    task.status = 'failed'
+                    task.error_msg = '用户中断'
+                    task.stage_detail = '用户中断'
+                    task.stats_json = None
+                    task.finished_at = finished_utc
+                    task.duration_json = json.dumps(duration_record, ensure_ascii=False)
+                    task.updated_at = finished_utc
+                    cfg = dict(task.config_json or {})
+                    cfg['cancelled_by_user'] = True
+                    task.config_json = cfg
+                    session.commit()
+            except Exception:
+                session.rollback()
+            self.broadcaster.publish(
+                task_id,
+                'error',
+                {
+                    'task_id': task_id,
+                    'status': 'failed',
+                    'stage_detail': '用户中断',
+                    'error_msg': '用户中断',
+                    'finished_at': finished_utc.isoformat(),
+                    'updated_at': finished_utc.isoformat(),
                     'duration': duration_record,
                 },
             )
@@ -1128,14 +1290,13 @@ class BidTaskWorker:
                     'status': 'failed',
                     'error_msg': err_msg,
                     'finished_at': finished_utc.isoformat(),
+                    'updated_at': finished_utc.isoformat(),
                     'duration': duration_record,
                 },
             )
         finally:
             session.close()
-            with self._lock:
-                self._in_flight.discard(task_id)
-                self._lock.notify_all()
+            self.unregister_task_execution(task_id, cancel_ev)
 
     def wait_all(self, timeout: float = 30.0) -> bool:
         deadline = time.monotonic() + float(timeout)

@@ -659,6 +659,7 @@ export interface SSEProgressFrame {
   stats?: BidTaskStats
   error_msg?: string
   started_at?: string | null
+  updated_at?: string | null
 }
 
 // ── 12. E4 招投标法规库与法条三态真伪核验 (/api/regulations) ─────────────

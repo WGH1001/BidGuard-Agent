@@ -56,6 +56,9 @@ http.interceptors.request.use(
 http.interceptors.response.use(
   (response: AxiosResponse) => response,
   (error) => {
+    if (axios.isCancel(error) || error?.code === 'ERR_CANCELED' || error?.name === 'CanceledError') {
+      return Promise.reject(error)
+    }
     const status = error?.response?.status as number | undefined
     const data = error?.response?.data as
       | { detail?: { code?: string; message?: string } | string }

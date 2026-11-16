@@ -165,6 +165,9 @@ export const checksApi = {
       params: { sync },
     })
   },
+  cancel(taskId: number): Promise<OkResponse> {
+    return post<OkResponse>(`/checks/${taskId}/cancel`)
+  },
   findings(
     taskId: number,
     params?: { source_module?: string; severity?: string },
@@ -190,12 +193,13 @@ export const checksApi = {
 }
 
 export const extractApi = {
-  extract(file: File): Promise<ExtractChecklistOut> {
+  extract(file: File, signal?: AbortSignal): Promise<ExtractChecklistOut> {
     const fd = new FormData()
     fd.append('file', file, file.name)
     return post<ExtractChecklistOut>('/extract', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 600000, // E19：F1 大标书 LLM 结构化提取单独放宽至 10 分钟（600000ms），其余 API 保持 3 分钟
+      signal,
     })
   },
 }
@@ -218,7 +222,7 @@ export const deviationApi = {
 }
 
 export const radarApi = {
-  scan(tenderFile: File, title?: string): Promise<RadarScanOut> {
+  scan(tenderFile: File, title?: string, signal?: AbortSignal): Promise<RadarScanOut> {
     const fd = new FormData()
     fd.append('tender_file', tenderFile, tenderFile.name)
     if (title && title.trim()) {
@@ -226,6 +230,7 @@ export const radarApi = {
     }
     return post<RadarScanOut>('/radar', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      signal,
     })
   },
   list(): Promise<BidTaskListOut> {
@@ -234,8 +239,8 @@ export const radarApi = {
   detail(taskId: number): Promise<RadarScanOut> {
     return get<RadarScanOut>(`/radar/${taskId}`)
   },
-  rescan(taskId: number): Promise<RadarScanOut> {
-    return post<RadarScanOut>(`/radar/${taskId}/rescan`)
+  rescan(taskId: number, signal?: AbortSignal): Promise<RadarScanOut> {
+    return post<RadarScanOut>(`/radar/${taskId}/rescan`, undefined, { signal })
   },
   remove(taskId: number): Promise<OkResponse> {
     return del<OkResponse>(`/radar/${taskId}`)

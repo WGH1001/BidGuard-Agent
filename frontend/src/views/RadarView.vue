@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
-import { radarApi, validateUploadFile } from '@/api'
+import { checksApi, radarApi, validateUploadFile } from '@/api'
 import { formatPageOrOffset, type BidTaskOut, type RadarScanOut } from '@/api/types'
 import { RADAR_CACHE_KEY, useAuthStore } from '@/stores/auth'
 
@@ -14,8 +14,12 @@ const loading = ref(false)
 const detailLoading = ref(false)
 const listLoading = ref(false)
 const rescanningId = ref<number | null>(null)
+const cancellingRadar = ref(false)
 const historyTasks = ref<BidTaskOut[]>([])
 const scanResult = ref<RadarScanOut | null>(null)
+
+let radarAbortController: AbortController | null = null
+let radarStopRequested = false
 
 // E20 子项 2：点击/拖拽一体化多文件排队扫描状态（移除易误导的旧任务名文本框）
 const fileInputRef = ref<HTMLInputElement | null>(null)
@@ -143,14 +147,53 @@ async function handleDeleteHistory(task: BidTaskOut): Promise<void> {
 async function handleRescan(taskId: number): Promise<void> {
   if (rescanningId.value !== null) return
   rescanningId.value = taskId
+  radarStopRequested = false
+  radarAbortController = new AbortController()
   try {
-    const res = await radarApi.rescan(taskId)
+    const res = await radarApi.rescan(taskId, radarAbortController.signal)
     scanResult.value = res
     saveToSessionStorage(res)
     await loadHistoryList(false)
     ElMessage.success(`控标雷达记录 #${taskId} 已重新扫描完成`)
+  } catch {
+    await loadHistoryList(false)
   } finally {
+    radarAbortController = null
     rescanningId.value = null
+  }
+}
+
+async function handleCancelRadarTask(taskId: number): Promise<void> {
+  try {
+    await checksApi.cancel(taskId)
+    ElMessage.success(`控标雷达记录 #${taskId} 已中断`)
+    await loadHistoryList(false)
+  } catch {
+    await loadHistoryList(false)
+  }
+}
+
+async function handleStopRadar(): Promise<void> {
+  cancellingRadar.value = true
+  radarStopRequested = true
+  pendingFiles.value = []
+  try {
+    if (rescanningId.value !== null) {
+      await checksApi.cancel(rescanningId.value).catch(() => undefined)
+    } else {
+      const listRes = await radarApi.list().catch(() => null)
+      const runningOnes = (listRes?.items || []).filter((t) =>
+        ['extracting', 'checking', 'grading'].includes(t.status),
+      )
+      for (const rt of runningOnes) {
+        await checksApi.cancel(rt.id).catch(() => undefined)
+      }
+    }
+    radarAbortController?.abort()
+    ElMessage.info('已发送控标雷达停止指令并清空待扫描队列')
+    await loadHistoryList(false)
+  } finally {
+    cancellingRadar.value = false
   }
 }
 
@@ -218,28 +261,34 @@ async function handleRunRadar(): Promise<void> {
   loading.value = true
   queueTotal.value = pendingFiles.value.length
   queueDone.value = 0
+  radarStopRequested = false
   let successCount = 0
 
   try {
-    while (pendingFiles.value.length > 0) {
+    while (pendingFiles.value.length > 0 && !radarStopRequested) {
       const nextFile = pendingFiles.value[0]
       if (!nextFile) break
       currentScanningName.value = nextFile.name
       const autoTitle = `${nextFile.name.replace(/\.[^.]+$/, '')}-投前控标评估`
+      radarAbortController = new AbortController()
       try {
-        const res = await radarApi.scan(nextFile, autoTitle)
+        const res = await radarApi.scan(nextFile, autoTitle, radarAbortController.signal)
         scanResult.value = res
         saveToSessionStorage(res)
         successCount += 1
         await loadHistoryList(false)
       } catch {
+        if (radarStopRequested) {
+          break
+        }
         // 单文件异常由全局拦截器提示，继续扫描队列后续文件
       } finally {
+        radarAbortController = null
         pendingFiles.value.shift()
         queueDone.value += 1
       }
     }
-    if (successCount > 0) {
+    if (successCount > 0 && !radarStopRequested) {
       ElMessage.success(
         successCount === 1
           ? `F6 投前控标雷达扫描完成：${scanResult.value?.title}`
@@ -247,6 +296,7 @@ async function handleRunRadar(): Promise<void> {
       )
     }
   } finally {
+    radarAbortController = null
     loading.value = false
     currentScanningName.value = ''
   }
@@ -307,11 +357,35 @@ onBeforeUnmount(() => {
             <div class="rri-row1-right">
               <span
                 class="sev-pill"
-                :class="recommendationPillCls(item.stats_json?.recommendation)"
+                :class="
+                  item.status === 'checking'
+                    ? 'info'
+                    : item.status === 'failed'
+                      ? 'error'
+                      : recommendationPillCls(item.stats_json?.recommendation)
+                "
               >
-                {{ item.stats_json?.recommendation || '已扫描' }}
+                {{
+                  item.status === 'checking'
+                    ? '扫描中'
+                    : item.status === 'failed'
+                      ? '已中断/失败'
+                      : item.stats_json?.recommendation || '已扫描'
+                }}
               </span>
               <el-button
+                v-if="item.status === 'checking'"
+                type="warning"
+                link
+                size="small"
+                class="rri-del-btn"
+                title="中断卡住的控标扫描任务"
+                @click.stop="handleCancelRadarTask(item.id)"
+              >
+                中断
+              </el-button>
+              <el-button
+                v-else
                 type="primary"
                 link
                 size="small"
@@ -328,6 +402,7 @@ onBeforeUnmount(() => {
                 link
                 size="small"
                 class="rri-del-btn"
+                :disabled="item.status === 'checking'"
                 title="删除该扫描记录"
                 @click.stop="handleDeleteHistory(item)"
               >
@@ -404,6 +479,16 @@ onBeforeUnmount(() => {
                 ? `正在扫描 (${queueDone + 1}/${queueTotal})…`
                 : `启动控标雷达扫描${pendingFiles.length > 0 ? ` (${pendingFiles.length})` : ''}`
             }}
+          </el-button>
+          <el-button
+            v-if="loading || rescanningId !== null"
+            type="danger"
+            size="large"
+            plain
+            :loading="cancellingRadar"
+            @click="handleStopRadar"
+          >
+            ⏹ 停止扫描
           </el-button>
         </div>
 

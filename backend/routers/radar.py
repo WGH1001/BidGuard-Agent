@@ -25,7 +25,7 @@ from backend.schemas import (
     RadarScanOut,
     SuspiciousParamOut,
 )
-from backend.worker import resolve_effective_llm_client, resolve_project_path
+from backend.worker import PipelineCancelled, get_worker, resolve_effective_llm_client, resolve_project_path
 from core.parser import parse_document
 from core.rigging_radar import scan_rigging_radar
 from core.tender_extractor import extract_open_date_with_evidence
@@ -46,130 +46,181 @@ def _execute_radar_scan(
     user_id: Optional[int],
     audit_action: str,
 ) -> RadarScanOut:
-    """E25 §2.2.1：执行或重新执行 F6 控标雷达扫描并更新 task / findings / 审计日志。"""
-    client, _ = resolve_effective_llm_client(db, user_id)
-
-    detected_open_date: Optional[str] = None
-    open_date_source: Optional[str] = None
-    open_date_quote: Optional[str] = None
+    """E25 §2.2.1 + E30：执行或重新执行 F6 控标雷达扫描，接入 _cancel_flags 与异常落 failed 消除僵尸 checking。"""
+    worker = get_worker()
+    cancel_ev = worker.register_task_execution(task.id)
     try:
-        tender_doc = parse_document(str(tender_abs))
-        tender_text = tender_doc.text or ''
-        date_ev = extract_open_date_with_evidence(tender_text)
-        if date_ev:
-            detected_open_date = str(date_ev['open_date'])
-            open_date_source = 'tender_extracted'
-            open_date_quote = str(date_ev.get('quote') or '')[:240] or None
-        elif client is not None and tender_text:
-            llm_ev = extract_open_date_fallback_with_llm(tender_text, client)
-            if llm_ev:
-                detected_open_date = str(llm_ev['open_date'])
-                open_date_source = 'tender_llm'
-                open_date_quote = str(llm_ev.get('quote') or '')[:240] or None
-    except Exception:
-        detected_open_date = None
-        open_date_source = None
-        open_date_quote = None
+        worker.check_cancelled(task.id, cancel_ev)
+        client, _ = resolve_effective_llm_client(db, user_id)
 
-    cfg_out = dict(task.config_json or {})
-    if detected_open_date:
-        cfg_out['open_date'] = detected_open_date
-        if open_date_source:
-            cfg_out['open_date_source'] = open_date_source
-        if open_date_quote:
-            cfg_out['open_date_quote'] = open_date_quote
-    else:
-        cfg_out.pop('open_date', None)
-        cfg_out.pop('open_date_source', None)
-        cfg_out.pop('open_date_quote', None)
-    task.config_json = cfg_out
+        detected_open_date: Optional[str] = None
+        open_date_source: Optional[str] = None
+        open_date_quote: Optional[str] = None
+        try:
+            tender_doc = parse_document(str(tender_abs))
+            tender_text = tender_doc.text or ''
+            date_ev = extract_open_date_with_evidence(tender_text)
+            if date_ev:
+                detected_open_date = str(date_ev['open_date'])
+                open_date_source = 'tender_extracted'
+                open_date_quote = str(date_ev.get('quote') or '')[:240] or None
+            elif client is not None and tender_text:
+                llm_ev = extract_open_date_fallback_with_llm(tender_text, client)
+                if llm_ev:
+                    detected_open_date = str(llm_ev['open_date'])
+                    open_date_source = 'tender_llm'
+                    open_date_quote = str(llm_ev.get('quote') or '')[:240] or None
+        except PipelineCancelled:
+            raise
+        except Exception:
+            worker.check_cancelled(task.id, cancel_ev)
+            detected_open_date = None
+            open_date_source = None
+            open_date_quote = None
 
-    try:
-        radar_res = scan_rigging_radar(tender_abs, client=client)
-    except Exception:
-        radar_res = scan_rigging_radar(tender_abs, client=None)
+        cfg_out = dict(task.config_json or {})
+        if detected_open_date:
+            cfg_out['open_date'] = detected_open_date
+            if open_date_source:
+                cfg_out['open_date_source'] = open_date_source
+            if open_date_quote:
+                cfg_out['open_date_quote'] = open_date_quote
+        else:
+            cfg_out.pop('open_date', None)
+            cfg_out.pop('open_date_source', None)
+            cfg_out.pop('open_date_quote', None)
+        task.config_json = cfg_out
 
-    suspicious_list = list(radar_res.get('suspicious_params') or [])
-    conclusion = radar_res.get('conclusion') or {
-        'recommendation': '值得投',
-        'summary': '未检出明显疑似排他性参数（仅供参考）。',
-    }
-    llm_status = str(radar_res.get('llm_status') or 'skipped')
+        def _on_radar_progress(_done: int, _total: int) -> None:
+            worker.check_cancelled(task.id, cancel_ev)
 
-    # 清理该任务旧的 F6 findings 后重新写入
-    db.query(BidFinding).filter_by(task_id=task.id, source_module='F6').delete(synchronize_session=False)
+        worker.check_cancelled(task.id, cancel_ev)
+        try:
+            radar_res = scan_rigging_radar(tender_abs, client=client, progress_cb=_on_radar_progress)
+        except PipelineCancelled:
+            raise
+        except Exception:
+            worker.check_cancelled(task.id, cancel_ev)
+            radar_res = scan_rigging_radar(tender_abs, client=None, progress_cb=_on_radar_progress)
 
-    for item in suspicious_list:
-        bf = BidFinding(
-            task_id=task.id,
-            source_module='F6',
-            code='SUSPECTED_EXCLUSIVE_PARAM',
-            severity='warning',
-            category=str(item.get('exclusive_type') or '疑似排他参数'),
-            clause_no='招标技术/资格条款',
-            quote=str(item.get('quote') or ''),
-            quote_offset=item.get('offset'),
-            page=item.get('page'),
-            quote_verified=bool(item.get('quote_verified', True)),
-            message=str(item.get('reason') or '疑似排他性控标参数'),
-            suggestion='建议投前向招标代理机构发出书面澄清/提疑函确认是否接受等效产品或资质',
-            consequence='deduction',
-            detail_json={
-                'exclusive_type': item.get('exclusive_type'),
-                'confidence': item.get('confidence'),
-                'llm_status': item.get('llm_status', llm_status),
-            },
-        )
-        db.add(bf)
+        worker.check_cancelled(task.id, cancel_ev)
+        suspicious_list = list(radar_res.get('suspicious_params') or [])
+        conclusion = radar_res.get('conclusion') or {
+            'recommendation': '值得投',
+            'summary': '未检出明显疑似排他性参数（仅供参考）。',
+        }
+        llm_status = str(radar_res.get('llm_status') or 'skipped')
 
-    now_utc = _utc_now()
-    task.status = 'delivered'
-    task.progress = 100
-    task.stage_detail = f"控标扫描完成：{conclusion.get('recommendation')}（检出 {len(suspicious_list)} 处疑似项）"
-    task.stats_json = {
-        'suspicious_count': len(suspicious_list),
-        'recommendation': conclusion.get('recommendation'),
-        'summary': conclusion.get('summary'),
-        'llm_status': llm_status,
-    }
-    task.delivered_at = now_utc
-    task.updated_at = now_utc
-    db.commit()
+        # 清理该任务旧的 F6 findings 后重新写入
+        db.query(BidFinding).filter_by(task_id=task.id, source_module='F6').delete(synchronize_session=False)
 
-    record_audit(
-        db,
-        action=audit_action,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        target=f"task:{task.id}",
-        detail_json=task.stats_json,
-    )
-
-    return RadarScanOut(
-        open_date=detected_open_date,
-        open_date_source=open_date_source,
-        open_date_quote=open_date_quote,
-        task_id=task.id,
-        title=task.title,
-        llm_status=llm_status,
-        suspicious_params=[
-            SuspiciousParamOut(
-                quote=str(p.get('quote') or ''),
-                offset=int(p.get('offset') or 0),
-                page=p.get('page'),
-                exclusive_type=str(p.get('exclusive_type') or '参数定向'),
-                confidence=float(p.get('confidence') or 0.8),
-                reason=str(p.get('reason') or ''),
-                quote_verified=bool(p.get('quote_verified', True)),
-                llm_status=str(p.get('llm_status') or llm_status),
+        for item in suspicious_list:
+            bf = BidFinding(
+                task_id=task.id,
+                source_module='F6',
+                code='SUSPECTED_EXCLUSIVE_PARAM',
+                severity='warning',
+                category=str(item.get('exclusive_type') or '疑似排他参数'),
+                clause_no='招标技术/资格条款',
+                quote=str(item.get('quote') or ''),
+                quote_offset=item.get('offset'),
+                page=item.get('page'),
+                quote_verified=bool(item.get('quote_verified', True)),
+                message=str(item.get('reason') or '疑似排他性控标参数'),
+                suggestion='建议投前向招标代理机构发出书面澄清/提疑函确认是否接受等效产品或资质',
+                consequence='deduction',
+                detail_json={
+                    'exclusive_type': item.get('exclusive_type'),
+                    'confidence': item.get('confidence'),
+                    'llm_status': item.get('llm_status', llm_status),
+                },
             )
-            for p in suspicious_list
-        ],
-        conclusion=RadarConclusionOut(
-            recommendation=str(conclusion.get('recommendation') or '值得投'),
-            summary=str(conclusion.get('summary') or ''),
-        ),
-    )
+            db.add(bf)
+
+        now_utc = _utc_now()
+        task.status = 'delivered'
+        task.progress = 100
+        task.error_msg = None
+        task.stage_detail = f"控标扫描完成：{conclusion.get('recommendation')}（检出 {len(suspicious_list)} 处疑似项）"
+        task.stats_json = {
+            'suspicious_count': len(suspicious_list),
+            'recommendation': conclusion.get('recommendation'),
+            'summary': conclusion.get('summary'),
+            'llm_status': llm_status,
+        }
+        task.delivered_at = now_utc
+        task.updated_at = now_utc
+        db.commit()
+
+        record_audit(
+            db,
+            action=audit_action,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            target=f"task:{task.id}",
+            detail_json=task.stats_json,
+        )
+
+        return RadarScanOut(
+            open_date=detected_open_date,
+            open_date_source=open_date_source,
+            open_date_quote=open_date_quote,
+            task_id=task.id,
+            title=task.title,
+            llm_status=llm_status,
+            suspicious_params=[
+                SuspiciousParamOut(
+                    quote=str(p.get('quote') or ''),
+                    offset=int(p.get('offset') or 0),
+                    page=p.get('page'),
+                    exclusive_type=str(p.get('exclusive_type') or '参数定向'),
+                    confidence=float(p.get('confidence') or 0.8),
+                    reason=str(p.get('reason') or ''),
+                    quote_verified=bool(p.get('quote_verified', True)),
+                    llm_status=str(p.get('llm_status') or llm_status),
+                )
+                for p in suspicious_list
+            ],
+            conclusion=RadarConclusionOut(
+                recommendation=str(conclusion.get('recommendation') or '值得投'),
+                summary=str(conclusion.get('summary') or ''),
+            ),
+        )
+    except PipelineCancelled:
+        db.rollback()
+        now_utc = _utc_now()
+        cur_task = db.query(BidCheckTask).filter_by(id=task.id).first()
+        if cur_task is not None:
+            cur_task.status = 'failed'
+            cur_task.stage_detail = '用户中断'
+            cur_task.error_msg = '用户中断'
+            cur_task.finished_at = now_utc
+            cur_task.updated_at = now_utc
+            cfg = dict(cur_task.config_json or {})
+            cfg['cancelled_by_user'] = True
+            cur_task.config_json = cfg
+            db.commit()
+        raise HTTPException(
+            status_code=409,
+            detail={'code': 'TASK_CANCELLED', 'message': '控标雷达扫描已被用户中断'},
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        now_utc = _utc_now()
+        err_msg = f"{type(exc).__name__}: {exc}"
+        cur_task = db.query(BidCheckTask).filter_by(id=task.id).first()
+        if cur_task is not None:
+            cur_task.status = 'failed'
+            cur_task.stage_detail = f"控标扫描异常中断：{err_msg}"
+            cur_task.error_msg = err_msg
+            cur_task.finished_at = now_utc
+            cur_task.updated_at = now_utc
+            db.commit()
+        raise
+    finally:
+        worker.unregister_task_execution(task.id, cancel_ev)
 
 
 @router.get('', response_model=BidTaskListOut)
@@ -269,6 +320,13 @@ def rescan_radar_task(
             status_code=422,
             detail={'code': 'SOURCE_FILES_MISSING', 'message': '招标文件原件缺失，无法重新扫描'},
         )
+
+    task.status = 'checking'
+    task.progress = 50
+    task.error_msg = None
+    task.stage_detail = '正在重新扫描排他性与倾向性控标参数'
+    task.updated_at = _utc_now()
+    db.commit()
 
     return _execute_radar_scan(
         db=db,

@@ -53,6 +53,7 @@ const appStore = useAppStore()
 const listLoading = ref(false)
 const detailLoading = ref(false)
 const runningTrigger = ref(false)
+const cancellingTask = ref(false)
 const tasks = ref<BidTaskOut[]>([])
 const total = ref(0)
 const page = ref(1)
@@ -130,9 +131,36 @@ const runningElapsedLabel = computed<string>(() => {
   return `${mins}:${secs}`
 })
 
+const runningIdleSec = computed<number>(() => {
+  const t = currentTaskExt.value
+  if (!t || !isRunningTask.value) return 0
+  const rawIso = t.updated_at || t.started_at || t.created_at
+  if (!rawIso) return 0
+  const normalized = rawIso.endsWith('Z') || rawIso.includes('+') ? rawIso : `${rawIso}Z`
+  const actMs = new Date(normalized).getTime()
+  if (!Number.isFinite(actMs)) return 0
+  return Math.max(0, Math.floor((nowTick.value - actMs) / 1000))
+})
+
 function handleSseProgress(frame: SSEProgressFrame): void {
+  const nextUpdated = frame.updated_at || new Date().toISOString()
+  const itemInList = tasks.value.find((t) => t.id === frame.task_id)
+  if (itemInList) {
+    itemInList.status = frame.status
+    if (typeof frame.progress === 'number') {
+      itemInList.progress = frame.progress
+    }
+    if (frame.stage_detail) {
+      itemInList.stage_detail = frame.stage_detail
+    }
+    itemInList.updated_at = nextUpdated
+    if (frame.started_at) {
+      itemInList.started_at = frame.started_at
+    }
+  }
   if (!currentTask.value || currentTask.value.id !== frame.task_id) return
   currentTask.value.status = frame.status
+  currentTask.value.updated_at = nextUpdated
   if (typeof frame.progress === 'number') {
     currentTask.value.progress = frame.progress
   }
@@ -346,7 +374,7 @@ function handlePageChange(newPage: number): void {
 
 async function handleDeleteTask(task: BidTaskOut): Promise<void> {
   if (['extracting', 'checking', 'grading'].includes(task.status)) {
-    ElMessage.warning('任务正在运行中，请先等待完成')
+    ElMessage.warning('运行中任务请先中断后再删除')
     return
   }
   try {
@@ -376,6 +404,36 @@ async function handleDeleteTask(task: BidTaskOut): Promise<void> {
     await loadTaskList(true)
   } else {
     await loadTaskList(false)
+  }
+}
+
+async function handleCancelTask(task: BidTaskOut): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `确认中断体检任务「#${task.id} ${task.title}」吗？中断后本任务标记为失败，不保留半程报告，之后可删除或重新发起体检。`,
+      '确认中断运行中任务',
+      {
+        type: 'warning',
+        confirmButtonText: '确认中断',
+        cancelButtonText: '继续运行',
+      },
+    )
+  } catch {
+    return
+  }
+  cancellingTask.value = true
+  try {
+    await checksApi.cancel(task.id)
+    if (currentTask.value?.id === task.id) {
+      sseRef.value?.closeActiveStream()
+    }
+    ElMessage.success(`体检任务 #${task.id} 已中断`)
+    await loadTaskList(false)
+    if (currentTask.value?.id === task.id) {
+      await selectTask(currentTask.value)
+    }
+  } finally {
+    cancellingTask.value = false
   }
 }
 
@@ -418,6 +476,7 @@ onBeforeUnmount(() => {
       @select="selectTask"
       @page-change="handlePageChange"
       @created="handleTaskCreated"
+      @cancel="handleCancelTask"
       @delete="handleDeleteTask"
       @refresh="loadTaskList(false)"
     />
@@ -439,7 +498,7 @@ onBeforeUnmount(() => {
               </button>
               <span class="mono-num cwt-id">TASK #{{ currentTask.id }}</span>
               <span
-                v-if="currentTask.stats_json?.llm_status"
+                v-if="!isRunningTask && currentTask.stats_json?.llm_status"
                 class="sev-pill"
                 :class="currentTask.stats_json.llm_status === 'done' ? 'ok' : 'info'"
               >
@@ -467,7 +526,13 @@ onBeforeUnmount(() => {
                 v-if="isRunningTask"
                 class="sev-pill warning mono-num"
               >
-                ⏱ 已耗时 {{ runningElapsedLabel }}
+                ⏱ 已耗时 {{ runningElapsedLabel }} · 最近活动 {{ runningIdleSec }}s前
+              </span>
+              <span
+                v-if="isRunningTask && runningIdleSec >= 120"
+                class="sev-pill error"
+              >
+                疑似无响应，可点击右侧中断
               </span>
               <span
                 v-else-if="isTerminalTaskWithDuration"
@@ -508,6 +573,15 @@ onBeforeUnmount(() => {
 
           <div class="cwt-actions">
             <el-button
+              v-if="isRunningTask"
+              type="danger"
+              :loading="cancellingTask"
+              @click="handleCancelTask(currentTask)"
+            >
+              ⏹ 中断核验
+            </el-button>
+            <el-button
+              v-else
               type="primary"
               :loading="runningTrigger"
               @click="handleTriggerRun"

@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from core.parser import parse_document
 from core.quote_verifier import verify_quote
@@ -230,7 +230,12 @@ def _build_conclusion(suspicious_params: list[dict[str, Any]]) -> dict[str, str]
     return {'recommendation': rec, 'summary': summary}
 
 
-def scan_rigging_radar(tender_path: str | Path, client=None) -> dict[str, Any]:
+def scan_rigging_radar(
+    tender_path: str | Path,
+    client=None,
+    *,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> dict[str, Any]:
     """F6 投前控标雷达主入口。
 
     Args:
@@ -275,7 +280,12 @@ def scan_rigging_radar(tender_path: str | Path, client=None) -> dict[str, Any]:
     # LLM 层（★大模型④）：逐候选窗口核验 + verify_quote 强制溯源，编造即丢弃
     verified_params: list[dict[str, Any]] = []
     accepted_quotes: list[str] = []          # 已采信 quote 文本（防同句重复收录）
-    for c in candidates:
+    total_cands = len(candidates)
+    if progress_cb is not None and total_cands > 0:
+        progress_cb(0, total_cands)
+    for idx, c in enumerate(candidates, start=1):
+        if progress_cb is not None and idx > 1:
+            progress_cb(idx - 1, total_cands)
         prompt = _RADAR_LLM_PROMPT.format(
             window=c['window'],
             candidate_quote=c['quote'],
@@ -283,13 +293,19 @@ def scan_rigging_radar(tender_path: str | Path, client=None) -> dict[str, Any]:
         resp = client.chat([{'role': 'user', 'content': prompt}], model_tier='flash')
         parsed = _parse_llm_json(getattr(resp, 'content', '') or '')
         if not parsed:
+            if progress_cb is not None:
+                progress_cb(idx, total_cands)
             continue
 
         if parsed.get('is_exclusive') is not True:
+            if progress_cb is not None:
+                progress_cb(idx, total_cands)
             continue
 
         ex_type = str(parsed.get('exclusive_type') or c['exclusive_type']).strip()
         if ex_type == '无':
+            if progress_cb is not None:
+                progress_cb(idx, total_cands)
             continue
         if ex_type not in ('品牌绑定', '资质定向', '业绩定向', '参数定向'):
             ex_type = c['exclusive_type']
@@ -297,6 +313,8 @@ def scan_rigging_radar(tender_path: str | Path, client=None) -> dict[str, Any]:
         llm_quote = str(parsed.get('quote') or '').strip()
         # 强制 verify_quote 溯源校验：LLM 输出编造的直接丢弃，绝不采信
         if not llm_quote or not verify_quote(llm_quote, full_text):
+            if progress_cb is not None:
+                progress_cb(idx, total_cands)
             continue
 
         real_off = full_text.find(llm_quote)
@@ -306,6 +324,8 @@ def scan_rigging_radar(tender_path: str | Path, client=None) -> dict[str, Any]:
         # 近邻/同文去重（确定性层同款纪律）：同句被多候选重复采信只保留一条
         if llm_quote in accepted_quotes or any(
                 abs(real_off - p['offset']) < 25 for p in verified_params):
+            if progress_cb is not None:
+                progress_cb(idx, total_cands)
             continue
         accepted_quotes.append(llm_quote)
 
@@ -325,6 +345,8 @@ def scan_rigging_radar(tender_path: str | Path, client=None) -> dict[str, Any]:
             'quote_verified': True,
             'llm_status': 'done',
         })
+        if progress_cb is not None:
+            progress_cb(idx, total_cands)
 
     return {
         'suspicious_params': verified_params,

@@ -17,6 +17,7 @@ const emit = defineEmits<{
   (e: 'select', task: BidTaskOut): void
   (e: 'page-change', page: number): void
   (e: 'created', task: BidTaskOut, autoRun: boolean): void
+  (e: 'cancel', task: BidTaskOut): void
   (e: 'delete', task: BidTaskOut): void
   (e: 'refresh'): void
 }>()
@@ -114,6 +115,25 @@ function getTerminalDurationLabel(item: BidTaskOut): string {
     return formatDurationMs(fMs - sMs)
   }
   return ''
+}
+
+function getLastActiveIdleSec(item: BidTaskOut): number | null {
+  if (!['extracting', 'checking', 'grading'].includes(item.status)) {
+    return null
+  }
+  const ext = item as TaskWithDuration
+  const actMs = parseNaiveUtcMs(ext.updated_at || ext.started_at || ext.created_at)
+  if (actMs === null) return null
+  return Math.max(0, Math.floor((nowTick.value - actMs) / 1000))
+}
+
+function formatIdleLabel(idleSec: number): string {
+  if (idleSec < 60) {
+    return `最近活动 ${idleSec}s前`
+  }
+  const mins = Math.floor(idleSec / 60)
+  const rem = idleSec % 60
+  return `最近活动 ${mins}m${rem}s前`
 }
 
 onMounted(() => {
@@ -244,12 +264,23 @@ defineExpose({
               {{ statusMeta(item.status).label }}
             </span>
             <el-button
+              v-if="['extracting', 'checking', 'grading'].includes(item.status)"
+              type="warning"
+              link
+              size="small"
+              class="ri-cancel-btn"
+              title="中断该运行中任务"
+              @click.stop="emit('cancel', item)"
+            >
+              中断
+            </el-button>
+            <el-button
               type="danger"
               link
               size="small"
               class="ri-del-btn"
               :disabled="['extracting', 'checking', 'grading'].includes(item.status)"
-              title="删除该体检任务"
+              :title="['extracting', 'checking', 'grading'].includes(item.status) ? '运行中任务请先中断后再删除' : '删除该体检任务'"
               @click.stop="emit('delete', item)"
             >
               删除
@@ -282,6 +313,15 @@ defineExpose({
             :stroke-width="4"
             :status="item.status === 'failed' ? 'exception' : undefined"
           />
+          <div
+            v-if="getLastActiveIdleSec(item) !== null"
+            class="ri-heartbeat-row mono-num"
+          >
+            <span>{{ formatIdleLabel(getLastActiveIdleSec(item)!) }}</span>
+            <span v-if="getLastActiveIdleSec(item)! >= 120" class="ri-stale-warn">
+              疑似无响应，可中断
+            </span>
+          </div>
         </div>
 
         <div v-if="item.stats_json" class="ri-stats-bar">
@@ -500,9 +540,28 @@ defineExpose({
   border-radius: 4px;
 }
 
-.ri-del-btn {
+.ri-del-btn,
+.ri-cancel-btn {
   font-size: 11.5px;
   padding: 0 2px;
+}
+
+.ri-heartbeat-row {
+  margin-top: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--txt-muted);
+}
+
+.ri-stale-warn {
+  color: #b45309;
+  font-weight: 800;
+  background: #fef3c7;
+  padding: 0 5px;
+  border-radius: 4px;
 }
 
 .ri-id {

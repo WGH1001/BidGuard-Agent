@@ -14,10 +14,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from backend.auth import AuthUser, get_current_user
+from backend.auth import AuthUser, get_current_user, record_audit
 import backend.database as db_mod
 from backend.database import PROJECT_ROOT, get_db, init_db
-from backend.models import BidCheckTask
+from backend.models import BidCheckTask, ensure_bid_check_tasks_columns
 from backend.routers import (
     auth as auth_router_mod,
     checks as checks_router_mod,
@@ -32,9 +32,58 @@ from backend.routers import (
     rules as rules_router_mod,
 )
 from backend.schemas import HealthOut
-from backend.worker import get_worker
+from backend.worker import _utc_now, get_worker
 
 DIST_DIR = PROJECT_ROOT / 'frontend' / 'dist'
+
+
+def recover_stale_tasks(session_factory=None) -> int:
+    """E30：服务重启后将遗留处于 extracting/checking/grading 的非终态任务（含 radar）统一置 failed('服务重启中断')。"""
+    sf = session_factory or db_mod.SessionLocal
+    if sf is None:
+        return 0
+    sess: Session = sf()
+    recovered_count = 0
+    try:
+        ensure_bid_check_tasks_columns(sess.get_bind())
+        stale_rows = (
+            sess.query(BidCheckTask)
+            .filter(BidCheckTask.status.in_(('extracting', 'checking', 'grading')))
+            .all()
+        )
+        if not stale_rows:
+            return 0
+        worker = get_worker()
+        now_utc = _utc_now()
+        audit_items: list[tuple[int, int, Optional[int]]] = []
+        for row in stale_rows:
+            row.status = 'failed'
+            row.stage_detail = '服务重启中断'
+            row.error_msg = '服务重启中断'
+            row.finished_at = now_utc
+            row.updated_at = now_utc
+            worker.broadcaster.clear(row.id)
+            audit_items.append((row.id, int(row.tenant_id), row.user_id))
+        sess.commit()
+        recovered_count = len(audit_items)
+        for tid, tenant_id, uid in audit_items:
+            try:
+                record_audit(
+                    sess,
+                    action='recover_stale_tasks',
+                    tenant_id=tenant_id,
+                    user_id=uid,
+                    target=f"task:{tid}",
+                    detail_json={'reason': 'service_restart'},
+                )
+            except Exception:
+                pass
+        return recovered_count
+    except Exception:
+        sess.rollback()
+        return 0
+    finally:
+        sess.close()
 
 
 def _parse_cors_origins() -> list[str]:
@@ -66,6 +115,7 @@ def create_app(
             db_mod.engine = eng
             db_mod.SessionLocal = db_mod.get_session_factory(eng)
             get_worker(session_factory=db_mod.SessionLocal)
+        recover_stale_tasks(db_mod.SessionLocal)
         yield
 
     # ENABLE_API_DOCS：交互式 API 文档开关（沿用 Contract-Review-Agent T53 生产安全三件套惯例）。

@@ -39,8 +39,10 @@ extract_chapter4_procurement_requirements(text: str) -> list[dict]
 extract_open_date_fallback_with_llm(text: str, client) -> Optional[dict]
 # E23 规则未命中时局部窗（≤3 窗 ≤5000 字）LLM 兜底；强制过 verify_quote + 日期一致性校验，
 # 返回 {'open_date': 'YYYY-MM-DD', 'quote': str, 'quote_verified': True, 'source': 'tender_llm', ...} 或 None
-extract_tender_with_llm(file_path: str, client=None, env: Optional[str] = None, *, open_date_fallback: bool = False) -> dict
-# = build_review_checklist 结果 + {'llm_structured': [...], 'llm_usage': {'calls', 'usage'}}（open_date_fallback=True 时正则未命中则触发局部窗 LLM 开标日兜底）
+extract_tender_with_llm(file_path: str, client=None, env: Optional[str] = None,
+                            *, open_date_fallback: bool = False,
+                            progress_cb: Optional[Callable[[int, int], None]] = None) -> dict
+# = build_review_checklist 结果 + {'llm_structured': [...], 'llm_usage': {'calls', 'usage'}}（open_date_fallback=True 时正则未命中则触发局部窗 LLM 开标日兜底；E30 新增可选 progress_cb 供 F1 逐条款心跳与 BaseException 取消透传）
 
 extract_scoring_with_llm(file_path: str, client=None, env: Optional[str] = None) -> dict
 # 返回：{'scoring_tables': [...], 'scoring_prose': [...], 'scoring_llm_usage': {...}}
@@ -111,7 +113,10 @@ run_response_check(tender_path: str | Path, bid_path: str | Path,
                    requirements: Optional[list[dict]] = None,
                    client=None, *,
                    tender_parsed_doc: Any = None,
-                   bid_parsed_doc: Any = None) -> dict[str, Any]
+                   bid_parsed_doc: Any = None,
+                   progress_cb: Optional[Callable[[int, int], None]] = None) -> dict[str, Any]
+# check_star_responses(..., progress_cb=None) 同步接收可选 progress_cb；
+# E30：Stage A/B 均支持 progress_cb 心跳与 BaseException 取消透传，阶段 B 并发池捕获 BaseException 后立即 pool.shutdown(wait=False, cancel_futures=True) 快速退出
 # E27：submission_rule 在 F4 降级 severity='info', consequence='none'；在 F5 偏离表导出中默认过滤（include_submission_rules=False）
 # E27：check_bid_self_contradictions 支持同句复合质保合并与未填模板下划线提示，L651 client.chat 异常单条降级不中断流水线
 # E29：透传 ParsedDoc.media_ocr_spans；F4 定位与自相矛盾跳过目录页（\t页码）、内嵌历史合同/审计图片 OCR 区间，
@@ -149,11 +154,13 @@ export_deviation_table(tender_path: str | Path, bid_path: str | Path,
 
 ```python
 # core/rigging_radar.py
-scan_rigging_radar(tender_path: str | Path, client=None) -> dict[str, Any]
+scan_rigging_radar(tender_path: str | Path, client=None, *,
+                   progress_cb: Optional[Callable[[int, int], None]] = None) -> dict[str, Any]
 # 返回：{'suspicious_params': [{'quote','offset','page','footer_page','is_docx_page',
 #          'exclusive_type','confidence','reason','quote_verified','llm_status'}, ...],
 #        'conclusion': {'recommendation': '值得投'|'谨慎投'|'疑似控标高', 'summary'},
 #        'llm_status': 'done'|'skipped'}
+# E30：candidates 循环起止透传 progress_cb(done, total)，供 radar.py 接入服务端 _cancel_flags 检查点
 ```
 
 ### 1.7 F7 标书专家追问（QaChatView / `/api/qa`）
@@ -280,6 +287,7 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 
 - 路由列表（11 组）：`auth`、`dashboard`、`checks`、`extract`、`deviation`、`radar`、`qa`、`rules`、`reports`、`model_config`、`regulations`。
 - E27 `duration_record` 新增 Stage 1.5 预解析耗时字段 `f_parse_ms`（保留 E11 既有 6 键 `f1_ms`/`f2_ms`/`f3_ms`/`f4_ms`/`grading_ms`/`total_ms`）；
+- E30 协作式取消与活性心跳：`POST /api/checks/{task_id}/cancel`（`200` / `404` / `409 TASK_NOT_RUNNING`）、`BidTaskWorker._cancel_flags`（`_PipelineCancelled(BaseException)` / `PipelineCancelled` 统一穿透 core 降级块，连同 `POST /api/radar` 与 `/rescan` 消灭僵尸 `checking`）、SSE `progress`/`done`/`error` 帧携带 `updated_at`、`DELETE /api/checks/{task_id}` 对取消收尾中任务直接清理且运行中报错文案为 `"运行中任务请先中断后再删除"`，以及服务启动钩子 `recover_stale_tasks(session_factory=None) -> int`；
 - 其余鉴权、多租户隔离、SSE 进度流、文件存储布局与统一错误格式约定保持不变。
 
 ---
@@ -308,3 +316,4 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 | 2026-11-13 | E27 真标书实战排障与交互体验深化：`core/parser.py` `parse_document` 新增可选 `ocr_images`/`progress_cb` 与 `.docx` 每 10 张 `.media.ocr.json` / 扫描 `.pdf` 每 5 页 `.ocr.json`（`partial=True` 断点续扫与原子落盘）；`core/price_extractor.py` `extract_price_cap` 新增 `package_no` 分包预算精准匹配并支持复用 `parsed_doc`/`tender_parsed_doc`；`core/qualification_scanner.py` 新增 `resolve_effective_social_requirement` 并扩展 `scan_qualifications(..., client=None, social_min_count=None)`（局部社保窗隔离 + 受控 LLM 语义鉴别）；`core/tender_extractor.py` 新增 `classify_invalid_clause_role`（§2.6 扩展 `_EVAL_COMMITTEE_RULE_RE` 兼容 `6、报价过低` 及残片）与 `extract_chapter4_procurement_requirements`（§2.6 新增 `_pick_procurement_chapter` 跳过前文短目录存根、`（1）/(1)/1.` 编号条支持及 Pattern B 收缩先于 600 字截断）；`core/response_checker.py` 区分 `eval_rule`/`submission_rule`（F4 降级 `info`+`none`，F5 默认过滤）、复合质保合并与 L651 `try/except` 单条降级；`core/deviation_exporter.py` `export_deviation_table` 新增 keyword-only `f4_result=None` 支持 0 额外 LLM 复用导出；`core/llm_gateway.py` 新增 `timeout`/`max_retries=0` 与私有 IP TUN 诊断提示；`backend/worker.py` 拆分 Stage 1.5 `f_parse_ms` 耗时与冷启动 `cached_hits=0` SSE 进度修正，并在 Stage 4 前调用 `build_and_cache_deviation_artifacts`（复用 `f4_result` 预生成 F5 docx 与 `_stats.json` 快照，同步给 `deviation.py`/`reports.py` 复用）；`backend/routers/qa.py` 新增 `DELETE /api/qa/sessions/{id}/last-turn` 及 `/ask` 502 `QA_GATEWAY_ERROR` 隔离 | 架构侧 + 实现 |
 | 2026-11-16 | E28 F7 多会话并发流与重命名/首问自动命名补强：`backend/models.py` SQLite 新增 `PRAGMA busy_timeout=5000`；`backend/schemas.py` 新增 `QaSessionRenameRequest`；`backend/routers/qa.py` 新增 `_QA_DB_WRITE_LOCK` / `_persist_qa_turn_locked` 写锁串行化与 `PATCH /api/qa/sessions/{session_id}`（含隐藏别名与 `qa_rename_session` 审计），并将 `_is_default_session_title` 扩展到 `"{task.title} · 专家追问"` 占位标题的首问自动重命名；前端 `QaChatView.vue` 多会话 `cachedRuntimes` Map + Pinned/Projects 树形侧栏 + 行内/顶栏双击重命名及 `ExtractView.vue` F1 概览条通栏+Grid 布局对齐 | 架构侧 + 实现 |
 | 2026-11-16 | E29 感知层升级与真标书 F2/F4/OCR 实战排障：`core/parser.py` 为 `ParsedDoc` 挂载内嵌图片 OCR 精确区间 `media_ocr_spans`；`core/response_checker.py` 新增目录区/OCR 历史合同隔离、全命中评分择优与短标题顺延截取；`core/price_sandbox.py` `_normalize_upper` 补全以 `元` 结尾省写 `整` 的写法；`core/price_extractor.py` 增补 `'合计'` 列、近 3 段表前标题、《开标一览表》横向合并表头跨列多行子标签取值，及 `NEED_MANUAL` 时 LLM 单元格坐标感知 + Python `verify_quote`/`Decimal` 重解析兜底；`backend/worker.py` 修复 Stage 1.5 全缓存/零帧 OCR 播报、透传 `client=client` 与 `stats_payload` 报价预填字段；前端 `PriceManualDialog.vue`/`CheckDetailView.vue`/`types.ts` 清除硬编码假数据改用真实预填 | 实现 |
+| 2026-11-16 | E30 可中断流水线与活性心跳卡：`core/tender_llm.py` `extract_tender_with_llm`、`core/response_checker.py` `check_star_responses`/`run_response_check` 与 `core/rigging_radar.py` `scan_rigging_radar` 新增可选 `progress_cb: Optional[Callable[[int, int], None]] = None` 并透传取消 Signal（`response_checker` 并发池捕获 `BaseException` 立即 `pool.shutdown(wait=False, cancel_futures=True)`）；`backend/worker.py` 新增 `_PipelineCancelled(BaseException)`（别名 `PipelineCancelled`）、`BidTaskWorker._cancel_flags` 检查点（含 F1 fallback 前置上抛与 ≥5s 节流心跳帧 `"已判定 X / Y 条"`）、`updated_at` SSE 帧透传、清理 `BidFinding`/偏离表及重跑清旧 `stats_json`/`cancelled_by_user`；`backend/routers/checks.py` 新增 `POST /api/checks/{task_id}/cancel`（404/409/审计）与取消期立即 `DELETE`；`backend/routers/radar.py` 将 `POST /api/radar` 与 `/rescan` 接入 `_cancel_flags`（取消 409 `TASK_CANCELLED`、异常落 `failed` 无僵尸 `checking`）；`backend/main.py` 新增 `recover_stale_tasks` 启动恢复钩子；前端 `CheckDetailView.vue`/`CheckTaskList.vue`/`RadarView.vue`/`ExtractView.vue`/`SseProgress.vue`/`http.ts` 补齐中断入口与 120s 判活预警 | 实现 + 验收 |
