@@ -57,13 +57,18 @@ extract_scoring_with_llm(file_path: str, client=None, env: Optional[str] = None)
 # core/price_extractor.py
 extract_price_cap(text: str, package_no: int | None = None) -> str | None
 extract_price_data(file_path: str | Path, tender_path: str | Path | None = None,
-                   parsed_doc=None, tender_parsed_doc=None) -> dict
+                   parsed_doc=None, tender_parsed_doc=None, client: Any = None) -> dict
 run_price_check(bid_path: str | Path, tender_path: str | Path | None = None,
-                parsed_doc=None, tender_parsed_doc=None) -> dict
+                parsed_doc=None, tender_parsed_doc=None, client: Any = None) -> dict
 # E27：package_no 支持按目标包号提取分包预算限价；parsed_doc/tender_parsed_doc 复用 Stage 1.5 预解析结果
+# E29：client!=None 时仅在确定性提取为 NEED_MANUAL（且无歧义预警）触发 _llm_perceive_price_tables，
+#      LLM 仅返回单元格/行坐标，由 Python 回读原格并经 verify_quote + Decimal 重解析后再进 PriceSandbox；
+#      同时增补 '合计' 列头识别及《开标一览表》横向合并表头跨列多行（人民币小写/大写）提取；
+#      PriceSandbox._normalize_upper 对以 '元' 结尾省写 '整' 的写法自动补 '整'，连 '元' 都缺则保留 UPPER_MISMATCH
 # 返回：extract_price_data 全部键 + 'findings'
 #   {'status': 'OK'|'NEED_MANUAL'|..., 'items': [...], 'table_total', 'bid_total',
-#    'bid_total_upper', 'price_cap', 'has_price_table_skeleton', 'findings': [...]}
+#    'bid_total_upper', 'reference_bid_total', 'price_cap', 'has_price_table_skeleton',
+#    'llm_status': 'done'|'skipped', 'findings': [...]}
 
 # core/price_sandbox.py —— status=='OK' 时的四项算术核验（run_price_check 已封装）
 PriceSandbox(items, table_total, bid_total, bid_total_upper, price_cap).run() -> list
@@ -109,6 +114,8 @@ run_response_check(tender_path: str | Path, bid_path: str | Path,
                    bid_parsed_doc: Any = None) -> dict[str, Any]
 # E27：submission_rule 在 F4 降级 severity='info', consequence='none'；在 F5 偏离表导出中默认过滤（include_submission_rules=False）
 # E27：check_bid_self_contradictions 支持同句复合质保合并与未填模板下划线提示，L651 client.chat 异常单条降级不中断流水线
+# E29：透传 ParsedDoc.media_ocr_spans；F4 定位与自相矛盾跳过目录页（\t页码）、内嵌历史合同/审计图片 OCR 区间，
+#      并遍历全部出现位置对《技术偏离表》/正面响应窗口评分择优（短标题顺延截取连续响应句）
 # 返回：{'findings': [...],            # MISSING_RESPONSE + CONTRADICTION + MISSING_EVIDENCE 汇总
 #        'star_results': [...],        # 每条 ★/▲ 要求核验详情（含 RESPONSE_OK）
 #        'self_contradictions': [...], # 投标书内部矛盾
@@ -192,8 +199,9 @@ ask_bid_expert_stream(tender_path: str | Path, bid_path: str | Path, question: s
 ```python
 # core/parser.py
 parse_document(file_path: str, *, ocr_images: bool = True,
-               progress_cb: Optional[Callable[[int, int, int], None]] = None) -> ParsedDoc          # .text / .source_type / .pages
+               progress_cb: Optional[Callable[[int, int, int], None]] = None) -> ParsedDoc          # .text / .source_type / .pages / .media_ocr_spans
 # E27：支持 Stage 1.5 统一预解析 progress_cb 实时回调（docx 每 10 张 .media.ocr.json 与扫描 PDF 每 5 页 .ocr.json 增量落盘及断点续扫）；ocr_images 保持向后兼容
+# E29：.docx 内嵌图片 OCR 文本同步记录精确区间 media_ocr_spans=[{'start','end','paragraph_index'}]，PDF/TXT/图片默认 []
 parse_qa_attachment(file_path: str | Path) -> dict    # E24: 低门槛 F7 附件解析（0~99 字图片不报错，返回 is_image/ocr_chars/has_text）
 build_pdf_page_spans(file_path: str | Path | None) -> list[tuple[int, int, int]]
 offset_to_page(offset: int | None, page_spans: list[tuple[int, int, int]]) -> int | None
@@ -299,3 +307,4 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 | 2026-11-12 | E26 招标所需证照清单与台账联动：`core/tender_extractor.py` 新增 0-Token `extract_required_certificates` 并纳入 `build_review_checklist` 返回 `'required_certificates'`；`core/qualification_scanner.py` 新增 `match_required_certificates_with_ledger`；`backend/schemas.py` 新增 `MatchedLedgerCertOut`/`RequiredCertItemOut`/`CertLedgerSummaryOut` 并扩展 `ExtractChecklistOut`；`backend/routers/extract.py` 按当前租户查询 `CompanyCertificate` 执行四态对账并返回台账匹配汇总 | 架构侧 + 验收 |
 | 2026-11-13 | E27 真标书实战排障与交互体验深化：`core/parser.py` `parse_document` 新增可选 `ocr_images`/`progress_cb` 与 `.docx` 每 10 张 `.media.ocr.json` / 扫描 `.pdf` 每 5 页 `.ocr.json`（`partial=True` 断点续扫与原子落盘）；`core/price_extractor.py` `extract_price_cap` 新增 `package_no` 分包预算精准匹配并支持复用 `parsed_doc`/`tender_parsed_doc`；`core/qualification_scanner.py` 新增 `resolve_effective_social_requirement` 并扩展 `scan_qualifications(..., client=None, social_min_count=None)`（局部社保窗隔离 + 受控 LLM 语义鉴别）；`core/tender_extractor.py` 新增 `classify_invalid_clause_role`（§2.6 扩展 `_EVAL_COMMITTEE_RULE_RE` 兼容 `6、报价过低` 及残片）与 `extract_chapter4_procurement_requirements`（§2.6 新增 `_pick_procurement_chapter` 跳过前文短目录存根、`（1）/(1)/1.` 编号条支持及 Pattern B 收缩先于 600 字截断）；`core/response_checker.py` 区分 `eval_rule`/`submission_rule`（F4 降级 `info`+`none`，F5 默认过滤）、复合质保合并与 L651 `try/except` 单条降级；`core/deviation_exporter.py` `export_deviation_table` 新增 keyword-only `f4_result=None` 支持 0 额外 LLM 复用导出；`core/llm_gateway.py` 新增 `timeout`/`max_retries=0` 与私有 IP TUN 诊断提示；`backend/worker.py` 拆分 Stage 1.5 `f_parse_ms` 耗时与冷启动 `cached_hits=0` SSE 进度修正，并在 Stage 4 前调用 `build_and_cache_deviation_artifacts`（复用 `f4_result` 预生成 F5 docx 与 `_stats.json` 快照，同步给 `deviation.py`/`reports.py` 复用）；`backend/routers/qa.py` 新增 `DELETE /api/qa/sessions/{id}/last-turn` 及 `/ask` 502 `QA_GATEWAY_ERROR` 隔离 | 架构侧 + 实现 |
 | 2026-11-16 | E28 F7 多会话并发流与重命名/首问自动命名补强：`backend/models.py` SQLite 新增 `PRAGMA busy_timeout=5000`；`backend/schemas.py` 新增 `QaSessionRenameRequest`；`backend/routers/qa.py` 新增 `_QA_DB_WRITE_LOCK` / `_persist_qa_turn_locked` 写锁串行化与 `PATCH /api/qa/sessions/{session_id}`（含隐藏别名与 `qa_rename_session` 审计），并将 `_is_default_session_title` 扩展到 `"{task.title} · 专家追问"` 占位标题的首问自动重命名；前端 `QaChatView.vue` 多会话 `cachedRuntimes` Map + Pinned/Projects 树形侧栏 + 行内/顶栏双击重命名及 `ExtractView.vue` F1 概览条通栏+Grid 布局对齐 | 架构侧 + 实现 |
+| 2026-11-16 | E29 感知层升级与真标书 F2/F4/OCR 实战排障：`core/parser.py` 为 `ParsedDoc` 挂载内嵌图片 OCR 精确区间 `media_ocr_spans`；`core/response_checker.py` 新增目录区/OCR 历史合同隔离、全命中评分择优与短标题顺延截取；`core/price_sandbox.py` `_normalize_upper` 补全以 `元` 结尾省写 `整` 的写法；`core/price_extractor.py` 增补 `'合计'` 列、近 3 段表前标题、《开标一览表》横向合并表头跨列多行子标签取值，及 `NEED_MANUAL` 时 LLM 单元格坐标感知 + Python `verify_quote`/`Decimal` 重解析兜底；`backend/worker.py` 修复 Stage 1.5 全缓存/零帧 OCR 播报、透传 `client=client` 与 `stats_payload` 报价预填字段；前端 `PriceManualDialog.vue`/`CheckDetailView.vue`/`types.ts` 清除硬编码假数据改用真实预填 | 实现 |

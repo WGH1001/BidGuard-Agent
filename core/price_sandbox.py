@@ -90,11 +90,14 @@ def amount_to_upper(amount) -> str:
 
 
 def _normalize_upper(text: str) -> str:
-    """大写金额归一化：去空白、"（大写）"标注前缀、货币符号、"正"→"整"、"圆"→"元"。"""
+    """大写金额归一化：去空白、"（大写）"标注前缀、货币符号、"正"→"整"、"圆"→"元"、以"元"结尾省写"整"时补全"整"。"""
     t = (text or '').strip().replace(' ', '').replace('　', '')
     t = re.sub(r'^[（(]?\s*大写\s*[）)]?', '', t)
     t = t.lstrip('￥¥人民币：:').rstrip('）)')
-    return t.replace('正', '整').replace('圆', '元')
+    t = t.replace('正', '整').replace('圆', '元')
+    if t.endswith('元'):
+        t = t + '整'
+    return t
 
 
 def _to_decimal(v) -> Decimal:

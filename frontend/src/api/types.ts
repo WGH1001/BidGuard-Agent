@@ -97,6 +97,10 @@ export interface BidTaskStats {
   price_status?: 'OK' | 'NEED_MANUAL' | string
   price_cap?: string | null
   bid_total?: string | null
+  reference_bid_total?: string | null
+  table_total?: string | null
+  bid_total_upper?: string | null
+  price_items?: PriceItemInput[]
   llm_status?: 'done' | 'skipped' | string
   suspicious_count?: number
   recommendation?: string

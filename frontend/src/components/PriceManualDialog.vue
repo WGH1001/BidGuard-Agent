@@ -14,6 +14,10 @@ const props = defineProps<{
   taskId: number
   initialPriceCap?: string | null
   initialBidTotal?: string | null
+  initialReferenceBidTotal?: string | null
+  initialTableTotal?: string | null
+  initialBidTotalUpper?: string | null
+  initialItems?: PriceItemInput[] | null
 }>()
 
 const emit = defineEmits<{
@@ -24,48 +28,57 @@ const emit = defineEmits<{
 const submitting = ref(false)
 const returnedFindings = ref<BidFindingOut[]>([])
 
+function createEmptyItemRow(): PriceItemInput {
+  return { name: '', qty: '1', unit_price: '', total_price: '' }
+}
+
+function cleanNumStr(raw?: string | null): string {
+  return String(raw || '').replace(/,/g, '').trim()
+}
+
 const form = reactive({
-  items: [
-    { name: '核心平台软件开发与集成', qty: '1', unit_price: '400000.00', total_price: '400000.00' },
-    { name: '日志采集与审计模块', qty: '2', unit_price: '42750.00', total_price: '85500.00' },
-  ] as PriceItemInput[],
-  table_total: '485500.00',
-  bid_total: '485500.00',
-  bid_total_upper: '肆拾捌万伍仟伍佰元整',
+  items: [createEmptyItemRow()] as PriceItemInput[],
+  table_total: '',
+  bid_total: '',
+  bid_total_upper: '',
   price_cap: '',
 })
 
+function syncFormFromProps(): void {
+  returnedFindings.value = []
+  const incomingItems = Array.isArray(props.initialItems)
+    ? props.initialItems
+        .filter((it) => it && (it.name || it.unit_price || it.total_price))
+        .map((it) => ({
+          name: String(it.name || '').trim(),
+          qty: cleanNumStr(it.qty) || '1',
+          unit_price: cleanNumStr(it.unit_price),
+          total_price: cleanNumStr(it.total_price),
+        }))
+    : []
+  form.items = incomingItems.length > 0 ? incomingItems : [createEmptyItemRow()]
+  form.table_total = cleanNumStr(props.initialTableTotal)
+  form.bid_total = cleanNumStr(props.initialBidTotal) || cleanNumStr(props.initialReferenceBidTotal)
+  form.bid_total_upper = String(props.initialBidTotalUpper || '').trim()
+  form.price_cap = cleanNumStr(props.initialPriceCap)
+}
+
 watch(
-  () => props.visible,
-  (val) => {
-    if (val) {
-      returnedFindings.value = []
-      if (props.initialPriceCap) {
-        form.price_cap = String(props.initialPriceCap).replace(/,/g, '').trim()
-      }
-      if (props.initialBidTotal) {
-        form.bid_total = String(props.initialBidTotal).replace(/,/g, '').trim()
-      }
+  () => [props.visible, props.taskId] as const,
+  ([vis]) => {
+    if (vis) {
+      syncFormFromProps()
     }
   },
 )
 
 function addRow(): void {
-  form.items.push({
-    name: '',
-    qty: '1',
-    unit_price: '0.00',
-    total_price: '0.00',
-  })
+  form.items.push(createEmptyItemRow())
 }
 
 function removeRow(index: number): void {
   if (form.items.length <= 1) return
   form.items.splice(index, 1)
-}
-
-function cleanNumStr(raw: string): string {
-  return String(raw || '').replace(/,/g, '').trim()
 }
 
 async function handleSubmit(): Promise<void> {

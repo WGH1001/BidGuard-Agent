@@ -1194,7 +1194,22 @@ def parse_document(
         if ext == '.docx':
             from docx import Document
             doc = Document(file_path)
-            text_parts = []
+            text_parts: list[str] = []
+            media_ocr_spans: list[dict[str, int]] = []
+            cur_off = 0
+
+            def _append_part(part_text: str, *, is_ocr: bool = False, para_idx: int = -1) -> None:
+                nonlocal cur_off
+                start = cur_off if not text_parts else cur_off + 1
+                text_parts.append(part_text)
+                end = start + len(part_text)
+                cur_off = end
+                if is_ocr:
+                    media_ocr_spans.append({
+                        'start': start,
+                        'end': end,
+                        'paragraph_index': para_idx,
+                    })
 
             related_parts = getattr(doc.part, 'related_parts', {}) or {}
             media_cache_path = _docx_media_ocr_cache_path(path)
@@ -1231,7 +1246,7 @@ def parse_document(
             for p_idx, para in enumerate(doc.paragraphs):
                 text = para.text.strip()
                 if text:
-                    text_parts.append(text)
+                    _append_part(text, is_ocr=False, para_idx=p_idx)
                 if ocr_images:
                     xml_str = getattr(para._p, 'xml', '') or ''
                     img_texts, dirty, skipped = _extract_xml_embedded_media_texts(
@@ -1247,7 +1262,8 @@ def parse_document(
                     if skipped:
                         ocr_skipped_any = True
                     for itxt in img_texts:
-                        text_parts.append(itxt)
+                        if itxt:
+                            _append_part(itxt, is_ocr=True, para_idx=p_idx)
 
             for table in doc.tables:
                 seen_tcs = set()
@@ -1259,7 +1275,7 @@ def parse_document(
                         seen_tcs.add(tc)
                         text = cell.text.strip()
                         if text:
-                            text_parts.append(text)
+                            _append_part(text, is_ocr=False, para_idx=-1)
                         if ocr_images:
                             tc_xml = getattr(tc, 'xml', '') or ''
                             img_texts, dirty, skipped = _extract_xml_embedded_media_texts(
@@ -1275,7 +1291,8 @@ def parse_document(
                             if skipped:
                                 ocr_skipped_any = True
                             for itxt in img_texts:
-                                text_parts.append(itxt)
+                                if itxt:
+                                    _append_part(itxt, is_ocr=True, para_idx=-1)
 
             if ocr_images and (cache_dirty or unflushed_new > 0):
                 _save_docx_media_cache(media_cache_path, media_cache_map)
@@ -1283,6 +1300,7 @@ def parse_document(
             parsed_doc = ParsedDoc(text="\n".join(text_parts), source_type=source_type, pages=1)
             parsed_doc.ocr_skipped = ocr_skipped_any
             parsed_doc.media_ocr_count = len(seen_media_sha1s)
+            parsed_doc.media_ocr_spans = media_ocr_spans
             return parsed_doc
 
         elif ext == '.pdf':
@@ -1301,7 +1319,9 @@ def parse_document(
             if len(text.strip()) < OCR_MIN_CHARS and max_page_chars < 20:
                 text = _ocr_pdf_text(path, progress_cb=progress_cb)
 
-            return ParsedDoc(text=text, source_type=source_type, pages=pages)
+            parsed_doc = ParsedDoc(text=text, source_type=source_type, pages=pages)
+            parsed_doc.media_ocr_spans = []
+            return parsed_doc
 
         elif ext in {'.txt', '.md'}:
             raw_bytes = path.read_bytes()
@@ -1316,11 +1336,15 @@ def parse_document(
             if text is None:
                 text = raw_bytes.decode('utf-8', errors='replace')
 
-            return ParsedDoc(text=text, source_type=source_type, pages=1)
+            parsed_doc = ParsedDoc(text=text, source_type=source_type, pages=1)
+            parsed_doc.media_ocr_spans = []
+            return parsed_doc
 
         elif ext in _IMAGE_EXTS:
             text = _ocr_image_text(path)
-            return ParsedDoc(text=text, source_type=source_type, pages=1)
+            parsed_doc = ParsedDoc(text=text, source_type=source_type, pages=1)
+            parsed_doc.media_ocr_spans = []
+            return parsed_doc
 
     except ValueError:
         raise

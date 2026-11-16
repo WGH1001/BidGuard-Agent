@@ -617,6 +617,10 @@ onBeforeUnmount(() => {
           :task-id="currentTask.id"
           :initial-price-cap="currentTask.stats_json?.price_cap"
           :initial-bid-total="currentTask.stats_json?.bid_total"
+          :initial-reference-bid-total="currentTask.stats_json?.reference_bid_total"
+          :initial-table-total="currentTask.stats_json?.table_total"
+          :initial-bid-total-upper="currentTask.stats_json?.bid_total_upper"
+          :initial-items="currentTask.stats_json?.price_items"
           @completed="handlePriceBackfillCompleted"
         />
       </template>

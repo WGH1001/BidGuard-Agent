@@ -45,12 +45,15 @@
 11. **E14 汇总行后缀识别（芜湖无为实锤）**：
     - 在保留前缀匹配的基础上追加后缀分支：当名称单元格以"合计/总计/小计/总报价/总价/投标总价"结尾（如"年度投标报价合计"）且满足防误伤护栏（不含动词/服务描述词、不含说明噪声词、不具备独立单价×数量算术明细特征）时，准确识别为汇总行。
 """
+import json
 import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
+from typing import Any
 
 from core.parser import parse_document
 from core.price_sandbox import PriceSandbox
+from core.quote_verifier import verify_quote
 
 CENT = Decimal('0.01')
 WAN = Decimal('10000')
@@ -106,6 +109,7 @@ _UPPER_AMOUNT_RE = re.compile(
     r'((?:人民币)?[（(]?大写[）)]?[：:\s]*)?'
     r'([零壹贰叁肆伍陆柒捌玖拾佰仟万亿]{2,}(?:元|圆)(?:整|正|[零壹贰叁肆伍陆柒捌玖角分]+)?)'
 )
+_BARE_UPPER_CN_RE = re.compile(r'[零壹贰叁肆伍陆柒捌玖拾佰仟万亿]{3,}')
 
 # 开标一览表总价文本行匹配（要求明确冒号与货币单位，防止误匹配"投标报价×30分"等评分公式）
 _BID_TOTAL_LINE_RE = re.compile(
@@ -145,7 +149,7 @@ _COL_UNIT_PRICE_KEYS = (
     '费用标准', '收费标准', '计费标准', '报价单价', '月单价', '年单价',
 )
 _COL_TOTAL_PRICE_KEYS = (
-    '合价', '分项合计', '分项总价', '投标合价', '含税总价',
+    '合价', '合计', '分项合计', '分项总价', '投标合价', '含税总价',
     '含税合价', '分项报价', '单项合价', '单项合计', '费用合计',
     '小计', '总价', '金额', '费用', '报价',
 )
@@ -1097,7 +1101,13 @@ def _classify_table_priority(deduped_rows: list[list[str]], prev_heading: str = 
     if any(k in top_two_joined for k in ('开标一览', '报价一览', '唱标一览')):
         return 'primary'
 
-    has_proj_col = any(any(pk in c for pk in ('项目名称', '项目编号', '品目名称', '标段', '包号')) for c in first_row)
+    has_proj_col = any(
+        any(pk in c for pk in (
+            '项目名称', '项目编号', '品目名称', '标段', '包号',
+            '投标人名称', '报价人名称', '供应商名称',
+        ))
+        for c in first_row
+    )
     has_bid_col = any(
         any(bk in c for bk in _BID_TOTAL_LABEL_KEYS) and not _has_non_bid_context(c)
         for c in first_row
@@ -1114,12 +1124,12 @@ def _classify_table_priority(deduped_rows: list[list[str]], prev_heading: str = 
 
 
 def _iter_doc_tables_with_prev_heading(doc) -> list[tuple[object, str]]:
-    """按文档块顺序遍历 doc.tables，并附带每个表格紧邻的上方非空段落文本。"""
+    """按文档块顺序遍历 doc.tables，并附带每个表格上方最近 3 个非空段落拼接文本。"""
     from docx.oxml.ns import qn
 
     tbl_by_el = {t._tbl: t for t in doc.tables}
     out: list[tuple[object, str]] = []
-    last_para_txt = ''
+    recent_paras: list[str] = []
 
     body = getattr(doc.element, 'body', None)
     if body is not None:
@@ -1127,9 +1137,12 @@ def _iter_doc_tables_with_prev_heading(doc) -> list[tuple[object, str]]:
             if child.tag == qn('w:p'):
                 txt = ''.join(t.text or '' for t in child.iter(qn('w:t'))).strip()
                 if txt:
-                    last_para_txt = txt
+                    recent_paras.append(txt)
+                    if len(recent_paras) > 3:
+                        recent_paras.pop(0)
             elif child.tag == qn('w:tbl') and child in tbl_by_el:
-                out.append((tbl_by_el[child], last_para_txt))
+                out.append((tbl_by_el[child], ' '.join(recent_paras)))
+                recent_paras.clear()
 
     if len(out) != len(doc.tables):
         return [(t, '') for t in doc.tables]
@@ -1647,8 +1660,10 @@ def _extract_from_docx_tables(doc) -> dict:
         target_uppers = primary_bid_uppers if tbl_priority == 'primary' else secondary_bid_uppers
 
         header_cells = [re.sub(r'\s+', '', c.text) for c in rows[0].cells]
+        raw_header_cells = rows[0].cells
         bid_col = None
         upper_col = None
+        bid_header_cols: list[int] = []
         if tbl_priority == 'primary' and len(header_cells) >= 2:
             for idx, h in enumerate(header_cells):
                 is_lbl, _ = _is_bid_total_label_cell(h)
@@ -1657,13 +1672,78 @@ def _extract_from_docx_tables(doc) -> dict:
                         upper_col = idx
                     elif bid_col is None:
                         bid_col = idx
+                        bid_header_cols.append(idx)
+                    elif idx < len(raw_header_cells) and raw_header_cells[idx]._tc is raw_header_cells[bid_col]._tc:
+                        bid_header_cols.append(idx)
                     else:
                         upper_col = idx
 
         if bid_col is not None and len(rows) >= 2:
             has_price_table_skeleton = True
             row1 = rows[1].cells
-            if bid_col < len(row1):
+            has_split_sub_labels = any(
+                ('小写' in row1[idx].text or '大写' in row1[idx].text)
+                for idx in bid_header_cols
+                if idx < len(row1)
+            )
+            if has_split_sub_labels or len(bid_header_cols) >= 2:
+                col_is_wan = ('万元' in header_cells[bid_col])
+                for r_sub in rows[1:min(len(rows), 5)]:
+                    sub_cells: list[str] = []
+                    seen_sub_tc = set()
+                    for idx in bid_header_cols:
+                        if idx < len(r_sub.cells) and r_sub.cells[idx]._tc not in seen_sub_tc:
+                            seen_sub_tc.add(r_sub.cells[idx]._tc)
+                            t_sub = r_sub.cells[idx].text.strip()
+                            if t_sub:
+                                sub_cells.append(t_sub)
+                    if not sub_cells:
+                        continue
+                    sub_joined = ' '.join(sub_cells)
+                    if any(k in sub_joined for k in ('注：', '说明：', '投标总价')):
+                        continue
+                    if '大写' in sub_joined and '小写' not in sub_joined:
+                        val_cells = [
+                            c for c in sub_cells
+                            if not re.fullmatch(r'(?:人民币)?[（(]?大写[）)]?[：:\s]*', re.sub(r'\s+', '', c))
+                        ] or sub_cells
+                        for c_txt in val_cells:
+                            ups = _extract_all_upper_values_from_cell(c_txt)
+                            if not ups:
+                                clean_u = re.sub(r'\s+', '', _strip_non_bid_clauses(c_txt))
+                                m_bare = _BARE_UPPER_CN_RE.search(clean_u)
+                                if m_bare:
+                                    ups = [m_bare.group(0)]
+                            for u_val in ups:
+                                if u_val not in target_uppers:
+                                    target_uppers.append(u_val)
+                    else:
+                        val_cells = [
+                            c for c in sub_cells
+                            if not re.fullmatch(r'(?:人民币)?[（(]?小写[）)]?[：:\s]*', re.sub(r'\s+', '', c))
+                        ] or sub_cells
+                        row_vals: list[Decimal] = []
+                        for c_txt in val_cells:
+                            for v in _extract_all_money_values_from_cell(
+                                c_txt, default_wan=col_is_wan, require_unit=False
+                            ):
+                                if v not in row_vals:
+                                    row_vals.append(v)
+                        if len(row_vals) == 1:
+                            fmt_v = _fmt_yuan(row_vals[0])
+                            if fmt_v not in target_totals:
+                                target_totals.append(fmt_v)
+                        elif len(row_vals) >= 2:
+                            bid_total_ambiguous = True
+                            warnings.append({
+                                'code': 'AMBIGUOUS_BID_TOTAL',
+                                'severity': 'warning',
+                                'message': (
+                                    f"开标一览表总价单元格存在多个不同金额（{'、'.join(_fmt_yuan(v) + '元' for v in row_vals)}），"
+                                    f"无法自动消歧，已跳过总价自动赋值，请人工复核"
+                                ),
+                            })
+            elif bid_col < len(row1):
                 cell_txt = row1[bid_col].text.strip()
                 col_is_wan = ('万元' in header_cells[bid_col])
                 vals = _extract_all_money_values_from_cell(
@@ -2081,11 +2161,253 @@ def extract_price_from_text(text: str) -> dict:
     }
 
 
+_LLM_PRICE_PERCEPTION_KEYS = (
+    '报价', '总价', '单价', '合价', '合计', '小计', '小写', '大写', '预算', '金额', '费用', '元', '￥', '¥',
+)
+
+_LLM_PRICE_TABLE_PROMPT = """你是招投标报价表结构感知专家。系统确定性规则未能从以下异形表格或扫描件文本中自动对齐报价列。
+请仅做【版面结构与坐标识别】，绝不要自己计算、汇总或改写任何金额数字。
+
+下面是带单元格/行坐标的候选报价文本（坐标格式 `[T表号R行号C列号]` 或 `[L行号]`）：
+{payload}
+
+请只输出一个 JSON 对象（不确定的字段填 "" 或 []）：
+{{
+  "bid_total_coord": "开标一览表投标总报价小写数字所在单元格/行坐标，无则空串",
+  "bid_total_quote": "该坐标单元格内的金额原文片段（如有）",
+  "bid_total_unit_wan": false,
+  "bid_total_upper_coord": "开标一览表人民币大写所在单元格/行坐标，无则空串",
+  "bid_total_upper_quote": "该坐标单元格内的大写金额原文片段（如有）",
+  "table_total_coord": "分项明细表合计行总金额所在单元格/行坐标，无则空串",
+  "table_total_unit_wan": false,
+  "items_unit_wan": false,
+  "items": [
+    {{
+      "name_coord": "分项名称所在坐标",
+      "qty_coord": "数量所在坐标（无则空串）",
+      "unit_price_coord": "单价所在坐标",
+      "total_price_coord": "合价/合计所在坐标"
+    }}
+  ]
+}}
+
+只输出合法 JSON，不要输出任何额外说明。"""
+
+
+def _collect_price_perception_payload(
+    file_path: Path,
+    parsed_text: str,
+    max_chars: int = 5800,
+) -> tuple[str, dict[str, str]]:
+    """收集带确定性单元格/行坐标的局部报价窗口供 LLM 感知。"""
+    coord_map: dict[str, str] = {}
+    blocks: list[str] = []
+    used_chars = 0
+
+    if file_path.suffix.lower() == '.docx' and file_path.is_file():
+        try:
+            from docx import Document
+            doc = Document(str(file_path))
+            for ti, tbl in enumerate(doc.tables):
+                row_lines: list[str] = []
+                tbl_has_cue = False
+                for ri, row in enumerate(tbl.rows[:40]):
+                    seen_tcs = set()
+                    cell_tokens: list[str] = []
+                    ci = 0
+                    for cell in row.cells:
+                        if cell._tc in seen_tcs:
+                            continue
+                        seen_tcs.add(cell._tc)
+                        raw_txt = re.sub(r'\s+', ' ', cell.text or '').strip()
+                        if raw_txt:
+                            if any(k in raw_txt for k in _LLM_PRICE_PERCEPTION_KEYS):
+                                tbl_has_cue = True
+                            coord = f"T{ti}R{ri}C{ci}"
+                            coord_map[coord] = raw_txt
+                            cell_tokens.append(f"[{coord}] {raw_txt[:80]}")
+                        ci += 1
+                    if cell_tokens:
+                        row_lines.append(' | '.join(cell_tokens))
+                if not tbl_has_cue or not row_lines:
+                    continue
+                blk = f"--- Table {ti} ---\n" + '\n'.join(row_lines)
+                if used_chars + len(blk) > max_chars and blocks:
+                    break
+                blocks.append(blk[:max_chars - used_chars])
+                used_chars += len(blocks[-1]) + 1
+                if used_chars >= max_chars:
+                    break
+        except Exception:
+            blocks = []
+            coord_map = {}
+
+    if not blocks and parsed_text:
+        lines = parsed_text.splitlines()
+        picked: set[int] = set()
+        for idx, ln in enumerate(lines):
+            if any(k in ln for k in _LLM_PRICE_PERCEPTION_KEYS):
+                for j in range(max(0, idx - 6), min(len(lines), idx + 12)):
+                    picked.add(j)
+        line_tokens: list[str] = []
+        for idx in sorted(picked)[:120]:
+            ln_txt = lines[idx].strip()
+            if not ln_txt:
+                continue
+            coord = f"L{idx}"
+            coord_map[coord] = ln_txt
+            entry = f"[{coord}] {ln_txt[:140]}"
+            if used_chars + len(entry) > max_chars and line_tokens:
+                break
+            line_tokens.append(entry)
+            used_chars += len(entry) + 1
+        if line_tokens:
+            blocks.append('\n'.join(line_tokens))
+
+    return '\n'.join(blocks), coord_map
+
+
+def _parse_perception_json(reply: str) -> dict[str, Any] | None:
+    if not reply or not isinstance(reply, str):
+        return None
+    m = re.search(r'\{.*\}', reply, re.DOTALL)
+    if not m:
+        return None
+    try:
+        parsed = json.loads(m.group(0))
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+def _llm_perceive_price_tables(
+    file_path: Path,
+    parsed_text: str,
+    client: Any,
+) -> dict[str, Any]:
+    """E29 ④：规则提取失败时调用 LLM 仅做单元格坐标感知，再由 Python 回读原格并用 Decimal 重解析。"""
+    payload, coord_map = _collect_price_perception_payload(file_path, parsed_text)
+    if not payload or not coord_map or client is None:
+        return {}
+
+    try:
+        resp = client.chat(
+            [
+                {
+                    'role': 'system',
+                    'content': '你是招投标报价表结构感知专家。只返回原始单元格或行坐标 JSON，禁止自算或编造数字。',
+                },
+                {'role': 'user', 'content': _LLM_PRICE_TABLE_PROMPT.format(payload=payload)},
+            ],
+            temperature=0,
+        )
+    except Exception:
+        return {}
+
+    reply_txt = resp.get('content', '') if isinstance(resp, dict) else str(resp or '')
+    data = _parse_perception_json(reply_txt)
+    if not data:
+        return {}
+
+    def _resolve_coord(coord_key: Any, quote_hint: Any = None) -> str | None:
+        c_id = str(coord_key or '').strip()
+        if not c_id or c_id not in coord_map:
+            return None
+        raw_cell = coord_map[c_id]
+        if quote_hint:
+            q_s = str(quote_hint).strip()
+            if q_s and not verify_quote(q_s, raw_cell):
+                if re.sub(r'\s+', '', q_s) not in re.sub(r'\s+', '', raw_cell):
+                    return None
+        return raw_cell
+
+    out: dict[str, Any] = {'llm_perceived': True}
+
+    raw_bid = _resolve_coord(data.get('bid_total_coord'), data.get('bid_total_quote'))
+    if raw_bid:
+        bid_val = _parse_money_str(
+            _strip_non_bid_clauses(raw_bid),
+            default_wan=bool(data.get('bid_total_unit_wan')),
+            require_unit=False,
+        )
+        if bid_val is not None and bid_val >= Decimal('50'):
+            out['bid_total'] = _fmt_yuan(bid_val)
+
+    raw_upper = _resolve_coord(data.get('bid_total_upper_coord'), data.get('bid_total_upper_quote'))
+    if raw_upper:
+        ups = _extract_all_upper_values_from_cell(raw_upper)
+        if not ups:
+            clean_u = re.sub(r'\s+', '', _strip_non_bid_clauses(raw_upper))
+            m_bare = _BARE_UPPER_CN_RE.search(clean_u)
+            if m_bare:
+                ups = [m_bare.group(0)]
+        if ups:
+            out['bid_total_upper'] = ups[0]
+
+    raw_tbl_tot = _resolve_coord(data.get('table_total_coord'))
+    if raw_tbl_tot:
+        tbl_val = _parse_money_str(
+            _strip_non_bid_clauses(raw_tbl_tot),
+            default_wan=bool(data.get('table_total_unit_wan')),
+            require_unit=False,
+        )
+        if tbl_val is not None and tbl_val >= Decimal('50'):
+            out['table_total'] = _fmt_yuan(tbl_val)
+
+    row_wan = bool(data.get('items_unit_wan'))
+    parsed_items: list[dict[str, Any]] = []
+    for row_spec in data.get('items') or []:
+        if not isinstance(row_spec, dict):
+            continue
+        raw_nm = _resolve_coord(row_spec.get('name_coord'))
+        raw_tp = _resolve_coord(row_spec.get('total_price_coord'))
+        raw_up = _resolve_coord(row_spec.get('unit_price_coord'))
+        raw_qty = _resolve_coord(row_spec.get('qty_coord')) if row_spec.get('qty_coord') else ''
+        if not raw_nm or not raw_tp:
+            continue
+        tp_val = _parse_money_str(_strip_non_bid_clauses(raw_tp), default_wan=row_wan, require_unit=False)
+        if tp_val is None or tp_val <= 0:
+            continue
+        qty_val = (_parse_qty_str(raw_qty) if raw_qty else None) or Decimal('1')
+        up_val = (
+            _parse_money_str(_strip_non_bid_clauses(raw_up), default_wan=row_wan, require_unit=False)
+            if raw_up
+            else None
+        )
+        if up_val is None and not row_spec.get('unit_price_coord') and qty_val == Decimal('1'):
+            up_val = tp_val
+        if up_val is None:
+            continue
+        clean_nm = re.sub(r'\s+', ' ', raw_nm).strip()
+        if not clean_nm or _is_bogus_price_row(
+            item_name=clean_nm,
+            qty_raw=str(raw_qty or '1'),
+            unit_raw=raw_up or '',
+            total_raw=raw_tp,
+            qty_val=qty_val,
+            unit_val=up_val,
+            total_val=tp_val,
+        ):
+            continue
+        parsed_items.append({
+            'name': clean_nm,
+            'qty': str(qty_val),
+            'unit_price': _fmt_yuan(up_val),
+            'total_price': _fmt_yuan(tp_val),
+            'cell_coord': str(row_spec.get('total_price_coord') or '').strip(),
+        })
+    if parsed_items:
+        out['items'] = parsed_items
+
+    return out
+
+
 def extract_price_data(
     file_path: str | Path,
     tender_path: str | Path | None = None,
     parsed_doc=None,
     tender_parsed_doc=None,
+    client: Any = None,
 ) -> dict:
     """从投标文件（或招标文件）提取 PriceSandbox 所需的全部结构化字段。"""
     path = Path(file_path)
@@ -2105,6 +2427,7 @@ def extract_price_data(
         'reference_bid_total_upper': ref_upper or text_res['bid_total_upper'],
         'has_price_table_skeleton': False,
         'has_subtotal_summary_mismatch': False,
+        'llm_status': 'skipped',
         'warnings': list(text_res.get('warnings') or []),
     }
 
@@ -2159,6 +2482,21 @@ def extract_price_data(
             pkg_cap = _extract_package_specific_cap(parsed.text, pkg_no)
             if pkg_cap is not None:
                 res['price_cap'] = pkg_cap
+
+    # E29 ④：仅当确定性提取失败（既无分项又无总报价）且启用 LLM 时，启用结构化表格坐标感知兜底
+    if not (res['items'] or res['bid_total'] is not None) and client is not None and not res.get('warnings'):
+        llm_res = _llm_perceive_price_tables(path, parsed.text, client)
+        if llm_res:
+            if llm_res.get('items'):
+                res['items'] = llm_res['items']
+            if llm_res.get('bid_total') is not None:
+                res['bid_total'] = llm_res['bid_total']
+            if llm_res.get('bid_total_upper') is not None:
+                res['bid_total_upper'] = llm_res['bid_total_upper']
+            if llm_res.get('table_total') is not None and res['table_total'] is None:
+                res['table_total'] = llm_res['table_total']
+            if res['items'] or res['bid_total'] is not None:
+                res['llm_status'] = 'done'
 
     if res['items'] or res['bid_total'] is not None:
         res['status'] = 'OK'
@@ -2229,6 +2567,7 @@ def run_price_check(
     tender_path: str | Path | None = None,
     parsed_doc=None,
     tender_parsed_doc=None,
+    client: Any = None,
 ) -> dict:
     """端到端辅助入口：提取报价结构 -> 若 status=='OK' 则送入 PriceSandbox 核验，并合并提取层 warning。"""
     extracted = extract_price_data(
@@ -2236,6 +2575,7 @@ def run_price_check(
         tender_path=tender_path,
         parsed_doc=parsed_doc,
         tender_parsed_doc=tender_parsed_doc,
+        client=client,
     )
     extractor_warnings = list(extracted.get('warnings') or [])
     if extracted['status'] != 'OK':

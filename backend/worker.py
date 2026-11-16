@@ -718,7 +718,25 @@ class BidTaskWorker:
             flush_step = 5 if is_bid_pdf else 10
 
             def _on_bid_ocr_progress(done_items: int, total_items: int, _cached_hits: int) -> None:
-                if total_items <= 0 or done_items <= 0:
+                if total_items <= 0:
+                    if _cached_hits > 0:
+                        self._emit_stage(
+                            session,
+                            task,
+                            'extracting',
+                            50,
+                            f"Stage 1.5 扫描件/内嵌图片 OCR 识别：已从本地缓存秒级加载 {_cached_hits} {ocr_unit}历史识别结果",
+                        )
+                    return
+                if done_items <= 0:
+                    cache_hint = f"（已命中缓存 {_cached_hits} {ocr_unit}）" if _cached_hits > 0 else ""
+                    self._emit_stage(
+                        session,
+                        task,
+                        'extracting',
+                        43,
+                        f"正在对投标书扫描件/内嵌图片执行离线 OCR（已完成 0 / {total_items} {ocr_unit}，每 {flush_step} {ocr_unit}增量落盘缓存）{cache_hint}",
+                    )
                     return
                 now_ts = time.perf_counter()
                 if done_items < total_items and (now_ts - last_ocr_emit[0]) < 1.5 and (done_items % 5 != 0):
@@ -745,6 +763,7 @@ class BidTaskWorker:
                 tender_path=tender_abs,
                 parsed_doc=bid_parsed,
                 tender_parsed_doc=tender_parsed,
+                client=client,
             )
             duration_record['f2_ms'] = max(0, int(round((time.perf_counter() - t_f2) * 1000)))
 
@@ -1022,6 +1041,18 @@ class BidTaskWorker:
                 'price_status': str(f2_res.get('status') or 'NEED_MANUAL'),
                 'price_cap': f2_res.get('price_cap'),
                 'bid_total': f2_res.get('bid_total'),
+                'reference_bid_total': f2_res.get('reference_bid_total'),
+                'table_total': f2_res.get('table_total'),
+                'bid_total_upper': f2_res.get('bid_total_upper'),
+                'price_items': [
+                    {
+                        'name': str(it.get('name') or ''),
+                        'qty': str(it.get('qty') or '1'),
+                        'unit_price': str(it.get('unit_price') or ''),
+                        'total_price': str(it.get('total_price') or ''),
+                    }
+                    for it in (f2_res.get('items') or [])
+                ],
                 'llm_status': llm_status,
             }
 

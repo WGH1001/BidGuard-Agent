@@ -43,9 +43,19 @@ from core.tender_extractor import (
 # ── 常量与扩窗配置 ────────────────────────────────────────────────────────
 _REQ_EXPAND_BEFORE = 60
 _REQ_EXPAND_AFTER = 360
-_BID_WIN_BEFORE = 120
-_BID_WIN_AFTER = 480
+_BID_WIN_BEFORE = 360
+_BID_WIN_AFTER = 600
 _ANCHOR_MIN_SCORE = 0.22
+
+_TOC_LINE_RE = re.compile(r'(?:\t|\.{3,}|…{2,}|\s{4,})\s*(?:第\s*)?\d{1,4}\s*页?\s*$')
+_HIST_CONTRACT_ANCHOR_RE = re.compile(
+    r'合同登记编号|技术服务合同|委托开发合同|技术开发合同|北京技术市场'
+    r'|合同类\s*20\d{2}|本页无正文|增值税专[用川]|现金流量表|资产负债表|利润表'
+    r'|会计师事务所|审计报告|乙方向甲方开具|上游合同款项'
+)
+_BID_POSITIVE_TABLE_ANCHOR_RE = re.compile(
+    r'技术偏离表|商务偏离表|技术参数响应|投标响应内容|我公司提供的产品完全满足|我方完全满足|无偏离|正偏离|见技术方案'
+)
 
 _EVIDENCE_WARNING_NOTE = '（注：请核实已附对应证明材料）'
 
@@ -235,6 +245,108 @@ def _extract_core_grams(text: str) -> set[str]:
     return {cleaned[i:i + 2] for i in range(len(cleaned) - 1)}
 
 
+def _is_toc_region(text: str, pos: int) -> bool:
+    """判断命中偏移所在行及邻近窗口是否属于目录区（跳过伪首现）。"""
+    if not text or pos < 0 or pos >= len(text):
+        return False
+    line_start = text.rfind('\n', 0, pos) + 1
+    line_end = text.find('\n', pos)
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end].strip()
+    if _TOC_LINE_RE.search(line) and len(line) <= 110:
+        return True
+    win = text[max(0, pos - 220):min(len(text), pos + 220)]
+    toc_lines = sum(
+        1 for ln in win.splitlines()
+        if len(ln.strip()) <= 110 and _TOC_LINE_RE.search(ln.strip())
+    )
+    return (
+        toc_lines >= 2
+        and len(line) <= 45
+        and not any(p in line for p in '。；！？：:')
+        and not _BID_POSITIVE_TABLE_ANCHOR_RE.search(line)
+    )
+
+
+def _is_in_media_ocr_or_historical_contract(
+    text: str,
+    pos: int,
+    media_ocr_spans: Optional[list[dict[str, int]]] = None,
+) -> bool:
+    """判断命中偏移是否落在内嵌图片 OCR 区间或历史业绩合同/审计报告附注区。"""
+    if pos < 0 or not text:
+        return False
+    w_lo = max(0, pos - 450)
+    w_hi = min(len(text), pos + 450)
+    if media_ocr_spans:
+        for sp in media_ocr_spans:
+            try:
+                sp_s = int(sp['start'])
+                sp_e = int(sp['end'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if sp_s <= pos < sp_e:
+                return True
+            if sp_e <= pos and sp_e > w_lo:
+                w_lo = sp_e
+            if sp_s > pos and sp_s < w_hi:
+                w_hi = sp_s
+    win = text[w_lo:w_hi]
+    if _HIST_CONTRACT_ANCHOR_RE.search(win) and not _BID_POSITIVE_TABLE_ANCHOR_RE.search(win):
+        return True
+    return False
+
+
+def _score_bid_candidate_window(
+    text: str,
+    pos: int,
+    match_len: int,
+    media_ocr_spans: Optional[list[dict[str, int]]] = None,
+) -> tuple[bool, int]:
+    """过滤目录与历史合同图片 OCR 区，并对处于偏离表/正面响应锚点窗口的候选加分择优。"""
+    if _is_toc_region(text, pos) or _is_in_media_ocr_or_historical_contract(text, pos, media_ocr_spans):
+        return False, -9999
+    win = text[max(0, pos - 450):min(len(text), pos + match_len + 450)]
+    broad = text[max(0, pos - 1600):min(len(text), pos + match_len + 200)]
+    pre_close = text[max(0, pos - 450):min(len(text), pos + match_len)]
+    score = 0
+    if '我公司提供的产品完全满足' in broad or '我方完全满足' in broad:
+        score += 90
+    if '我公司提供的产品完全满足' in pre_close or '投标响应内容' in pre_close:
+        score += 80
+    if any(k in win for k in ('投标响应内容', '响应参数', '见技术方案', '我方响应')):
+        score += 70
+    if any(k in win for k in ('无偏离', '正偏离', '完全满足', '完全响应', '完全符合')):
+        score += 60
+    if any(k in broad for k in ('技术偏离表', '商务偏离表', '偏离情况')):
+        score += 50
+    return True, score
+
+
+def _find_best_valid_occurrence(
+    bid_text: str,
+    needle: str,
+    media_ocr_spans: Optional[list[dict[str, int]]] = None,
+) -> int:
+    """遍历所有命中偏移，剔除目录区与历史合同图片 OCR 区，返回得分最高的响应定位。"""
+    if not bid_text or not needle:
+        return -1
+    best_pos = -1
+    best_score = -10000
+    search_from = 0
+    for _ in range(500):
+        pos = bid_text.find(needle, search_from)
+        if pos == -1:
+            break
+        ok, sc = _score_bid_candidate_window(bid_text, pos, len(needle), media_ocr_spans)
+        if ok and sc > best_score:
+            best_score = sc
+            best_pos = pos
+        search_from = pos + max(1, len(needle))
+    return best_pos
+
+
 def _build_direct_hit_result(bid_text: str, pos: int, anchor_len: int, score: float = 1.0) -> dict[str, Any]:
     """根据在 bid_text 中命中的偏移量构造直通窗口字典（gate='direct'）。"""
     w_lo = max(0, pos - _BID_WIN_BEFORE)
@@ -245,6 +357,13 @@ def _build_direct_hit_result(bid_text: str, pos: int, anchor_len: int, score: fl
         if (line_end != -1 and line_end - pos <= 260)
         else min(len(bid_text), pos + max(anchor_len, 40) + 80)
     )
+    if len(bid_text[pos:q_end].strip()) < 35 and line_end != -1 and line_end + 1 < len(bid_text):
+        next_nl = bid_text.find('\n', line_end + 1)
+        if next_nl == -1:
+            next_nl = len(bid_text)
+        cand_end = min(len(bid_text), next_nl, pos + 200)
+        if cand_end > q_end and bid_text[line_end + 1:cand_end].strip():
+            q_end = cand_end
     return {
         'hit': True,
         'score': score,
@@ -265,8 +384,9 @@ def _locate_bid_window_for_req(
     align_map: dict[str, list[str]],
     bid_text: str,
     client: Any = None,
+    media_ocr_spans: Optional[list[dict[str, int]]] = None,
 ) -> dict[str, Any]:
-    """为单条招标 ★/▲ 要求在投标书中定位最佳响应窗口（带 E3 同文对齐加固与严格门控 Gate Filter）。"""
+    """为单条招标 ★/▲ 要求在投标书中定位最佳响应窗口（带 E29 目录/历史合同 OCR 过滤与择优评分）。"""
     if not bid_text or not bid_text.strip():
         return {
             'hit': False, 'score': 0.0, 'window': '',
@@ -283,20 +403,20 @@ def _locate_bid_window_for_req(
     first_line = req_stripped.split('\n', 1)[0].strip()
     for exact_cand in (req_stripped, first_line):
         if len(exact_cand) >= 2:
-            pos = bid_text.find(exact_cand)
+            pos = _find_best_valid_occurrence(bid_text, exact_cand, media_ocr_spans)
             if pos != -1:
                 return _build_direct_hit_result(bid_text, pos, len(exact_cand), score=1.0)
 
     raw_core = re.sub(r'^[★▲\s]+', '', first_line).strip()
     if len(raw_core) >= 2:
-        pos = bid_text.find(raw_core[:20])
+        pos = _find_best_valid_occurrence(bid_text, raw_core[:20], media_ocr_spans)
         if pos != -1:
             return _build_direct_hit_result(bid_text, pos, min(len(raw_core), 20), score=1.0)
 
     m_t = re.match(r'^[★▲]?\s*[\d一二三四五六七八九十]+\s*[、\.．]\s*[^，。；\n\s]{2,40}', first_line)
     title = re.sub(r'^[★▲\s]+', '', (m_t.group(0) if m_t else first_line)).strip().rstrip('。；：:，, ')
     if len(title) >= 4:
-        pos = bid_text.find(title[:24])
+        pos = _find_best_valid_occurrence(bid_text, title[:24], media_ocr_spans)
         if pos != -1:
             return _build_direct_hit_result(bid_text, pos, min(len(title), 24), score=0.95)
 
@@ -304,11 +424,21 @@ def _locate_bid_window_for_req(
         re.sub(r'^[★▲\s0-9.、()（）一二三四五六七八九十]+', '', seg).strip()
         for seg in re.split(r'[\n；;。！？（）()]+', req_stripped)
     ]
+    expanded_seeds: list[str] = []
     for seg in sub_clauses:
         if len(seg) >= 6:
-            pos = bid_text.find(seg[:24])
-            if pos != -1:
-                return _build_direct_hit_result(bid_text, pos, min(len(seg), 24), score=0.92)
+            expanded_seeds.append(seg)
+            if ' ' in seg:
+                head_tok, rest_tok = seg.split(' ', 1)
+                if len(rest_tok.strip()) >= 8:
+                    expanded_seeds.append(rest_tok.strip())
+                if len(head_tok.strip()) >= 4:
+                    expanded_seeds.append(head_tok.strip())
+
+    for seg in expanded_seeds:
+        pos = _find_best_valid_occurrence(bid_text, seg[:24], media_ocr_spans)
+        if pos != -1:
+            return _build_direct_hit_result(bid_text, pos, min(len(seg), 24), score=0.92)
 
     req_grams = _extract_core_grams(req_text)
 
@@ -321,6 +451,11 @@ def _locate_bid_window_for_req(
                 v2_idx = int(v2_key.split(':')[1])
                 if 0 <= v2_idx < len(bid_units):
                     v_unit = bid_units[v2_idx]
+                    if (
+                        _is_toc_region(bid_text, v_unit.start)
+                        or _is_in_media_ocr_or_historical_contract(bid_text, v_unit.start, media_ocr_spans)
+                    ):
+                        continue
                     v_grams = _extract_core_grams(v_unit.raw_text)
                     overlap = (len(req_grams & v_grams) / max(len(req_grams), 1)) if req_grams else 0.0
                     if overlap > best_score:
@@ -347,7 +482,11 @@ def _locate_bid_window_for_req(
         for raw_line in bid_text.split('\n'):
             line_len = len(raw_line)
             stripped = raw_line.strip()
-            if len(stripped) >= 4:
+            if (
+                len(stripped) >= 4
+                and not _is_toc_region(bid_text, cursor)
+                and not _is_in_media_ocr_or_historical_contract(bid_text, cursor, media_ocr_spans)
+            ):
                 l_grams = _extract_core_grams(stripped)
                 if l_grams:
                     score = len(req_grams & l_grams) / len(req_grams)
@@ -374,11 +513,16 @@ def _locate_bid_window_for_req(
         query=req_text,
         doc_text=bid_text,
         client=client,
-        top_k=1,
+        top_k=5,
         min_score=0.38,
     )
-    if hybrid_hits:
-        top_h = hybrid_hits[0]
+    for top_h in hybrid_hits or []:
+        h_start = int(top_h.get('start', 0))
+        if (
+            _is_toc_region(bid_text, h_start)
+            or _is_in_media_ocr_or_historical_contract(bid_text, h_start, media_ocr_spans)
+        ):
+            continue
         return {
             'hit': True,
             'score': top_h['score'],
@@ -602,6 +746,7 @@ def check_bid_self_contradictions(
     bid_text: str,
     bid_path: Optional[str | Path] = None,
     client=None,
+    bid_media_ocr_spans: Optional[list[dict[str, int]]] = None,
 ) -> list[dict]:
     """扫描投标书内部前后承诺矛盾（质保期、总报价、响应时间、质保金比例 + LLM 语义冲突）。"""
     findings: list[dict] = []
@@ -617,7 +762,10 @@ def check_bid_self_contradictions(
         _extract_retention_mentions,
     )
     for ext_fn in extractors:
-        mentions = ext_fn(bid_text)
+        mentions = [
+            m for m in ext_fn(bid_text)
+            if not _is_in_media_ocr_or_historical_contract(bid_text, int(m['start']), bid_media_ocr_spans)
+        ]
         if len(mentions) < 2:
             continue
         first = mentions[0]
@@ -982,6 +1130,7 @@ def check_star_responses(
     client=None,
     tender_path: Optional[str | Path] = None,
     bid_path: Optional[str | Path] = None,
+    bid_media_ocr_spans: Optional[list[dict[str, int]]] = None,
 ) -> dict[str, Any]:
     """执行招标 ★/▲ 要求 ↔ 投标响应逐条勾稽核验（公共签名与返回结构保持一字不变，E19 升级双阶段并发）。"""
     if requirements is None:
@@ -1023,6 +1172,7 @@ def check_star_responses(
             align_map=align_map,
             bid_text=bid_text,
             client=client,
+            media_ocr_spans=bid_media_ocr_spans,
         )
 
         t_page, t_footer, t_is_docx = _resolve_unified_page(r_start, tender_ctx)
@@ -1367,6 +1517,7 @@ def run_response_check(
         checklist = build_review_checklist(str(tender_path))
         requirements = checklist['marked_clauses'] + checklist['invalid_bid_clauses']
 
+    bid_media_spans = getattr(bid_doc, 'media_ocr_spans', None)
     star_out = check_star_responses(
         tender_text=tender_doc.text,
         bid_text=bid_doc.text,
@@ -1374,12 +1525,14 @@ def run_response_check(
         client=client,
         tender_path=tender_path,
         bid_path=bid_path,
+        bid_media_ocr_spans=bid_media_spans,
     )
 
     internal_contradictions = check_bid_self_contradictions(
         bid_text=bid_doc.text,
         bid_path=bid_path,
         client=client,
+        bid_media_ocr_spans=bid_media_spans,
     )
 
     all_findings = list(star_out['findings']) + list(internal_contradictions)
