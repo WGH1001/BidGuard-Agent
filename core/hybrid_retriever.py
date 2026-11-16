@@ -19,9 +19,39 @@ import math
 import os
 from pathlib import Path
 import re
+import threading
 from typing import Any, Optional
 
 import numpy as np
+
+_CACHE_LOCKS_GUARD = threading.Lock()
+_CACHE_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _get_cache_lock(doc_sha: str) -> threading.Lock:
+    """按文档内容哈希获取互斥锁，防止同轮并行工具检索同时写同一 .emb.npy 缓存文件。"""
+    with _CACHE_LOCKS_GUARD:
+        lock = _CACHE_LOCKS.get(doc_sha)
+        if lock is None:
+            lock = threading.Lock()
+            _CACHE_LOCKS[doc_sha] = lock
+        return lock
+
+
+def _atomic_save_vectors(cache_file: Path, doc_vecs: np.ndarray) -> None:
+    """原子写入向量缓存：先写临时文件再 os.replace()，避免并发读写读到半截 .npy。"""
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_file = _CACHE_DIR / f".{cache_file.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp_file, 'wb') as fp:
+            np.save(fp, doc_vecs)
+        os.replace(str(tmp_file), str(cache_file))
+    except Exception:
+        try:
+            if tmp_file.exists():
+                tmp_file.unlink()
+        except Exception:
+            pass
 
 # ── 检索调用统计桩（供门控直通单测精确断言调用次数）────────────────────────
 _HYBRID_STATS: dict[str, int] = {
@@ -304,26 +334,24 @@ def _try_level2_embedding_rerank(
         doc_sha = hashlib.sha256(doc_text.encode('utf-8')).hexdigest()
         cache_file = _CACHE_DIR / f"{doc_sha}.emb.npy"
         doc_vecs: Optional[np.ndarray] = None
+        doc_lock = _get_cache_lock(doc_sha)
 
-        if cache_file.is_file():
-            try:
-                loaded = np.load(str(cache_file), allow_pickle=False)
-                if isinstance(loaded, np.ndarray) and loaded.ndim == 2 and loaded.shape[0] == len(chunks):
-                    doc_vecs = loaded.astype(np.float32, copy=False)
-            except Exception:
-                doc_vecs = None
+        with doc_lock:
+            if cache_file.is_file():
+                try:
+                    loaded = np.load(str(cache_file), allow_pickle=False)
+                    if isinstance(loaded, np.ndarray) and loaded.ndim == 2 and loaded.shape[0] == len(chunks):
+                        doc_vecs = loaded.astype(np.float32, copy=False)
+                except Exception:
+                    doc_vecs = None
 
-        if doc_vecs is None:
-            texts_to_embed = [c['text'] for c in chunks]
-            raw_vecs = embed_fn(texts_to_embed)
-            doc_vecs = np.asarray(raw_vecs, dtype=np.float32)
-            if doc_vecs.ndim != 2 or doc_vecs.shape[0] != len(chunks):
-                return None
-            try:
-                _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                np.save(str(cache_file), doc_vecs)
-            except Exception:
-                pass
+            if doc_vecs is None:
+                texts_to_embed = [c['text'] for c in chunks]
+                raw_vecs = embed_fn(texts_to_embed)
+                doc_vecs = np.asarray(raw_vecs, dtype=np.float32)
+                if doc_vecs.ndim != 2 or doc_vecs.shape[0] != len(chunks):
+                    return None
+                _atomic_save_vectors(cache_file, doc_vecs)
 
         q_vec_raw = embed_fn([query])
         if not q_vec_raw:
@@ -333,18 +361,28 @@ def _try_level2_embedding_rerank(
             return None
 
         # E12 交叉复查修复（检查点 4）：若切换了不同维度的向量模型导致旧缓存列维度 shape[1]
-        # 与当前 q_vec 维度不符，立即作废旧缓存并重新计算 doc_vecs 覆盖写盘
+        # 与当前 q_vec 维度不符，立即作废旧缓存并重新计算 doc_vecs 原子写盘
         if doc_vecs.shape[1] != q_vec.shape[0]:
-            texts_to_embed = [c['text'] for c in chunks]
-            raw_vecs = embed_fn(texts_to_embed)
-            doc_vecs = np.asarray(raw_vecs, dtype=np.float32)
-            if doc_vecs.ndim != 2 or doc_vecs.shape != (len(chunks), q_vec.shape[0]):
-                return None
-            try:
-                _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                np.save(str(cache_file), doc_vecs)
-            except Exception:
-                pass
+            with doc_lock:
+                # 二次检查：可能同一轮并发的另一线程已率先按当前模型维度重写了缓存
+                if cache_file.is_file():
+                    try:
+                        reloaded = np.load(str(cache_file), allow_pickle=False)
+                        if (
+                            isinstance(reloaded, np.ndarray)
+                            and reloaded.ndim == 2
+                            and reloaded.shape == (len(chunks), q_vec.shape[0])
+                        ):
+                            doc_vecs = reloaded.astype(np.float32, copy=False)
+                    except Exception:
+                        pass
+                if doc_vecs.shape[1] != q_vec.shape[0]:
+                    texts_to_embed = [c['text'] for c in chunks]
+                    raw_vecs = embed_fn(texts_to_embed)
+                    doc_vecs = np.asarray(raw_vecs, dtype=np.float32)
+                    if doc_vecs.ndim != 2 or doc_vecs.shape != (len(chunks), q_vec.shape[0]):
+                        return None
+                    _atomic_save_vectors(cache_file, doc_vecs)
 
         doc_norms = np.linalg.norm(doc_vecs, axis=1) + 1e-8
         q_norm = float(np.linalg.norm(q_vec)) + 1e-8

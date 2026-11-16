@@ -784,7 +784,6 @@ async function handleSendQuestion(question: string, attachmentIds: string[] = []
 
   const payload = {
     question,
-    max_rounds: 7,
     reasoning_effort: reasoningEffort.value,
     attachment_ids: validIds,
   }

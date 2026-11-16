@@ -51,9 +51,9 @@ const EFFORT_OPTIONS: Array<{
   label: string
   desc: string
 }> = [
-  { value: 'low', label: '⚡ 极速', desc: '快响应 (low) · 开放 7 轮 7 工具' },
-  { value: 'medium', label: '⚖ 均衡', desc: '默认均衡 (high) · 开放 7 轮 7 工具' },
-  { value: 'high', label: '🧠 深度', desc: 'Max 深度推理 (max) · 开放 7 轮 7 工具' },
+  { value: 'low', label: '⚡ 极速', desc: '快响应 (low) · 最高 7 个思考回合（支持单回合多工具并行）' },
+  { value: 'medium', label: '⚖ 均衡', desc: '默认均衡 (high) · 最高 8 个思考回合（支持单回合多工具并行）' },
+  { value: 'high', label: '🧠 深度', desc: 'Max 深度推理 (max) · 最高 12 个思考回合（证据齐备即早停）' },
 ]
 
 const currentEffortLabel = computed(() => {
@@ -452,7 +452,7 @@ defineExpose({
             <button
               type="button"
               class="dock-tool-btn effort-trigger-btn"
-              title="切换大模型 ReAct 推理思考深度（均开放 7 轮 7 工具）"
+              title="切换大模型 ReAct 推理思考深度（单回合支持多工具并行，按挡位最高开放 7/8/12 个思考回合）"
               @click="effortMenuOpen = !effortMenuOpen; presetMenuOpen = false"
             >
               {{ currentEffortLabel }} ▾

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { ReActStepTraceItem } from '@/api/types'
 
 const props = withDefaults(
@@ -14,6 +14,14 @@ const props = withDefaults(
 
 const isOpen = ref<boolean>(props.defaultOpen)
 const expandedObs = ref<Record<number, boolean>>({})
+
+const roundCount = computed(() => {
+  if (!props.steps || props.steps.length === 0) return 0
+  const distinct = new Set(
+    props.steps.map((s, idx) => s.round ?? s.step_no ?? idx + 1),
+  )
+  return distinct.size
+})
 
 // E21 §2.3：当 defaultOpen 为 true 且流式新步骤陆续到达时，确保自动展开并保持展开
 watch(
@@ -33,6 +41,7 @@ const TOOL_LABELS: Record<string, string> = {
   recalc_price: 'F2 报价算术沙盒复算 (recalc_price)',
   check_cert_expiry: 'F3 证照效期与串名核验 (check_cert_expiry)',
   cite_regulation: '检索招投标法规库原文 (cite_regulation)',
+  search_attachment: '检索会话补充附件 (search_attachment)',
   keyword_search: '0-Token 离线双书关键词检索 (keyword_search)',
   final: '汇总原文证据并输出结论 (final)',
 }
@@ -71,7 +80,9 @@ function toggleObs(idx: number): void {
     <div class="rp-header" @click="isOpen = !isOpen">
       <div class="rp-title">
         <span class="rp-badge mono-num">ReAct 轨迹</span>
-        <span>跨双书工具检索与推理步骤（共 {{ props.steps.length }} 轮）</span>
+        <span>
+          跨双书工具检索与推理步骤（共 {{ roundCount }} 个思考回合 · {{ props.steps.length }} 步执行）
+        </span>
       </div>
       <span class="rp-toggle">{{ isOpen ? '收起轨迹 ▲' : '展开轨迹 ▼' }}</span>
     </div>
@@ -84,6 +95,12 @@ function toggleObs(idx: number): void {
       >
         <div class="rs-head">
           <span class="rs-round mono-num">Round #{{ step.round ?? step.step_no ?? idx + 1 }}</span>
+          <span
+            v-if="step.batch_size && step.batch_size > 1"
+            class="rs-batch-pill mono-num"
+          >
+            并行 {{ step.batch_index ?? 1 }}/{{ step.batch_size }}
+          </span>
           <span class="rs-action mono-num">{{ getActionLabel(step.action) }}</span>
         </div>
 
@@ -182,6 +199,16 @@ function toggleObs(idx: number): void {
   font-weight: 900;
   color: var(--brand);
   font-size: 11.5px;
+}
+
+.rs-batch-pill {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fde68a;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
 }
 
 .rs-action {

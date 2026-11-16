@@ -362,7 +362,7 @@ class QaAttachmentOut(BaseModel):
 
 class QaAskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
-    max_rounds: int = Field(default=7, ge=1, le=8)
+    max_rounds: Optional[int] = Field(default=None, ge=1, le=12)
     reasoning_effort: Optional[str] = None
     attachment_ids: list[str] = Field(default_factory=list)
 

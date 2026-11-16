@@ -17,10 +17,11 @@
 """
 from __future__ import annotations
 
-import json
-import re
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+import json
 from pathlib import Path
+import re
 from typing import Any, Iterator, Optional
 
 from core.hybrid_retriever import expand_query_synonyms, hybrid_retrieve_windows
@@ -40,6 +41,7 @@ from core.tender_extractor import locate_chapters, locate_keyword_sections
 
 _SEARCH_WINDOW = 200
 _MAX_HITS_PER_SEARCH = 5
+MAX_PARALLEL_ACTIONS_PER_ROUND = 4
 _JSON_BLOCK_RE = re.compile(r'\{.*\}', re.DOTALL)
 
 # E4 / E24：F7 允许调用的 7 大工具名称白名单
@@ -52,6 +54,13 @@ ALLOWED_REACT_TOOLS = (
     'cite_regulation',
     'search_attachment',
 )
+
+_WINDOW_SEARCH_TOOLS = frozenset({
+    'search_tender',
+    'search_bid',
+    'locate_chapter',
+    'search_attachment',
+})
 
 _QUESTION_STOPWORDS = (
     '请问', '招标文件', '招标书', '投标文件', '投标书', '我们', '我方', '甲方',
@@ -66,13 +75,14 @@ _FOLLOWUP_PRONOUN_KEYS = (
     '它们', '这些', '那些', '这个', '那个', '怎么规定', '为什么', '怎么不', '还有呢', '问了什么', '它',
 )
 
-# E21 / 三挡解耦：前端 UI 三挡（low/medium/high）映射为智谱 glm-5.3-flash 实测合法上游推理深度（low/high/max）；
-# 三挡均放开至 7 轮（最多调用工具 + final 总结），仅调整模型推理思考深度而不卡工具轮次
+# E21 / E33：前端 UI 三挡（low/medium/high）映射为上游推理深度（low/high/max）与思考回合上限：
+# - 保留 low -> 7 轮兼容 E21 既有门禁契约，同时向上放开 medium -> 8 轮、high -> 12 轮；
+# - 配合单回合最多 4 路工具并行调度与早停自律规则，避免机械烧满轮次。
 _EFFORT_UPSTREAM_MAP: dict[str, tuple[str, int]] = {
     'low': ('low', 7),
-    'medium': ('high', 7),
-    'high': ('max', 7),
-    'max': ('max', 7),
+    'medium': ('high', 8),
+    'high': ('max', 12),
+    'max': ('max', 12),
 }
 
 _REACT_SYSTEM_PROMPT = """你是招投标双书合规审查专家（ReAct Agent）。你可以调用以下 7 个确定性工具来回答用户关于《招标文件》、《投标文件》、会话补充附件（文档/图片）与招投标法律法规的问题：
@@ -85,16 +95,18 @@ _REACT_SYSTEM_PROMPT = """你是招投标双书合规审查专家（ReAct Agent�
 5. "check_cert_expiry"：调用证照效期核验器，action_input 为 {"cert_text": "...", "open_date": "YYYY-MM-DD"}；
 6. "cite_regulation"：在招投标法规库中检索法条原文，action_input 为 {"keyword": "...", "article_no": "第X条"}；
 7. "search_attachment"：在用户上传的会话补充附件（含文档与图片 OCR 文本）中检索关键词，action_input 为 {"keyword": "...", "attachment_id": "可选指定附件ID", "after_offset": 0}；
-8. "final"：当你已通过工具拿到原文证据准备给出最终回答时使用，action_input 为：
+8. "final"：当你已拿到充分原文证据（或已确认双书中确实未检出）准备给出最终回答时使用，action_input 为：
    {"answer": "最终解答正文", "quotes": [{"source": "tender"|"bid"|"attachment", "attachment_id": "当source为attachment时填附件ID", "quote": "逐字摘自原文的引用句"}]}
 
-每轮你必须只输出一个合法的 JSON 对象（字符串内部严禁出现未转义的裸换行），格式如下：
-{
-  "thought": "思考过程",
-  "action": "search_tender" | "search_bid" | "locate_chapter" | "recalc_price" | "check_cert_expiry" | "cite_regulation" | "search_attachment" | "final",
-  "action_input": ...
-}
-⚠️ 铁律：final 中的 quotes 必须 100% 逐字抄录自工具返回的原文窗口，严禁改写或编造！只输出 JSON。"""
+每轮你必须只输出一个合法的 JSON 对象（字符串内部严禁出现未转义的裸换行），支持【单动作】或【同轮并行多工具（最多 4 个）】：
+- 单动作格式（收口 final 或单工具调用）：
+  {"thought": "思考过程", "action": "tool_name_or_final", "action_input": ...}
+- 并行多工具格式（例如同轮同时查招标要求与投标响应、或一次多组同义词检索，最多 4 项）：
+  {"thought": "同时核对招标与投标条款", "actions": [{"action": "search_tender", "action_input": "质保期"}, {"action": "search_bid", "action_input": "质保期"}]}
+
+⚠️ 自律与铁律：
+1. 溯源铁律：final 中的 quotes 必须 100% 逐字抄录自工具返回的原文窗口，严禁改写或编造！
+2. 早停纪律：一旦关键条款的招标要求与投标响应原文已取得，立即在下一轮输出 action="final" 结束，无需凑满轮次；若连续 2 轮仅命中无关历史业绩合同（如其他项目合同扫描件）或返回空结果，应停止无效换词并如实调用 action="final" 说明未检出及命中片段归属。只输出 JSON。"""
 
 
 def _parse_llm_json(content: str) -> Optional[dict]:
@@ -118,15 +130,17 @@ def _parse_llm_json(content: str) -> Optional[dict]:
 
 
 def _looks_like_unparsed_tool_json(raw_content: str) -> bool:
-    """E24 §2.5.4：判断无法解析的原始模型输出是否属于残缺的工具调用 JSON（含 "action" 与 "thought"/"action_input"），
+    """E24 §2.5.4：判断无法解析的原始模型输出是否属于残缺的工具调用 JSON（含 "action"/"actions" 与 "thought"/"action_input"），
     严禁将此类原始 JSON 源码直接当作自然语言回答吐给用户。
     """
     s = (raw_content or '').strip()
     if not s:
         return False
-    if '"action"' in s and ('"thought"' in s or '"action_input"' in s or any(t in s for t in ALLOWED_REACT_TOOLS)):
+    if ('"action"' in s or '"actions"' in s) and (
+        '"thought"' in s or '"action_input"' in s or any(t in s for t in ALLOWED_REACT_TOOLS)
+    ):
         return True
-    if s.startswith('{') and ('action' in s and 'action_input' in s):
+    if s.startswith('{') and ('action' in s and ('action_input' in s or 'actions' in s)):
         return True
     return False
 
@@ -215,13 +229,15 @@ def _format_history_messages(
 
 def _resolve_effort_and_rounds(
     reasoning_effort: Optional[str],
-    max_rounds: int,
+    max_rounds: Optional[int] = None,
     client: Any = None,
 ) -> tuple[Optional[str], int]:
-    """将前端三挡（low/medium/high）映射为上游合法推理深度（优先读 client.translate_reasoning_effort，
-    未配置时回退 _EFFORT_UPSTREAM_MAP 的 low/high/max），三挡均允许跑满 max_rounds（默认 7 轮）。
+    """E21 / E33：将前端三挡（low/medium/high）映射为上游推理深度与思考回合上限。
+
+    - 未传 max_rounds（None）时：low=7, medium=8, high=12；未传挡位时默认 7。
+    - 显式传入整数 max_rounds（如测试传 6 或 7）时：保持 min(base_limit, gear_round_cap) 向后兼容。
     """
-    base_limit = max(1, int(max_rounds or 7))
+    explicit_cap = max(1, int(max_rounds)) if max_rounds is not None else None
     raw_key = str(reasoning_effort or '').strip().lower()
     if raw_key in _EFFORT_UPSTREAM_MAP:
         default_effort, gear_round_cap = _EFFORT_UPSTREAM_MAP[raw_key]
@@ -231,8 +247,9 @@ def _resolve_effort_and_rounds(
             custom_val = translate_fn(raw_key)
             if isinstance(custom_val, str) and custom_val.strip():
                 mapped_effort = custom_val.strip()
-        return mapped_effort, min(base_limit, gear_round_cap)
-    return None, base_limit
+        resolved_rounds = min(explicit_cap, gear_round_cap) if explicit_cap is not None else gear_round_cap
+        return mapped_effort, resolved_rounds
+    return None, (explicit_cap if explicit_cap is not None else 7)
 
 
 def _iter_answer_chunks(answer_text: str, chunk_size: int = 24) -> Iterator[str]:
@@ -1009,12 +1026,251 @@ _FORCED_WRAPUP_PROMPT = (
 )
 
 
+def _extract_round_actions(
+    parsed: dict[str, Any],
+) -> tuple[str, bool, Any, list[tuple[str, Any]]]:
+    """E33：归一化单轮单动作（action）或批量并行动作（actions，单轮上限 MAX_PARALLEL_ACTIONS_PER_ROUND）。"""
+    thought = str(parsed.get('thought') or '').strip()
+    raw_actions = parsed.get('actions')
+    if isinstance(raw_actions, list) and len(raw_actions) > 0:
+        tool_entries: list[tuple[str, Any]] = []
+        final_entries: list[Any] = []
+        for item in raw_actions:
+            if not isinstance(item, dict):
+                continue
+            sub_act = str(item.get('action') or item.get('tool') or '').strip()
+            if not sub_act:
+                continue
+            sub_in = _coerce_action_input(item.get('action_input'))
+            is_sub_final = sub_act == 'final' or (
+                sub_act not in ALLOWED_REACT_TOOLS
+                and isinstance(sub_in, dict)
+                and 'answer' in sub_in
+            )
+            if is_sub_final:
+                final_entries.append(sub_in if isinstance(sub_in, dict) else item)
+            else:
+                tool_entries.append((sub_act, sub_in))
+        if tool_entries:
+            return thought, False, None, tool_entries[:MAX_PARALLEL_ACTIONS_PER_ROUND]
+        if final_entries:
+            return thought, True, final_entries[0], []
+
+    action = str(parsed.get('action') or 'final').strip()
+    action_input = _coerce_action_input(parsed.get('action_input'))
+    if action == 'final' or ('answer' in parsed and action not in ALLOWED_REACT_TOOLS):
+        final_payload = action_input if isinstance(action_input, dict) else parsed
+        return thought, True, final_payload, []
+    return thought, False, None, [(action, action_input)]
+
+
+def _dispatch_single_tool(
+    action: str,
+    action_input: Any,
+    *,
+    tender_text: str,
+    bid_text: str,
+    tender_ctx: Any,
+    bid_ctx: Any,
+    client: Any,
+    norm_atts: list[dict[str, Any]],
+) -> tuple[Any, list[dict[str, Any]]]:
+    """执行单条 ReAct 工具调用（复用 E31 异常转 observation.error 自愈，严格透传 BaseException）。"""
+    local_quotes: list[dict[str, Any]] = []
+    try:
+        if action == 'search_tender':
+            if isinstance(action_input, dict):
+                kw = str(action_input.get('keyword') or '')
+                after_off = _safe_int_offset(action_input.get('after_offset'))
+            else:
+                kw = str(action_input or '')
+                after_off = 0
+            observation = _search_text_windows(
+                tender_text, kw, 'tender', page_spans=tender_ctx, client=client, after_offset=after_off
+            )
+            for h in observation[:2]:
+                local_quotes.append({
+                    'source': 'tender',
+                    'quote': h['quote'],
+                    'offset': h['offset'],
+                    'page': h['page'],
+                    'quote_verified': True,
+                })
+        elif action == 'search_bid':
+            if isinstance(action_input, dict):
+                kw = str(action_input.get('keyword') or '')
+                after_off = _safe_int_offset(action_input.get('after_offset'))
+            else:
+                kw = str(action_input or '')
+                after_off = 0
+            observation = _search_text_windows(
+                bid_text, kw, 'bid', page_spans=bid_ctx, client=client, after_offset=after_off
+            )
+            for h in observation[:2]:
+                local_quotes.append({
+                    'source': 'bid',
+                    'quote': h['quote'],
+                    'offset': h['offset'],
+                    'page': h['page'],
+                    'quote_verified': True,
+                })
+        elif action == 'search_attachment':
+            if isinstance(action_input, dict):
+                kw = str(action_input.get('keyword') or '')
+                att_id_in = str(action_input.get('attachment_id') or '')
+                after_off = _safe_int_offset(action_input.get('after_offset'))
+            else:
+                kw = str(action_input or '')
+                att_id_in = ''
+                after_off = 0
+            observation = search_attachment(
+                keyword=kw,
+                attachment_id=att_id_in,
+                attachments=norm_atts,
+                after_offset=after_off,
+                client=client,
+            )
+            for h in observation[:2]:
+                if h.get('quote'):
+                    local_quotes.append({
+                        'source': 'attachment',
+                        'attachment_id': h.get('attachment_id'),
+                        'attachment_name': h.get('attachment_name'),
+                        'quote': h['quote'],
+                        'offset': h['offset'],
+                        'page': h['page'],
+                        'quote_verified': True,
+                    })
+        elif action == 'locate_chapter':
+            if isinstance(action_input, dict):
+                target_doc = bid_text if action_input.get('doc') == 'bid' else tender_text
+                ch_title = str(action_input.get('chapter_title') or action_input.get('keyword') or '')
+                after_off = _safe_int_offset(action_input.get('after_offset'))
+            else:
+                target_doc = tender_text
+                ch_title = str(action_input or '')
+                after_off = 0
+            observation = locate_chapter(target_doc, ch_title, after_offset=after_off)
+        elif action == 'recalc_price':
+            if isinstance(action_input, dict):
+                observation = recalc_price(
+                    items=action_input.get('items', []),
+                    table_total=action_input.get('table_total'),
+                    bid_total=action_input.get('bid_total'),
+                    bid_total_upper=action_input.get('bid_total_upper'),
+                    price_cap=action_input.get('price_cap'),
+                )
+            elif isinstance(action_input, list):
+                observation = recalc_price(items=action_input)
+            else:
+                observation = {
+                    'error': 'recalc_price 需要包含 items 列表的对象，每项格式为 {"name", "qty", "unit_price", "total_price"}'
+                }
+        elif action == 'check_cert_expiry':
+            if isinstance(action_input, dict):
+                observation = check_cert_expiry(
+                    cert_text=str(action_input.get('cert_text') or bid_text),
+                    open_date=str(action_input.get('open_date') or ''),
+                    required_social_months=action_input.get('required_social_months'),
+                    forbidden_names=action_input.get('forbidden_names'),
+                )
+            else:
+                observation = {'error': 'check_cert_expiry 需要包含 cert_text 与 open_date 的字典'}
+        elif action == 'cite_regulation':
+            if isinstance(action_input, dict):
+                observation = cite_regulation(
+                    keyword=str(action_input.get('keyword') or ''),
+                    article_no=str(action_input.get('article_no') or ''),
+                    law_name=str(action_input.get('law_name') or action_input.get('law') or ''),
+                )
+            else:
+                observation = cite_regulation(keyword=str(action_input or ''))
+        else:
+            observation = {'error': f"未知工具: {action}"}
+    except Exception as tool_exc:
+        # E31：单工具异常绝不炸毁 ReAct SSE 流，转化为结构化 observation 交回模型自修正
+        observation = {
+            'passed': False,
+            'error': (
+                f"工具 {action} 执行异常（{type(tool_exc).__name__}: {tool_exc}），"
+                f"请检查并修正输入参数格式后重试。"
+            ),
+        }
+    return observation, local_quotes
+
+
+def _update_stagnation_state(
+    tool_results: list[tuple[str, Any, Any, list[dict[str, Any]]]],
+    seen_hit_buckets: set[tuple[str, int | str]],
+    stagnation_streak: int,
+) -> int:
+    """E33：基于确定性偏移桶（含 locate_chapter 的 start）统计窗口检索停滞轮数，命中新原文区间即归零。"""
+    if not any(act in _WINDOW_SEARCH_TOOLS for act, _, _, _ in tool_results):
+        return stagnation_streak
+
+    found_new_bucket = False
+    for act, act_in, obs, _ in tool_results:
+        if act not in _WINDOW_SEARCH_TOOLS or not isinstance(obs, list):
+            continue
+        for hit in obs:
+            if not isinstance(hit, dict):
+                continue
+            raw_off = hit.get('offset') if hit.get('offset') is not None else hit.get('start')
+            if act == 'search_attachment' and hit.get('attachment_id'):
+                src_key = f"att:{hit['attachment_id']}"
+            elif act == 'locate_chapter' and isinstance(act_in, dict) and act_in.get('doc') in ('tender', 'bid'):
+                src_key = f"chapter:{act_in['doc']}"
+            else:
+                src_key = str(hit.get('source') or act)
+            if raw_off is not None:
+                try:
+                    bucket: tuple[str, int | str] = (src_key, int(raw_off) // 120)
+                except (TypeError, ValueError):
+                    bucket = (src_key, str(hit.get('quote') or hit.get('excerpt') or '')[:60])
+            else:
+                bucket = (src_key, str(hit.get('quote') or hit.get('excerpt') or '')[:60])
+            if bucket not in seen_hit_buckets:
+                seen_hit_buckets.add(bucket)
+                found_new_bucket = True
+
+    return 0 if found_new_bucket else (stagnation_streak + 1)
+
+
+def _build_round_feedback_message(
+    r_idx: int,
+    limit: int,
+    tool_results: list[tuple[str, Any, Any, list[dict[str, Any]]]],
+    stagnation_streak: int,
+) -> str:
+    """组装本轮工具观察结果 + 零成本剩余回合预算与空转去重提示。"""
+    if len(tool_results) == 1:
+        act, _, obs, _ = tool_results[0]
+        obs_body = f"工具 {act} 返回结果：{json.dumps(obs, ensure_ascii=False)}"
+    else:
+        lines = [
+            f"[{idx}] {act} 返回结果：{json.dumps(obs, ensure_ascii=False)}"
+            for idx, (act, _, obs, _) in enumerate(tool_results, start=1)
+        ]
+        obs_body = f"工具批量返回结果（本轮并行 {len(tool_results)} 项）：\n" + "\n".join(lines)
+
+    remaining = max(0, limit - r_idx)
+    parts = [
+        obs_body,
+        f"请继续下一步或输出 action='final'。\n【思考回合进度：第 {r_idx}/{limit} 轮（剩余 {remaining} 轮可用）；如关键原文证据已齐备，请立即 action='final' 收口，无需凑满轮次。】",
+    ]
+    if stagnation_streak >= 2:
+        parts.append(
+            f"【检索去重提示：已连续 {stagnation_streak} 轮空检或命中同一原文区间。若核心同义词仍仅命中无关历史合同/无新段落，请立即 action='final' 如实说明未检出及命中片段的实际归属，避免继续消耗轮次。】"
+        )
+    return "\n".join(parts)
+
+
 def ask_bid_expert_stream(
     tender_path: str | Path,
     bid_path: str | Path,
     question: str,
     client=None,
-    max_rounds: int = 7,
+    max_rounds: Optional[int] = None,
     reasoning_effort: Optional[str] = None,
     history: Optional[list[dict[str, Any]]] = None,
     attachments: Optional[list[dict[str, Any]]] = None,
@@ -1150,6 +1406,8 @@ def ask_bid_expert_stream(
     ]
     steps: list[dict[str, Any]] = []
     collected_tool_quotes: list[dict[str, Any]] = []
+    seen_hit_buckets: set[tuple[str, int | str]] = set()
+    stagnation_streak = 0
 
     norm_effort, limit = _resolve_effort_and_rounds(reasoning_effort, max_rounds, client=client)
 
@@ -1200,13 +1458,11 @@ def ask_bid_expert_stream(
             }
             return
 
-        thought = str(parsed.get('thought') or '').strip()
-        action = str(parsed.get('action') or 'final').strip()
-        action_input = _coerce_action_input(parsed.get('action_input'))
+        thought, is_final_turn, final_payload, tool_calls = _extract_round_actions(parsed)
 
-        # E4 / E24：7 工具白名单检查
-        if action == 'final' or ('answer' in parsed and action not in ALLOWED_REACT_TOOLS):
-            final_payload = action_input if isinstance(action_input, dict) else parsed
+        # E4 / E24：7 工具白名单检查与 final 收口
+        if is_final_turn:
+            final_payload = final_payload if isinstance(final_payload, dict) else parsed
             ans_text = str(final_payload.get('answer') or parsed.get('answer') or '').strip()
             raw_quotes = final_payload.get('quotes') if 'quotes' in final_payload else parsed.get('quotes', [])
             ans_text, verified_quotes = _finalize_answer_and_quotes(
@@ -1245,136 +1501,75 @@ def ask_bid_expert_stream(
             }
             return
 
-        observation: Any = None
-        try:
-            if action == 'search_tender':
-                if isinstance(action_input, dict):
-                    kw = str(action_input.get('keyword') or '')
-                    after_off = _safe_int_offset(action_input.get('after_offset'))
-                else:
-                    kw = str(action_input or '')
-                    after_off = 0
-                observation = _search_text_windows(
-                    tender_text, kw, 'tender', page_spans=tender_ctx, client=client, after_offset=after_off
-                )
-                for h in observation[:2]:
-                    collected_tool_quotes.append({
-                        'source': 'tender', 'quote': h['quote'],
-                        'offset': h['offset'], 'page': h['page'], 'quote_verified': True,
-                    })
-            elif action == 'search_bid':
-                if isinstance(action_input, dict):
-                    kw = str(action_input.get('keyword') or '')
-                    after_off = _safe_int_offset(action_input.get('after_offset'))
-                else:
-                    kw = str(action_input or '')
-                    after_off = 0
-                observation = _search_text_windows(
-                    bid_text, kw, 'bid', page_spans=bid_ctx, client=client, after_offset=after_off
-                )
-                for h in observation[:2]:
-                    collected_tool_quotes.append({
-                        'source': 'bid', 'quote': h['quote'],
-                        'offset': h['offset'], 'page': h['page'], 'quote_verified': True,
-                    })
-            elif action == 'search_attachment':
-                if isinstance(action_input, dict):
-                    kw = str(action_input.get('keyword') or '')
-                    att_id_in = str(action_input.get('attachment_id') or '')
-                    after_off = _safe_int_offset(action_input.get('after_offset'))
-                else:
-                    kw = str(action_input or '')
-                    att_id_in = ''
-                    after_off = 0
-                observation = search_attachment(
-                    keyword=kw,
-                    attachment_id=att_id_in,
-                    attachments=norm_atts,
-                    after_offset=after_off,
-                    client=client,
-                )
-                for h in observation[:2]:
-                    if h.get('quote'):
-                        collected_tool_quotes.append({
-                            'source': 'attachment',
-                            'attachment_id': h.get('attachment_id'),
-                            'attachment_name': h.get('attachment_name'),
-                            'quote': h['quote'],
-                            'offset': h['offset'],
-                            'page': h['page'],
-                            'quote_verified': True,
-                        })
-            elif action == 'locate_chapter':
-                if isinstance(action_input, dict):
-                    target_doc = bid_text if action_input.get('doc') == 'bid' else tender_text
-                    ch_title = str(action_input.get('chapter_title') or action_input.get('keyword') or '')
-                    after_off = _safe_int_offset(action_input.get('after_offset'))
-                else:
-                    target_doc = tender_text
-                    ch_title = str(action_input or '')
-                    after_off = 0
-                observation = locate_chapter(target_doc, ch_title, after_offset=after_off)
-            elif action == 'recalc_price':
-                if isinstance(action_input, dict):
-                    observation = recalc_price(
-                        items=action_input.get('items', []),
-                        table_total=action_input.get('table_total'),
-                        bid_total=action_input.get('bid_total'),
-                        bid_total_upper=action_input.get('bid_total_upper'),
-                        price_cap=action_input.get('price_cap'),
+        # E33：单条就地执行，2~4 条并发分发（严格按原始下标保序，BaseException 立即撤池透传）
+        tool_results: list[tuple[str, Any, Any, list[dict[str, Any]]]] = []
+        if len(tool_calls) == 1:
+            act, act_in = tool_calls[0]
+            obs, q_list = _dispatch_single_tool(
+                act,
+                act_in,
+                tender_text=tender_text,
+                bid_text=bid_text,
+                tender_ctx=tender_ctx,
+                bid_ctx=bid_ctx,
+                client=client,
+                norm_atts=norm_atts,
+            )
+            tool_results.append((act, act_in, obs, q_list))
+        else:
+            pool = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_ACTIONS_PER_ROUND, len(tool_calls)))
+            aborted = False
+            try:
+                futures = [
+                    pool.submit(
+                        _dispatch_single_tool,
+                        act,
+                        act_in,
+                        tender_text=tender_text,
+                        bid_text=bid_text,
+                        tender_ctx=tender_ctx,
+                        bid_ctx=bid_ctx,
+                        client=client,
+                        norm_atts=norm_atts,
                     )
-                elif isinstance(action_input, list):
-                    observation = recalc_price(items=action_input)
-                else:
-                    observation = {
-                        'error': 'recalc_price 需要包含 items 列表的对象，每项格式为 {"name", "qty", "unit_price", "total_price"}'
-                    }
-            elif action == 'check_cert_expiry':
-                if isinstance(action_input, dict):
-                    observation = check_cert_expiry(
-                        cert_text=str(action_input.get('cert_text') or bid_text),
-                        open_date=str(action_input.get('open_date') or ''),
-                        required_social_months=action_input.get('required_social_months'),
-                        forbidden_names=action_input.get('forbidden_names'),
-                    )
-                else:
-                    observation = {'error': 'check_cert_expiry 需要包含 cert_text 与 open_date 的字典'}
-            elif action == 'cite_regulation':
-                if isinstance(action_input, dict):
-                    observation = cite_regulation(
-                        keyword=str(action_input.get('keyword') or ''),
-                        article_no=str(action_input.get('article_no') or ''),
-                        law_name=str(action_input.get('law_name') or action_input.get('law') or ''),
-                    )
-                else:
-                    observation = cite_regulation(keyword=str(action_input or ''))
-            else:
-                observation = {'error': f"未知工具: {action}"}
-        except Exception as tool_exc:
-            # E31：单工具异常绝不炸毁 ReAct SSE 流，转化为结构化 observation 交回模型自修正
-            observation = {
-                'passed': False,
-                'error': (
-                    f"工具 {action} 执行异常（{type(tool_exc).__name__}: {tool_exc}），"
-                    f"请检查并修正输入参数格式后重试。"
+                    for act, act_in in tool_calls
+                ]
+                for (act, act_in), fut in zip(tool_calls, futures):
+                    obs, q_list = fut.result()
+                    tool_results.append((act, act_in, obs, q_list))
+            except BaseException:
+                aborted = True
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            finally:
+                if not aborted:
+                    pool.shutdown(wait=True)
+
+        batch_size = len(tool_results)
+        for batch_idx, (act, act_in, obs, q_list) in enumerate(tool_results, start=1):
+            if q_list:
+                collected_tool_quotes.extend(q_list)
+            step_item: dict[str, Any] = {
+                'round': r_idx,
+                'thought': (
+                    thought
+                    if batch_idx == 1
+                    else (f"{thought}（同轮并行 {batch_idx}/{batch_size}）" if thought else f"同轮并行 {batch_idx}/{batch_size}")
                 ),
+                'action': act,
+                'action_input': act_in,
+                'observation': obs,
             }
+            if batch_size > 1:
+                step_item['batch_index'] = batch_idx
+                step_item['batch_size'] = batch_size
+            steps.append(step_item)
+            yield {'type': 'step', 'data': step_item}
 
-        step_item = {
-            'round': r_idx,
-            'thought': thought,
-            'action': action,
-            'action_input': action_input,
-            'observation': observation,
-        }
-        steps.append(step_item)
-        yield {'type': 'step', 'data': step_item}
-
+        stagnation_streak = _update_stagnation_state(tool_results, seen_hit_buckets, stagnation_streak)
+        feedback_msg = _build_round_feedback_message(r_idx, limit, tool_results, stagnation_streak)
         messages.append({'role': 'assistant', 'content': raw_content})
-        messages.append({
-            'role': 'user',
-            'content': f"工具 {action} 返回结果：{json.dumps(observation, ensure_ascii=False)}\n请继续下一步或输出 action='final'。",
-        })
+        messages.append({'role': 'user', 'content': feedback_msg})
 
     # E32：工具检索轮数耗尽后追加 1 次强制收口 LLM 调用（禁再调工具，基于已有观察作答）
     wrap_messages = list(messages)
@@ -1487,7 +1682,7 @@ def ask_bid_expert(
     bid_path: str | Path,
     question: str,
     client=None,
-    max_rounds: int = 7,
+    max_rounds: Optional[int] = None,
     reasoning_effort: Optional[str] = None,
     history: Optional[list[dict[str, Any]]] = None,
     attachments: Optional[list[dict[str, Any]]] = None,

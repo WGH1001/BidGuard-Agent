@@ -461,6 +461,8 @@ export interface RadarScanOut {
 export interface ReActStepTraceItem {
   round?: number
   step_no?: number
+  batch_index?: number
+  batch_size?: number
   thought?: string
   action?: string
   action_input?: unknown

@@ -171,13 +171,13 @@ scan_rigging_radar(tender_path: str | Path, client=None, *,
 ```python
 # core/bid_react_agent.py
 ask_bid_expert(tender_path: str | Path, bid_path: str | Path, question: str,
-               client=None, max_rounds: int = 7,
+               client=None, max_rounds: Optional[int] = None,
                reasoning_effort: Optional[str] = None,
                history: Optional[list[dict[str, Any]]] = None,
                attachments: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]
 
 ask_bid_expert_stream(tender_path: str | Path, bid_path: str | Path, question: str,
-                      client=None, max_rounds: int = 7,
+                      client=None, max_rounds: Optional[int] = None,
                       reasoning_effort: Optional[str] = None,
                       history: Optional[list[dict[str, Any]]] = None,
                       attachments: Optional[list[dict[str, Any]]] = None) -> Iterator[dict[str, Any]]
@@ -185,7 +185,8 @@ ask_bid_expert_stream(tender_path: str | Path, bid_path: str | Path, question: s
 # 返回（done 帧 data / ask_bid_expert）：
 #        {'mode': 'react'|'keyword_fallback', 'question', 'answer',
 #         'quotes': [{'source','quote','offset','page','footer_page','is_docx_page','quote_verified','attachment_id','attachment_name'}, ...],
-#         'steps': [...], 'rounds_used': int, 'terminated_by_max_rounds': bool, 'forced_final'?: bool}
+#         'steps': [{'round','thought','action','action_input','observation','batch_index'?: int,'batch_size'?: int}, ...],
+#         'rounds_used': int, 'terminated_by_max_rounds': bool, 'forced_final'?: bool}
 # E18 起：quotes/检索工具通过统一双轨页码上下文适配 PDF 与 docx；无法计算页码时诚实为 None 并展示字符偏移
 # E19/E21 起：UI reasoning_effort 支持 'low' | 'medium' | 'high'，网关侧映射智谱合法值
 #           （low->'low', medium->'high', high->'max'；三挡均开放至 7 轮=6 工具+1 final，仅调推理深度；非法值忽略走默认）
@@ -208,6 +209,10 @@ ask_bid_expert_stream(tender_path: str | Path, bid_path: str | Path, question: s
 # E32 起：1..max_rounds 全未返回 action='final' 时追加 1 次强制收口 LLM 调用（_FORCED_WRAPUP_PROMPT 禁再调工具并警示历史合同张冠李戴），
 #         对 quotes 过 _verify_and_locate_quotes() 并返回 forced_final=True；兼容非工具纯文本收口兜底；
 #         遇 Exception 或工具-only 返回优雅降级至 fallback_ans + collected_tool_quotes（forced_final=False），严禁吞掉 BaseException
+# E33 起：支持同轮并行工具格式 actions（单轮上限 MAX_PARALLEL_ACTIONS_PER_ROUND=4），通过 _dispatch_single_tool + ThreadPoolExecutor 并发保序调度
+#         （单工具 Exception 转 observation.error，BaseException 立即撤池上抛）；rounds_used 表示大模型思考回合数（steps 保持平铺并可选附带 batch_index/batch_size）；
+#         _EFFORT_UPSTREAM_MAP 与 max_rounds=None 解耦拉开思考回合天花板为 low=7 / medium=8 / high=12（显式传整数 max_rounds 时仍取 min 兼容 E21）；
+#         每轮回灌注入剩余回合预算与偏移桶同源空转去重遥测（含 locate_chapter start 偏移）；hybrid_retriever 按 doc_sha 加锁并原子 os.replace() 写入 .emb.npy 缓存
 ```
 
 ### 1.8 批注回写与解析底座
@@ -299,6 +304,7 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 - E30 协作式取消与活性心跳：`POST /api/checks/{task_id}/cancel`（`200` / `404` / `409 TASK_NOT_RUNNING`）、`BidTaskWorker._cancel_flags`（`_PipelineCancelled(BaseException)` / `PipelineCancelled` 统一穿透 core 降级块，连同 `POST /api/radar` 与 `/rescan` 消灭僵尸 `checking`）、SSE `progress`/`done`/`error` 帧携带 `updated_at`、`DELETE /api/checks/{task_id}` 对取消收尾中任务直接清理且运行中报错文案为 `"运行中任务请先中断后再删除"`，以及服务启动钩子 `recover_stale_tasks(session_factory=None) -> int`；
 - E31 体检任务重命名与 QA 错误归类：`PATCH /api/checks/{task_id}`（`BidTaskRenameRequest`，多租户 `404` / 空标题 `422 EMPTY_TASK_TITLE` / 联动同步 `"{old_title} · 专家追问"` 默认会话标题 / `rename_check_task` 审计）；`/api/qa` 透出 `error_type: 'gateway' | 'tool_or_internal'` 区分网关异常（`502 QA_GATEWAY_ERROR`）与工具内部异常（`500 QA_EXECUTION_ERROR`）；
 - E32 登录安全开关与轻量管理员账户接口：`GET /api/health` 与 `GET /api/auth/health`（`HealthOut`）新增 `show_demo_login: bool = False`（`resolve_show_demo_login()` 需 `SHOW_DEMO_LOGIN` 与 `SEED_DEMO_DATA` 均未关闭）；`UserProfileOut` 新增 `tenant_name: Optional[str] = None`（`AuthUser`/`/login`/`/me` 动态带出部门名）；新增 6 个 `require_admin` 端点 `GET/POST /api/auth/tenants`、`GET/POST /api/auth/users`、`PATCH /api/auth/users/{user_id}`、`POST /api/auth/users/{user_id}/reset-password`（严格 `role ∈ {'admin','member'}` 精确白名单校验 `422 INVALID_ROLE`、防自锁双护栏 `409 LAST_ADMIN_PROTECTED` 先于 `409 CANNOT_MODIFY_SELF`，及全量 `AuditLog` 无密码留痕）；
+- E33 QA 检索深度上限放宽：`QaAskRequest.max_rounds` 由 `default=7, ge=1, le=8` 放宽为 `Optional[int] = Field(default=None, ge=1, le=12)`（默认 `None` 时按 `reasoning_effort` 自动匹配 `7 / 8 / 12` 思考回合上限，无挡位默认 `7`）；
 - 其余鉴权、多租户隔离、SSE 进度流、文件存储布局与统一错误格式约定保持不变。
 
 ---
@@ -330,3 +336,4 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 | 2026-11-16 | E30 可中断流水线与活性心跳卡：`core/tender_llm.py` `extract_tender_with_llm`、`core/response_checker.py` `check_star_responses`/`run_response_check` 与 `core/rigging_radar.py` `scan_rigging_radar` 新增可选 `progress_cb: Optional[Callable[[int, int], None]] = None` 并透传取消 Signal（`response_checker` 并发池捕获 `BaseException` 立即 `pool.shutdown(wait=False, cancel_futures=True)`）；`backend/worker.py` 新增 `_PipelineCancelled(BaseException)`（别名 `PipelineCancelled`）、`BidTaskWorker._cancel_flags` 检查点（含 F1 fallback 前置上抛与 ≥5s 节流心跳帧 `"已判定 X / Y 条"`）、`updated_at` SSE 帧透传、清理 `BidFinding`/偏离表及重跑清旧 `stats_json`/`cancelled_by_user`；`backend/routers/checks.py` 新增 `POST /api/checks/{task_id}/cancel`（404/409/审计）与取消期立即 `DELETE`；`backend/routers/radar.py` 将 `POST /api/radar` 与 `/rescan` 接入 `_cancel_flags`（取消 409 `TASK_CANCELLED`、异常落 `failed` 无僵尸 `checking`）；`backend/main.py` 新增 `recover_stale_tasks` 启动恢复钩子；前端 `CheckDetailView.vue`/`CheckTaskList.vue`/`RadarView.vue`/`ExtractView.vue`/`SseProgress.vue`/`http.ts` 补齐中断入口与 120s 判活预警 | 实现 + 验收 |
 | 2026-11-16 | E31 F7 算术沙盒容错、ReAct 工具异常自愈与体检任务重命名卡：`core/price_sandbox.py` 内置零依赖安全解析 `_parse_sandbox_amount`/`_parse_sandbox_qty`（支持逗号/货币前缀/万元换算/量词及科学计数法 `'3E+5'`）与结构化 `INVALID_PRICE_FORMAT` 降级（严禁反向导入 `price_extractor`），`amount_to_upper()` 同步安全解析；`core/bid_react_agent.py` `recalc_price` 兼容字段别名、`qty=1` 单双价互补标注 `derived`/`derived_fields`/`derived_warning`、`_safe_int_offset` 与 `ask_bid_expert_stream` 单工具 `try/except Exception` 转 `observation.error` 自愈（放行 `BaseException`）；`backend/routers/qa.py` 新增 `_classify_qa_exception` 区分 `gateway`(502 `QA_GATEWAY_ERROR`) 与 `tool_or_internal`(500 `QA_EXECUTION_ERROR`) 并在 SSE `error` 帧透传 `error_type`；`backend/schemas.py` + `backend/routers/checks.py` 新增 `PATCH /api/checks/{task_id}` 体检任务重命名（同步联动默认标题 `QaSession` 与 `rename_check_task` 审计）；前端 `types.ts`/`index.ts`/`QaChatView.vue`/`CheckTaskList.vue`/`CheckDetailView.vue` 完成结构化错误分流与双入口行内改名 | 实现 + 验收 |
 | 2026-11-16 | E32 F7 轮数耗尽强制收口、登录页安全脱敏与轻量管理员用户管理卡：`core/bid_react_agent.py` 新增 `_FORCED_WRAPUP_PROMPT`、max-rounds 后追加 1 次强制收口 LLM 调用（防历史合同张冠李戴 + 强制过 `verify_quote` + `forced_final` 标记与异常/非工具文本优雅降级并透传 `BaseException`）；`backend/auth.py`/`main.py`/`schemas.py`/`routers/auth.py` 新增 `resolve_show_demo_login()`、`HealthOut.show_demo_login`、`UserProfileOut.tenant_name` 与 6 个 `require_admin` 部门/用户管理端点（`422 INVALID_ROLE` 白名单、`409 LAST_ADMIN_PROTECTED` 先于 `CANNOT_MODIFY_SELF` 双护栏及脱敏审计）；前端 `LoginView.vue` fail-closed 隐藏演示账号、新建 `UsersManageView.vue`（`/users` `requiresAdmin`）、`stores/auth.ts` 动态部门名与 `App.vue` 管理员入口 | 实现 + 验收 |
+| 2026-11-16 | E33 F7 自主检索与并行工具调度卡：`core/bid_react_agent.py` 新增 `_extract_round_actions` 支持同轮批量 `actions`（上限 `MAX_PARALLEL_ACTIONS_PER_ROUND=4`）、`_dispatch_single_tool` + `ThreadPoolExecutor` 并发保序执行（透传 `BaseException`）、`_EFFORT_UPSTREAM_MAP` 与 `max_rounds: Optional[int] = None` 解耦为 `low=7/medium=8/high=12`（兼容显式传入 E21 契约）、及 `_update_stagnation_state`/`_build_round_feedback_message` 注入剩余回合预算与偏移桶同源空转提示；`core/hybrid_retriever.py` 按 `doc_sha` 加分段锁并原子 `os.replace()` 写入 `.emb.npy`；`backend/schemas.py` `QaAskRequest.max_rounds` 放宽至 `Optional[int] = Field(default=None, ge=1, le=12)`；前端 `types.ts`/`QaChatView.vue`/`ReActSteps.vue`/`QaMessageList.vue` 移除 `max_rounds:7` 硬编码、区分思考回合与步数展示并补全 `search_attachment` 标签 | 实现 + 验收 |
