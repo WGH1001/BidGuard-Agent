@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { SSEProgressFrame } from '@/api/types'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
@@ -54,6 +54,9 @@ const listLoading = ref(false)
 const detailLoading = ref(false)
 const runningTrigger = ref(false)
 const cancellingTask = ref(false)
+const renamingTask = ref(false)
+const editingDetailTitle = ref(false)
+const detailTitleDraft = ref('')
 const tasks = ref<BidTaskOut[]>([])
 const total = ref(0)
 const page = ref(1)
@@ -278,6 +281,7 @@ async function loadTaskList(selectFirst = false): Promise<void> {
 }
 
 async function selectTask(task: BidTaskOut): Promise<void> {
+  cancelRenameDetailTask()
   appStore.setActiveTaskId(task.id)
   detailLoading.value = true
   try {
@@ -437,6 +441,57 @@ async function handleCancelTask(task: BidTaskOut): Promise<void> {
   }
 }
 
+async function handleRenameTask(task: BidTaskOut, nextTitle: string): Promise<void> {
+  const cleanTitle = nextTitle.trim()
+  if (!cleanTitle || cleanTitle === (task.title || '').trim() || renamingTask.value) {
+    return
+  }
+  renamingTask.value = true
+  try {
+    const updated = await checksApi.rename(task.id, { title: cleanTitle })
+    const idx = tasks.value.findIndex((t) => t.id === task.id)
+    if (idx >= 0) {
+      tasks.value[idx] = { ...tasks.value[idx], ...updated }
+    }
+    if (currentTask.value?.id === task.id) {
+      currentTask.value = { ...currentTask.value, ...updated }
+    }
+    ElMessage.success(`体检任务 #${task.id} 已重命名为「${updated.title}」`)
+  } finally {
+    renamingTask.value = false
+  }
+}
+
+function startRenameDetailTask(): void {
+  if (!currentTask.value) return
+  editingDetailTitle.value = true
+  detailTitleDraft.value = currentTask.value.title || ''
+  void nextTick(() => {
+    const input = document.querySelector<HTMLInputElement>('.cwt-title-input')
+    if (input) {
+      input.focus()
+      input.select()
+    }
+  })
+}
+
+function cancelRenameDetailTask(): void {
+  editingDetailTitle.value = false
+  detailTitleDraft.value = ''
+}
+
+async function commitRenameDetailTask(): Promise<void> {
+  if (!editingDetailTitle.value || !currentTask.value) return
+  const task = currentTask.value
+  const nextTitle = detailTitleDraft.value.trim()
+  editingDetailTitle.value = false
+  detailTitleDraft.value = ''
+  if (!nextTitle || nextTitle === (task.title || '').trim()) {
+    return
+  }
+  await handleRenameTask(task, nextTitle)
+}
+
 onMounted(() => {
   detailTickTimer = setInterval(() => {
     nowTick.value = Date.now()
@@ -476,6 +531,7 @@ onBeforeUnmount(() => {
       @select="selectTask"
       @page-change="handlePageChange"
       @created="handleTaskCreated"
+      @rename="handleRenameTask"
       @cancel="handleCancelTask"
       @delete="handleDeleteTask"
       @refresh="loadTaskList(false)"
@@ -541,7 +597,35 @@ onBeforeUnmount(() => {
                 总耗时：{{ totalDurationLabel }}
               </span>
             </div>
-            <h2 class="cwt-title">{{ currentTask.title }}</h2>
+            <div v-if="editingDetailTitle" class="cwt-title-edit-row">
+              <input
+                v-model="detailTitleDraft"
+                type="text"
+                maxlength="256"
+                class="cwt-title-input"
+                @keydown.enter.prevent="commitRenameDetailTask"
+                @keydown.esc.prevent="cancelRenameDetailTask"
+                @blur="commitRenameDetailTask"
+              />
+            </div>
+            <div v-else class="cwt-title-row">
+              <h2
+                class="cwt-title"
+                title="双击或点击右侧 ✎ 重命名体检任务"
+                @dblclick="startRenameDetailTask"
+              >
+                {{ currentTask.title }}
+              </h2>
+              <el-button
+                link
+                size="small"
+                class="cwt-rename-btn"
+                title="重命名体检任务"
+                @click="startRenameDetailTask"
+              >
+                ✎
+              </el-button>
+            </div>
             <div class="cwt-files">
               <span>
                 招标书：<b>{{ currentTask.tender_filename || '—' }}</b>
@@ -770,11 +854,44 @@ onBeforeUnmount(() => {
   color: var(--brand);
 }
 
+.cwt-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.cwt-title-edit-row {
+  margin-bottom: 6px;
+}
+
+.cwt-title-input {
+  width: min(520px, 100%);
+  padding: 4px 10px;
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--txt-strong);
+  background: #ffffff;
+  border: 1px solid var(--brand);
+  border-radius: 6px;
+  outline: none;
+}
+
 .cwt-title {
   font-size: 18px;
   font-weight: 900;
   color: var(--txt-strong);
-  margin-bottom: 6px;
+  margin: 0;
+  cursor: text;
+}
+
+.cwt-rename-btn {
+  font-size: 14px !important;
+  color: var(--txt-muted) !important;
+}
+
+.cwt-rename-btn:hover {
+  color: var(--brand) !important;
 }
 
 .cwt-files {

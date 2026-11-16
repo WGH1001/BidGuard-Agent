@@ -74,6 +74,9 @@ run_price_check(bid_path: str | Path, tender_path: str | Path | None = None,
 
 # core/price_sandbox.py —— status=='OK' 时的四项算术核验（run_price_check 已封装）
 PriceSandbox(items, table_total, bid_total, bid_total_upper, price_cap).run() -> list
+# E31：零依赖安全解析（严禁反向导入 price_extractor），支持逗号/货币前缀/万元换算/量词及科学计数法（'3E+5'）；
+#      占位符视作未提供，无法解析时产出结构化 INVALID_PRICE_FORMAT error finding 且绝不抛 InvalidOperation；
+#      amount_to_upper() 同步安全解析，不可解析时抛出清晰 ValueError
 # findings 元素：{'code', 'severity', 'message', **detail}；空列表 = 全部通过
 ```
 
@@ -199,6 +202,9 @@ ask_bid_expert_stream(tender_path: str | Path, bid_path: str | Path, question: s
 #         POST /api/qa/sessions/{session_id}/ask 在配置网关失败（client is not None）时返回 HTTP 502 QA_GATEWAY_ERROR（不落库污染历史）
 # E28 起：新增 PATCH /api/qa/sessions/{session_id}（及隐藏别名 /{session_id}，QaSessionRenameRequest）支持会话重命名与审计（qa_rename_session）；
 #         _persist_qa_turn_locked 首问自动命名扩展覆盖空标题及 "{task.title} · 专家追问" 默认占位标题
+# E31 起：recalc_price 兼容中文/英文字段别名、qty=1 单双价自动互补（显式返回 derived=True / derived_fields / derived_warning 防冒充原文引用），并返回 sum_of_items / item_count；
+#         _safe_int_offset 安全替换裸 int(after_offset)；ask_bid_expert_stream 单工具分发统一 try/except Exception 转 observation.error 自愈（透传 BaseException）；
+#         POST /api/qa/sessions/{id}/ask 与 /ask/stream 区分 error_type='gateway'（502 QA_GATEWAY_ERROR）与 'tool_or_internal'（500 QA_EXECUTION_ERROR）
 ```
 
 ### 1.8 批注回写与解析底座
@@ -288,6 +294,7 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 - 路由列表（11 组）：`auth`、`dashboard`、`checks`、`extract`、`deviation`、`radar`、`qa`、`rules`、`reports`、`model_config`、`regulations`。
 - E27 `duration_record` 新增 Stage 1.5 预解析耗时字段 `f_parse_ms`（保留 E11 既有 6 键 `f1_ms`/`f2_ms`/`f3_ms`/`f4_ms`/`grading_ms`/`total_ms`）；
 - E30 协作式取消与活性心跳：`POST /api/checks/{task_id}/cancel`（`200` / `404` / `409 TASK_NOT_RUNNING`）、`BidTaskWorker._cancel_flags`（`_PipelineCancelled(BaseException)` / `PipelineCancelled` 统一穿透 core 降级块，连同 `POST /api/radar` 与 `/rescan` 消灭僵尸 `checking`）、SSE `progress`/`done`/`error` 帧携带 `updated_at`、`DELETE /api/checks/{task_id}` 对取消收尾中任务直接清理且运行中报错文案为 `"运行中任务请先中断后再删除"`，以及服务启动钩子 `recover_stale_tasks(session_factory=None) -> int`；
+- E31 体检任务重命名与 QA 错误归类：`PATCH /api/checks/{task_id}`（`BidTaskRenameRequest`，多租户 `404` / 空标题 `422 EMPTY_TASK_TITLE` / 联动同步 `"{old_title} · 专家追问"` 默认会话标题 / `rename_check_task` 审计）；`/api/qa` 透出 `error_type: 'gateway' | 'tool_or_internal'` 区分网关异常（`502 QA_GATEWAY_ERROR`）与工具内部异常（`500 QA_EXECUTION_ERROR`）；
 - 其余鉴权、多租户隔离、SSE 进度流、文件存储布局与统一错误格式约定保持不变。
 
 ---
@@ -317,3 +324,4 @@ crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) ->
 | 2026-11-16 | E28 F7 多会话并发流与重命名/首问自动命名补强：`backend/models.py` SQLite 新增 `PRAGMA busy_timeout=5000`；`backend/schemas.py` 新增 `QaSessionRenameRequest`；`backend/routers/qa.py` 新增 `_QA_DB_WRITE_LOCK` / `_persist_qa_turn_locked` 写锁串行化与 `PATCH /api/qa/sessions/{session_id}`（含隐藏别名与 `qa_rename_session` 审计），并将 `_is_default_session_title` 扩展到 `"{task.title} · 专家追问"` 占位标题的首问自动重命名；前端 `QaChatView.vue` 多会话 `cachedRuntimes` Map + Pinned/Projects 树形侧栏 + 行内/顶栏双击重命名及 `ExtractView.vue` F1 概览条通栏+Grid 布局对齐 | 架构侧 + 实现 |
 | 2026-11-16 | E29 感知层升级与真标书 F2/F4/OCR 实战排障：`core/parser.py` 为 `ParsedDoc` 挂载内嵌图片 OCR 精确区间 `media_ocr_spans`；`core/response_checker.py` 新增目录区/OCR 历史合同隔离、全命中评分择优与短标题顺延截取；`core/price_sandbox.py` `_normalize_upper` 补全以 `元` 结尾省写 `整` 的写法；`core/price_extractor.py` 增补 `'合计'` 列、近 3 段表前标题、《开标一览表》横向合并表头跨列多行子标签取值，及 `NEED_MANUAL` 时 LLM 单元格坐标感知 + Python `verify_quote`/`Decimal` 重解析兜底；`backend/worker.py` 修复 Stage 1.5 全缓存/零帧 OCR 播报、透传 `client=client` 与 `stats_payload` 报价预填字段；前端 `PriceManualDialog.vue`/`CheckDetailView.vue`/`types.ts` 清除硬编码假数据改用真实预填 | 实现 |
 | 2026-11-16 | E30 可中断流水线与活性心跳卡：`core/tender_llm.py` `extract_tender_with_llm`、`core/response_checker.py` `check_star_responses`/`run_response_check` 与 `core/rigging_radar.py` `scan_rigging_radar` 新增可选 `progress_cb: Optional[Callable[[int, int], None]] = None` 并透传取消 Signal（`response_checker` 并发池捕获 `BaseException` 立即 `pool.shutdown(wait=False, cancel_futures=True)`）；`backend/worker.py` 新增 `_PipelineCancelled(BaseException)`（别名 `PipelineCancelled`）、`BidTaskWorker._cancel_flags` 检查点（含 F1 fallback 前置上抛与 ≥5s 节流心跳帧 `"已判定 X / Y 条"`）、`updated_at` SSE 帧透传、清理 `BidFinding`/偏离表及重跑清旧 `stats_json`/`cancelled_by_user`；`backend/routers/checks.py` 新增 `POST /api/checks/{task_id}/cancel`（404/409/审计）与取消期立即 `DELETE`；`backend/routers/radar.py` 将 `POST /api/radar` 与 `/rescan` 接入 `_cancel_flags`（取消 409 `TASK_CANCELLED`、异常落 `failed` 无僵尸 `checking`）；`backend/main.py` 新增 `recover_stale_tasks` 启动恢复钩子；前端 `CheckDetailView.vue`/`CheckTaskList.vue`/`RadarView.vue`/`ExtractView.vue`/`SseProgress.vue`/`http.ts` 补齐中断入口与 120s 判活预警 | 实现 + 验收 |
+| 2026-11-16 | E31 F7 算术沙盒容错、ReAct 工具异常自愈与体检任务重命名卡：`core/price_sandbox.py` 内置零依赖安全解析 `_parse_sandbox_amount`/`_parse_sandbox_qty`（支持逗号/货币前缀/万元换算/量词及科学计数法 `'3E+5'`）与结构化 `INVALID_PRICE_FORMAT` 降级（严禁反向导入 `price_extractor`），`amount_to_upper()` 同步安全解析；`core/bid_react_agent.py` `recalc_price` 兼容字段别名、`qty=1` 单双价互补标注 `derived`/`derived_fields`/`derived_warning`、`_safe_int_offset` 与 `ask_bid_expert_stream` 单工具 `try/except Exception` 转 `observation.error` 自愈（放行 `BaseException`）；`backend/routers/qa.py` 新增 `_classify_qa_exception` 区分 `gateway`(502 `QA_GATEWAY_ERROR`) 与 `tool_or_internal`(500 `QA_EXECUTION_ERROR`) 并在 SSE `error` 帧透传 `error_type`；`backend/schemas.py` + `backend/routers/checks.py` 新增 `PATCH /api/checks/{task_id}` 体检任务重命名（同步联动默认标题 `QaSession` 与 `rename_check_task` 审计）；前端 `types.ts`/`index.ts`/`QaChatView.vue`/`CheckTaskList.vue`/`CheckDetailView.vue` 完成结构化错误分流与双入口行内改名 | 实现 + 验收 |

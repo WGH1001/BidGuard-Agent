@@ -52,6 +52,40 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+_GATEWAY_ERR_MODULES = ('openai', 'httpx', 'httpcore', 'urllib', 'requests', 'ssl')
+_GATEWAY_ERR_CLASSES = frozenset({
+    'APITimeoutError', 'APIConnectionError', 'APIStatusError', 'RateLimitError',
+    'ConnectTimeout', 'ReadTimeout', 'WriteTimeout', 'PoolTimeout', 'RemoteProtocolError',
+    'TimeoutError', 'ConnectionError', 'ConnectionResetError', 'ConnectionRefusedError',
+})
+_TOOL_INTERNAL_ERR_CLASSES = frozenset({
+    'InvalidOperation', 'ConversionSyntax', 'ValueError', 'TypeError',
+    'KeyError', 'IndexError', 'AttributeError', 'ZeroDivisionError',
+})
+_GATEWAY_ERR_KEYWORDS = (
+    'timeout', 'timed out', 'connection', 'connect ', 'tun', 'proxy',
+    'unreachable', 'refused', 'ssl', 'tls', 'bad gateway',
+    '502', '503', '504', '429', 'rate limit', 'unauthorized', 'api key',
+    '网关', '超时', '连接', '代理',
+)
+
+
+def _classify_qa_exception(exc: Exception) -> str:
+    """E31：区分网关连接/超时错误('gateway')与工具计算/内部代码异常('tool_or_internal')。"""
+    cls_name = type(exc).__name__
+    mod_name = (type(exc).__module__ or '').lower()
+    if any(mod_name == m or mod_name.startswith(f"{m}.") for m in _GATEWAY_ERR_MODULES):
+        return 'gateway'
+    if cls_name in _GATEWAY_ERR_CLASSES or (isinstance(exc, (TimeoutError, ConnectionError)) and not isinstance(exc, FileNotFoundError)):
+        return 'gateway'
+    if cls_name in _TOOL_INTERNAL_ERR_CLASSES:
+        return 'tool_or_internal'
+    msg_cf = str(exc or '').lower()
+    if any(kw in msg_cf for kw in _GATEWAY_ERR_KEYWORDS):
+        return 'gateway'
+    return 'tool_or_internal'
+
+
 def _is_default_session_title(title: Optional[str]) -> bool:
     t = (title or '').strip()
     if not t:
@@ -686,14 +720,28 @@ def ask_in_session(
             attachments=runtime_atts,
         )
     except Exception as exc:
+        err_type = _classify_qa_exception(exc)
         if client is not None:
+            if err_type == 'gateway':
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        'code': 'QA_GATEWAY_ERROR',
+                        'error_type': 'gateway',
+                        'message': (
+                            f"模型网关调用异常或超时（{type(exc).__name__}: {exc}），"
+                            f"已避免降级覆盖为 0-Token 原始碎片；请排查 TUN 代理/网关连通性后重试或切换 0-Token 模式"
+                        ),
+                    },
+                )
             raise HTTPException(
-                status_code=502,
+                status_code=500,
                 detail={
-                    'code': 'QA_GATEWAY_ERROR',
+                    'code': 'QA_EXECUTION_ERROR',
+                    'error_type': 'tool_or_internal',
                     'message': (
-                        f"模型网关调用异常或超时（{type(exc).__name__}: {exc}），"
-                        f"已避免降级覆盖为 0-Token 原始碎片；请排查 TUN 代理/网关连通性后重试或切换 0-Token 模式"
+                        f"问答工具或内部解析执行异常（{type(exc).__name__}: {exc}），"
+                        f"非网关超时；请核对提问格式或联系管理员排查"
                     ),
                 },
             )
@@ -833,7 +881,10 @@ def ask_in_session_stream(
                 else:
                     yield f"event: {ev_type}\ndata: {json.dumps(ev_data, ensure_ascii=False)}\n\n"
         except Exception as exc:
-            err_payload = {'detail': f"{type(exc).__name__}: {exc}"}
+            err_payload = {
+                'detail': f"{type(exc).__name__}: {exc}",
+                'error_type': _classify_qa_exception(exc),
+            }
             yield f"event: error\ndata: {json.dumps(err_payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(

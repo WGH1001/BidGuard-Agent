@@ -19,13 +19,19 @@ from __future__ import annotations
 
 import json
 import re
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from core.hybrid_retriever import expand_query_synonyms, hybrid_retrieve_windows
 from core.llm_gateway import encode_image_for_vlm
 from core.parser import parse_document, parse_qa_attachment
-from core.price_sandbox import PriceSandbox
+from core.price_sandbox import (
+    CENT,
+    PriceSandbox,
+    _parse_sandbox_amount,
+    _parse_sandbox_qty,
+)
 from core.qualification_scanner import scan_qualifications
 from core.quote_verifier import verify_quote
 from core.regulation_library import cite_regulation as _lib_cite_regulation
@@ -261,6 +267,24 @@ def _extract_keywords_from_question(question: str) -> list[str]:
     return tokens or ['质保']
 
 
+def _safe_int_offset(val: Any) -> int:
+    """安全将 after_offset 转为非负整数，避免大模型传入非法偏移字符串时炸毁工具链。"""
+    if val is None or isinstance(val, bool):
+        return 0
+    if isinstance(val, int):
+        return max(0, val)
+    s = str(val).strip()
+    if not s:
+        return 0
+    m = re.search(r'-?\d+', s)
+    if not m:
+        return 0
+    try:
+        return max(0, int(m.group(0)))
+    except ValueError:
+        return 0
+
+
 def _search_text_windows(
     text: str,
     keyword: str,
@@ -274,7 +298,7 @@ def _search_text_windows(
     if not text or not keyword:
         return []
 
-    start_pos = max(0, int(after_offset or 0))
+    start_pos = _safe_int_offset(after_offset)
     if start_pos >= len(text):
         return []
 
@@ -377,7 +401,7 @@ def locate_chapter(
     """工具 2：章节定位（复用 tender_extractor.locate_chapters 与 locate_keyword_sections，支持 after_offset）。"""
     if not text or not chapter_title:
         return []
-    start_pos = max(0, int(after_offset or 0))
+    start_pos = _safe_int_offset(after_offset)
     kw = str(chapter_title).strip()
     chapters = locate_chapters(text)
     matched = [
@@ -403,14 +427,25 @@ def recalc_price(
     bid_total_upper: Optional[str] = None,
     price_cap=None,
 ) -> dict[str, Any]:
-    """工具 3：调用 F2 PriceSandbox 复算报价（E23：若分项缺少 total_price 明确提示，防止默认按 0 误报算术差错）。"""
+    """工具 3：调用 F2 PriceSandbox 复算报价（E23 校验 missing total_price；E31 别名容错 + qty=1 derived 标注）。"""
     if not isinstance(items, list) or len(items) == 0:
         return {
             'passed': False,
             'error': 'recalc_price 需要非空 items 列表，每项须包含 name、qty、unit_price、total_price 字段',
             'findings': [],
         }
+
+    def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any:
+        for k in keys:
+            val = d.get(k)
+            if val is not None and str(val).strip() != '':
+                return val
+        return None
+
     normalized_items: list[dict[str, Any]] = []
+    derived_fields: list[dict[str, Any]] = []
+    sum_of_items = Decimal('0.00')
+
     for idx, it in enumerate(items, start=1):
         if not isinstance(it, dict):
             return {
@@ -418,21 +453,62 @@ def recalc_price(
                 'error': f'recalc_price 第 {idx} 项格式错误，须为包含 name、qty、unit_price、total_price 的字典',
                 'findings': [],
             }
-        tp = it.get('total_price')
-        if tp is None or str(tp).strip() == '':
-            alt_tp = it.get('amount') if it.get('amount') is not None else it.get('subtotal')
-            if alt_tp is not None and str(alt_tp).strip() != '':
-                it = {**it, 'total_price': alt_tp}
+
+        item_name = str(_first_present(it, ('name', 'item_name', '名称', '品目名称')) or f"分项{idx}").strip()
+        raw_qty = _first_present(it, ('qty', 'quantity', 'count', '数量'))
+        if raw_qty is None:
+            raw_qty = '1'
+        parsed_qty = _parse_sandbox_qty(raw_qty)
+
+        raw_unit = _first_present(it, ('unit_price', 'price', '单价'))
+        raw_tp = _first_present(it, ('total_price', 'amount', 'subtotal', '合价', '小计', '金额'))
+
+        if raw_tp is None:
+            parsed_unit = _parse_sandbox_amount(raw_unit) if raw_unit is not None else None
+            if parsed_qty == Decimal('1') and parsed_unit is not None:
+                raw_tp = raw_unit
+                derived_fields.append({
+                    'index': idx,
+                    'name': item_name,
+                    'derived_field': 'total_price',
+                    'source_field': 'unit_price',
+                    'value': str(parsed_unit),
+                    'note': '因数量=1，合价由单价自动推算（derived，非标书逐字原文）',
+                })
             else:
                 return {
                     'passed': False,
                     'error': (
-                        f"recalc_price 第 {idx} 项（「{it.get('name') or idx}」）缺少 total_price（合价）字段；"
+                        f"recalc_price 第 {idx} 项（「{item_name}」）缺少 total_price（合价）字段；"
                         f"请提供完整 {'{name, qty, unit_price, total_price}'} 后再复算"
                     ),
                     'findings': [],
                 }
-        normalized_items.append(it)
+
+        if raw_unit is None:
+            parsed_tp_for_unit = _parse_sandbox_amount(raw_tp)
+            if parsed_qty == Decimal('1') and parsed_tp_for_unit is not None:
+                raw_unit = raw_tp
+                derived_fields.append({
+                    'index': idx,
+                    'name': item_name,
+                    'derived_field': 'unit_price',
+                    'source_field': 'total_price',
+                    'value': str(parsed_tp_for_unit),
+                    'note': '因数量=1，单价由合价自动推算（derived，非标书逐字原文）',
+                })
+
+        parsed_tp = _parse_sandbox_amount(raw_tp)
+        if parsed_tp is not None:
+            sum_of_items += parsed_tp
+
+        normalized_items.append({
+            **it,
+            'name': item_name,
+            'qty': raw_qty,
+            'unit_price': raw_unit,
+            'total_price': raw_tp,
+        })
 
     sandbox = PriceSandbox(
         items=normalized_items,
@@ -442,7 +518,20 @@ def recalc_price(
         price_cap=price_cap,
     )
     findings = sandbox.run()
-    return {'passed': len(findings) == 0, 'findings': findings}
+    out: dict[str, Any] = {
+        'passed': len(findings) == 0,
+        'findings': findings,
+        'item_count': len(normalized_items),
+        'sum_of_items': str(sum_of_items.quantize(CENT)),
+    }
+    if derived_fields:
+        out['derived'] = True
+        out['derived_fields'] = derived_fields
+        out['derived_warning'] = (
+            '注意：部分分项的 unit_price 或 total_price 系依据数量=1 自动推算（derived），'
+            '向用户作答时必须明确标注为推算值，严禁当作标书原文写明的值直接引用。'
+        )
+    return out
 
 
 def check_cert_expiry(
@@ -563,6 +652,7 @@ def search_attachment(
         }]
 
     kw = str(keyword or '').strip()
+    start_pos = _safe_int_offset(after_offset)
     all_hits: list[dict[str, Any]] = []
 
     for att in candidates:
@@ -583,11 +673,11 @@ def search_attachment(
             continue
 
         if not kw:
-            snippet = att_txt[after_offset:min(len(att_txt), after_offset + window * 2)].strip()
+            snippet = att_txt[start_pos:min(len(att_txt), start_pos + window * 2)].strip()
             if snippet:
-                real_off = att_txt.find(snippet, after_offset)
+                real_off = att_txt.find(snippet, start_pos)
                 if real_off < 0:
-                    real_off = after_offset
+                    real_off = start_pos
                 all_hits.append({
                     'source': 'attachment',
                     'attachment_id': att['attachment_id'],
@@ -608,7 +698,7 @@ def search_attachment(
             window=window,
             page_spans=att['page_ctx'],
             client=client,
-            after_offset=after_offset,
+            after_offset=start_pos,
         )
         for h in win_hits:
             all_hits.append({
@@ -620,7 +710,7 @@ def search_attachment(
                 'ocr_chars': att['ocr_chars'],
             })
 
-        if not win_hits and att['is_image'] and len(att_txt.strip()) <= 400 and after_offset == 0:
+        if not win_hits and att['is_image'] and len(att_txt.strip()) <= 400 and start_pos == 0:
             snippet = att_txt.strip()
             real_off = att_txt.find(snippet)
             all_hits.append({
@@ -1117,109 +1207,119 @@ def ask_bid_expert_stream(
             return
 
         observation: Any = None
-        if action == 'search_tender':
-            if isinstance(action_input, dict):
-                kw = str(action_input.get('keyword') or '')
-                after_off = int(action_input.get('after_offset') or 0)
-            else:
-                kw = str(action_input or '')
-                after_off = 0
-            observation = _search_text_windows(
-                tender_text, kw, 'tender', page_spans=tender_ctx, client=client, after_offset=after_off
-            )
-            for h in observation[:2]:
-                collected_tool_quotes.append({
-                    'source': 'tender', 'quote': h['quote'],
-                    'offset': h['offset'], 'page': h['page'], 'quote_verified': True,
-                })
-        elif action == 'search_bid':
-            if isinstance(action_input, dict):
-                kw = str(action_input.get('keyword') or '')
-                after_off = int(action_input.get('after_offset') or 0)
-            else:
-                kw = str(action_input or '')
-                after_off = 0
-            observation = _search_text_windows(
-                bid_text, kw, 'bid', page_spans=bid_ctx, client=client, after_offset=after_off
-            )
-            for h in observation[:2]:
-                collected_tool_quotes.append({
-                    'source': 'bid', 'quote': h['quote'],
-                    'offset': h['offset'], 'page': h['page'], 'quote_verified': True,
-                })
-        elif action == 'search_attachment':
-            if isinstance(action_input, dict):
-                kw = str(action_input.get('keyword') or '')
-                att_id_in = str(action_input.get('attachment_id') or '')
-                after_off = int(action_input.get('after_offset') or 0)
-            else:
-                kw = str(action_input or '')
-                att_id_in = ''
-                after_off = 0
-            observation = search_attachment(
-                keyword=kw,
-                attachment_id=att_id_in,
-                attachments=norm_atts,
-                after_offset=after_off,
-                client=client,
-            )
-            for h in observation[:2]:
-                if h.get('quote'):
+        try:
+            if action == 'search_tender':
+                if isinstance(action_input, dict):
+                    kw = str(action_input.get('keyword') or '')
+                    after_off = _safe_int_offset(action_input.get('after_offset'))
+                else:
+                    kw = str(action_input or '')
+                    after_off = 0
+                observation = _search_text_windows(
+                    tender_text, kw, 'tender', page_spans=tender_ctx, client=client, after_offset=after_off
+                )
+                for h in observation[:2]:
                     collected_tool_quotes.append({
-                        'source': 'attachment',
-                        'attachment_id': h.get('attachment_id'),
-                        'attachment_name': h.get('attachment_name'),
-                        'quote': h['quote'],
-                        'offset': h['offset'],
-                        'page': h['page'],
-                        'quote_verified': True,
+                        'source': 'tender', 'quote': h['quote'],
+                        'offset': h['offset'], 'page': h['page'], 'quote_verified': True,
                     })
-        elif action == 'locate_chapter':
-            if isinstance(action_input, dict):
-                target_doc = bid_text if action_input.get('doc') == 'bid' else tender_text
-                ch_title = str(action_input.get('chapter_title') or action_input.get('keyword') or '')
-                after_off = int(action_input.get('after_offset') or 0)
-            else:
-                target_doc = tender_text
-                ch_title = str(action_input or '')
-                after_off = 0
-            observation = locate_chapter(target_doc, ch_title, after_offset=after_off)
-        elif action == 'recalc_price':
-            if isinstance(action_input, dict):
-                observation = recalc_price(
-                    items=action_input.get('items', []),
-                    table_total=action_input.get('table_total'),
-                    bid_total=action_input.get('bid_total'),
-                    bid_total_upper=action_input.get('bid_total_upper'),
-                    price_cap=action_input.get('price_cap'),
+            elif action == 'search_bid':
+                if isinstance(action_input, dict):
+                    kw = str(action_input.get('keyword') or '')
+                    after_off = _safe_int_offset(action_input.get('after_offset'))
+                else:
+                    kw = str(action_input or '')
+                    after_off = 0
+                observation = _search_text_windows(
+                    bid_text, kw, 'bid', page_spans=bid_ctx, client=client, after_offset=after_off
                 )
-            elif isinstance(action_input, list):
-                observation = recalc_price(items=action_input)
-            else:
-                observation = {
-                    'error': 'recalc_price 需要包含 items 列表的对象，每项格式为 {"name", "qty", "unit_price", "total_price"}'
-                }
-        elif action == 'check_cert_expiry':
-            if isinstance(action_input, dict):
-                observation = check_cert_expiry(
-                    cert_text=str(action_input.get('cert_text') or bid_text),
-                    open_date=str(action_input.get('open_date') or ''),
-                    required_social_months=action_input.get('required_social_months'),
-                    forbidden_names=action_input.get('forbidden_names'),
+                for h in observation[:2]:
+                    collected_tool_quotes.append({
+                        'source': 'bid', 'quote': h['quote'],
+                        'offset': h['offset'], 'page': h['page'], 'quote_verified': True,
+                    })
+            elif action == 'search_attachment':
+                if isinstance(action_input, dict):
+                    kw = str(action_input.get('keyword') or '')
+                    att_id_in = str(action_input.get('attachment_id') or '')
+                    after_off = _safe_int_offset(action_input.get('after_offset'))
+                else:
+                    kw = str(action_input or '')
+                    att_id_in = ''
+                    after_off = 0
+                observation = search_attachment(
+                    keyword=kw,
+                    attachment_id=att_id_in,
+                    attachments=norm_atts,
+                    after_offset=after_off,
+                    client=client,
                 )
+                for h in observation[:2]:
+                    if h.get('quote'):
+                        collected_tool_quotes.append({
+                            'source': 'attachment',
+                            'attachment_id': h.get('attachment_id'),
+                            'attachment_name': h.get('attachment_name'),
+                            'quote': h['quote'],
+                            'offset': h['offset'],
+                            'page': h['page'],
+                            'quote_verified': True,
+                        })
+            elif action == 'locate_chapter':
+                if isinstance(action_input, dict):
+                    target_doc = bid_text if action_input.get('doc') == 'bid' else tender_text
+                    ch_title = str(action_input.get('chapter_title') or action_input.get('keyword') or '')
+                    after_off = _safe_int_offset(action_input.get('after_offset'))
+                else:
+                    target_doc = tender_text
+                    ch_title = str(action_input or '')
+                    after_off = 0
+                observation = locate_chapter(target_doc, ch_title, after_offset=after_off)
+            elif action == 'recalc_price':
+                if isinstance(action_input, dict):
+                    observation = recalc_price(
+                        items=action_input.get('items', []),
+                        table_total=action_input.get('table_total'),
+                        bid_total=action_input.get('bid_total'),
+                        bid_total_upper=action_input.get('bid_total_upper'),
+                        price_cap=action_input.get('price_cap'),
+                    )
+                elif isinstance(action_input, list):
+                    observation = recalc_price(items=action_input)
+                else:
+                    observation = {
+                        'error': 'recalc_price 需要包含 items 列表的对象，每项格式为 {"name", "qty", "unit_price", "total_price"}'
+                    }
+            elif action == 'check_cert_expiry':
+                if isinstance(action_input, dict):
+                    observation = check_cert_expiry(
+                        cert_text=str(action_input.get('cert_text') or bid_text),
+                        open_date=str(action_input.get('open_date') or ''),
+                        required_social_months=action_input.get('required_social_months'),
+                        forbidden_names=action_input.get('forbidden_names'),
+                    )
+                else:
+                    observation = {'error': 'check_cert_expiry 需要包含 cert_text 与 open_date 的字典'}
+            elif action == 'cite_regulation':
+                if isinstance(action_input, dict):
+                    observation = cite_regulation(
+                        keyword=str(action_input.get('keyword') or ''),
+                        article_no=str(action_input.get('article_no') or ''),
+                        law_name=str(action_input.get('law_name') or action_input.get('law') or ''),
+                    )
+                else:
+                    observation = cite_regulation(keyword=str(action_input or ''))
             else:
-                observation = {'error': 'check_cert_expiry 需要包含 cert_text 与 open_date 的字典'}
-        elif action == 'cite_regulation':
-            if isinstance(action_input, dict):
-                observation = cite_regulation(
-                    keyword=str(action_input.get('keyword') or ''),
-                    article_no=str(action_input.get('article_no') or ''),
-                    law_name=str(action_input.get('law_name') or action_input.get('law') or ''),
-                )
-            else:
-                observation = cite_regulation(keyword=str(action_input or ''))
-        else:
-            observation = {'error': f"未知工具: {action}"}
+                observation = {'error': f"未知工具: {action}"}
+        except Exception as tool_exc:
+            # E31：单工具异常绝不炸毁 ReAct SSE 流，转化为结构化 observation 交回模型自修正
+            observation = {
+                'passed': False,
+                'error': (
+                    f"工具 {action} 执行异常（{type(tool_exc).__name__}: {tool_exc}），"
+                    f"请检查并修正输入参数格式后重试。"
+                ),
+            }
 
         step_item = {
             'round': r_idx,

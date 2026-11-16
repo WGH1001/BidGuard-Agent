@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { checksApi, validateUploadFile } from '@/api'
 import type { BidTaskOut, TaskDurationRecord } from '@/api/types'
@@ -17,10 +17,42 @@ const emit = defineEmits<{
   (e: 'select', task: BidTaskOut): void
   (e: 'page-change', page: number): void
   (e: 'created', task: BidTaskOut, autoRun: boolean): void
+  (e: 'rename', task: BidTaskOut, title: string): void
   (e: 'cancel', task: BidTaskOut): void
   (e: 'delete', task: BidTaskOut): void
   (e: 'refresh'): void
 }>()
+
+const editingTaskId = ref<number | null>(null)
+const editingTitleDraft = ref('')
+
+function startRenameTask(item: BidTaskOut): void {
+  editingTaskId.value = item.id
+  editingTitleDraft.value = item.title || ''
+  void nextTick(() => {
+    const input = document.querySelector<HTMLInputElement>('.ri-rename-input')
+    if (input) {
+      input.focus()
+      input.select()
+    }
+  })
+}
+
+function cancelRenameTask(): void {
+  editingTaskId.value = null
+  editingTitleDraft.value = ''
+}
+
+function commitRenameTask(item: BidTaskOut): void {
+  if (editingTaskId.value !== item.id) return
+  const nextTitle = editingTitleDraft.value.trim()
+  editingTaskId.value = null
+  editingTitleDraft.value = ''
+  if (!nextTitle || nextTitle === (item.title || '').trim()) {
+    return
+  }
+  emit('rename', item, nextTitle)
+}
 
 type TaskWithDuration = BidTaskOut & {
   started_at?: string | null
@@ -257,12 +289,41 @@ defineExpose({
         <div class="ri-row1">
           <div class="ri-row1-left">
             <span class="ri-id mono-num">#{{ item.id }}</span>
-            <span class="ri-title">{{ item.title }}</span>
+            <input
+              v-if="editingTaskId === item.id"
+              v-model="editingTitleDraft"
+              type="text"
+              maxlength="256"
+              class="ri-rename-input"
+              @click.stop
+              @dblclick.stop
+              @keydown.enter.prevent="commitRenameTask(item)"
+              @keydown.esc.prevent="cancelRenameTask"
+              @blur="commitRenameTask(item)"
+            />
+            <span
+              v-else
+              class="ri-title"
+              title="双击或点击右侧 ✎ 重命名体检任务"
+              @dblclick.stop="startRenameTask(item)"
+            >
+              {{ item.title }}
+            </span>
           </div>
           <div class="ri-row1-right">
             <span class="sev-pill" :class="statusMeta(item.status).cls">
               {{ statusMeta(item.status).label }}
             </span>
+            <el-button
+              v-if="editingTaskId !== item.id"
+              link
+              size="small"
+              class="ri-rename-btn"
+              title="重命名体检任务"
+              @click.stop="startRenameTask(item)"
+            >
+              ✎
+            </el-button>
             <el-button
               v-if="['extracting', 'checking', 'grading'].includes(item.status)"
               type="warning"
@@ -578,6 +639,29 @@ defineExpose({
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ri-rename-input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--txt-strong);
+  background: #ffffff;
+  border: 1px solid var(--brand);
+  border-radius: 4px;
+  outline: none;
+}
+
+.ri-rename-btn {
+  font-size: 12px !important;
+  color: var(--txt-muted) !important;
+  padding: 0 2px !important;
+}
+
+.ri-rename-btn:hover {
+  color: var(--brand) !important;
 }
 
 .ri-meta-row {

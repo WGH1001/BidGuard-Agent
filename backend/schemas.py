@@ -140,6 +140,10 @@ class BidTaskOut(BaseModel):
     updated_at: Optional[str] = None
 
 
+class BidTaskRenameRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=256)
+
+
 class BidTaskListOut(BaseModel):
     total: int
     items: list[BidTaskOut] = Field(default_factory=list)

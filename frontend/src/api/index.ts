@@ -9,6 +9,7 @@ import type {
   BidTaskDetailOut,
   BidTaskListOut,
   BidTaskOut,
+  BidTaskRenamePayload,
   CertificateOut,
   CertificateParseOut,
   CertificateUpsertRequest,
@@ -43,6 +44,7 @@ import type {
   UserProfileOut,
   VerifyArticleOut,
   QaAttachmentOut,
+  QaStreamErrorType,
   QaStreamHandlers,
   ReActStepTraceItem
 } from './types'
@@ -167,6 +169,9 @@ export const checksApi = {
   },
   cancel(taskId: number): Promise<OkResponse> {
     return post<OkResponse>(`/checks/${taskId}/cancel`)
+  },
+  rename(taskId: number, payload: BidTaskRenamePayload): Promise<BidTaskOut> {
+    return patch<BidTaskOut>(`/checks/${taskId}`, payload)
   },
   findings(
     taskId: number,
@@ -309,7 +314,12 @@ export const qaApi = {
         handlers.onDone?.(parsed as QaAskResponseOut)
       } else if (evName === 'error') {
         terminalEmitted = true
-        handlers.onError?.(String((parsed as { detail?: string }).detail || '流式问答异常'))
+        const errObj = parsed as { detail?: string; error_type?: QaStreamErrorType }
+        const errType: QaStreamErrorType | undefined =
+          errObj.error_type === 'gateway' || errObj.error_type === 'tool_or_internal'
+            ? errObj.error_type
+            : undefined
+        handlers.onError?.(String(errObj.detail || '流式问答异常'), errType)
       }
     }
 
@@ -327,7 +337,13 @@ export const qaApi = {
         })
 
         if (!resp.ok || !resp.body) {
-          throw new Error(`HTTP ${resp.status}`)
+          const httpErr = new Error(`HTTP ${resp.status}`) as Error & { errorType?: QaStreamErrorType }
+          if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
+            httpErr.errorType = 'gateway'
+          } else if (resp.status === 500) {
+            httpErr.errorType = 'tool_or_internal'
+          }
+          throw httpErr
         }
 
         const reader = resp.body.getReader()
@@ -350,11 +366,15 @@ export const qaApi = {
           processSseBlock(buffer)
         }
         if (!terminalEmitted && !controller.signal.aborted) {
-          handlers.onError?.('流式响应未正常结束')
+          handlers.onError?.('流式响应未正常结束', 'gateway')
         }
       } catch (err: unknown) {
         if ((err as { name?: string })?.name === 'AbortError') return
-        handlers.onError?.(err instanceof Error ? err.message : '流式连接中断')
+        const typedErr = err as { errorType?: QaStreamErrorType; message?: string }
+        handlers.onError?.(
+          err instanceof Error ? err.message : '流式连接中断',
+          typedErr?.errorType || 'gateway',
+        )
       }
     })()
 

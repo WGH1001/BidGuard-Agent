@@ -152,6 +152,10 @@ export interface BidTaskListOut {
   items: BidTaskOut[]
 }
 
+export interface BidTaskRenamePayload {
+  title: string
+}
+
 export interface BidTaskDetailOut {
   task: BidTaskOut
   findings: BidFindingOut[]
@@ -513,11 +517,13 @@ export interface QaLastTurnWithdrawOut {
   remaining_messages: number
 }
 
+export type QaStreamErrorType = 'gateway' | 'tool_or_internal'
+
 export interface QaStreamHandlers {
   onStep?: (step: ReActStepTraceItem) => void
   onDelta?: (deltaText: string) => void
   onDone?: (finalRes: QaAskResponseOut) => void
-  onError?: (errMsg: string) => void
+  onError?: (errMsg: string, errorType?: QaStreamErrorType) => void
 }
 
 // ── 8. 废标规则与企业证照台账 (/api/rules) ───────────────────────────────

@@ -6,6 +6,7 @@ import type {
   QaAttachmentSummary,
   QaMessageItem,
   QaSessionOut,
+  QaStreamErrorType,
 } from '@/api/types'
 
 /**
@@ -838,7 +839,7 @@ async function handleSendQuestion(question: string, attachmentIds: string[] = []
       }
       await refreshAllSessionsMeta()
     },
-    async onError(errMsg) {
+    async onError(errMsg, errorType) {
       const cur = runtimes.value[targetSessionId]
       if (!cur || cur.streamToken !== myToken) return
       cur.cancelFn = null
@@ -846,14 +847,74 @@ async function handleSendQuestion(question: string, attachmentIds: string[] = []
       const completedSteps = msg?.steps ? msg.steps.length : 0
       const hasPartialAnswer = Boolean(msg?.content && msg.content.trim().length > 0)
 
+      const resolveQaErrorKind = (
+        text?: string,
+        explicit?: QaStreamErrorType,
+        errObj?: unknown,
+      ): QaStreamErrorType => {
+        if (explicit === 'gateway' || explicit === 'tool_or_internal') {
+          return explicit
+        }
+        const rawErr = errObj as {
+          response?: { data?: { detail?: { error_type?: string } } }
+          detail?: { error_type?: string }
+        } | null
+        const nestedType =
+          rawErr?.response?.data?.detail?.error_type || rawErr?.detail?.error_type
+        if (nestedType === 'gateway' || nestedType === 'tool_or_internal') {
+          return nestedType
+        }
+        // 兼容未传 error_type 的旧版错误响应：仅作兜底关键字识别
+        const lower = (text || '').toLowerCase()
+        if (
+          lower.includes('qa_execution_error') ||
+          lower.includes('问答工具或内部解析执行异常') ||
+          lower.includes('invalidoperation') ||
+          lower.includes('conversionsyntax') ||
+          lower.includes('valueerror') ||
+          lower.includes('typeerror') ||
+          lower.includes('keyerror') ||
+          lower.includes('indexerror') ||
+          lower.includes('zerodivisionerror')
+        ) {
+          return 'tool_or_internal'
+        }
+        if (
+          lower.includes('timeout') ||
+          lower.includes('timed out') ||
+          lower.includes('connection') ||
+          lower.includes('tun') ||
+          lower.includes('proxy') ||
+          lower.includes('network') ||
+          lower.includes('fetch') ||
+          lower.includes('502') ||
+          lower.includes('503') ||
+          lower.includes('504') ||
+          lower.includes('429') ||
+          lower.includes('网关') ||
+          lower.includes('超时') ||
+          lower.includes('连接')
+        ) {
+          return 'gateway'
+        }
+        return 'tool_or_internal'
+      }
+
       if (msg && msg.role === 'assistant' && (completedSteps > 0 || hasPartialAnswer)) {
         msg.loading = false
         msg.streaming = false
         msg.mode = 'react'
+        const kind = resolveQaErrorKind(errMsg, errorType)
         if (!hasPartialAnswer) {
-          msg.content = `⚠️ 模型网关响应超时或连接中断（已完成 ${completedSteps} 步工具检索：${errMsg || 'Connection timeout'}）。已为您保留上方检索到的工具轨迹，可点击下方「重新生成回答」重试或「撤回本轮回答」调整提问。`
+          msg.content =
+            kind === 'gateway'
+              ? `⚠️ 模型网关响应超时或连接中断（已完成 ${completedSteps} 步工具检索：${errMsg || 'Connection timeout'}）。已为您保留上方检索到的工具轨迹，可点击下方「重新生成回答」重试或「撤回本轮回答」调整提问。`
+              : `⚠️ 问答工具或内部解析执行异常（已完成 ${completedSteps} 步工具检索：${errMsg || 'Tool execution error'}）。非网关连接超时，已为您保留上方工具轨迹，可核对提问格式或点击「重新生成回答」/「撤回本轮回答」调整提问。`
         } else {
-          msg.content = `${msg.content}\n\n[提示：模型网关流式响应中途断开（${errMsg || 'Connection interrupted'}），可点击下方「重新生成回答」重试]`
+          msg.content =
+            kind === 'gateway'
+              ? `${msg.content}\n\n[提示：模型网关流式响应中途断开（${errMsg || 'Connection interrupted'}），可点击下方「重新生成回答」重试]`
+              : `${msg.content}\n\n[提示：问答工具或内部执行异常（${errMsg || 'Internal execution error'}），可点击下方「重新生成回答」或调整提问]`
         }
         cur.asking = false
         if (activeSessionId.value === targetSessionId) {
@@ -884,11 +945,15 @@ async function handleSendQuestion(question: string, attachmentIds: string[] = []
         if (!errRt || errRt.streamToken !== myToken) return
         const curMsg = errRt.messages[assistantMsgIdx]
         const fallbackDetail =
-          askErr instanceof Error && askErr.message ? askErr.message : errMsg || '网关请求异常'
+          askErr instanceof Error && askErr.message ? askErr.message : errMsg || '执行异常'
+        const fallbackKind = resolveQaErrorKind(fallbackDetail, undefined, askErr)
         if (curMsg && curMsg.role === 'assistant') {
           curMsg.loading = false
           curMsg.streaming = false
-          curMsg.content = `⚠️ 模型网关连接超时或不可达（${fallbackDetail}）。已保护会话不被 0-Token 原始碎片污染，可排查 TUN 代理后点击下方「重新生成回答」，或点击「撤回本轮回答」调整提问。`
+          curMsg.content =
+            fallbackKind === 'gateway'
+              ? `⚠️ 模型网关连接超时或不可达（${fallbackDetail}）。已保护会话不被 0-Token 原始碎片污染，可排查 TUN 代理后点击下方「重新生成回答」，或点击「撤回本轮回答」调整提问。`
+              : `⚠️ 问答工具或内部解析执行异常（${fallbackDetail}）。非模型网关连接故障，已保护会话不被无效内容污染，可调整提问后点击「重新生成回答」或「撤回本轮回答」。`
         }
       } finally {
         const doneRt = runtimes.value[targetSessionId]

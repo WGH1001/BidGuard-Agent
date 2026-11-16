@@ -22,6 +22,7 @@ from backend.schemas import (
     BidTaskDetailOut as _BaseBidTaskDetailOut,
     BidTaskListOut as _BaseBidTaskListOut,
     BidTaskOut as _BaseBidTaskOut,
+    BidTaskRenameRequest,
     FindingFeedbackRequest,
     FindingListOut,
     OkResponse,
@@ -306,6 +307,50 @@ def get_check_task_detail(
         task=_task_to_out(task),
         findings=[_finding_to_out(f) for f in findings],
     )
+
+
+@router.patch('/{task_id}', response_model=BidTaskOut)
+def rename_check_task(
+    task_id: int,
+    body: BidTaskRenameRequest,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> BidTaskOut:
+    """E31 · Q1：重命名体检任务标题（多租户隔离 404 + 空标题 422 + 联动默认命名的 F7 会话标题 + 审计留痕）。"""
+    new_title = (body.title or '').strip()
+    if not new_title:
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'EMPTY_TASK_TITLE', 'message': '任务名称不能为空'},
+        )
+    tenant_id = int(current_user.tenant_id)
+    task = _get_tenant_task_or_404(db, task_id, tenant_id)
+    old_title = task.title
+    task.title = new_title[:256]
+    task.updated_at = _utc_now()
+
+    default_qa_titles = {f"{old_title} · 专家追问", old_title}
+    linked_sessions = (
+        db.query(QaSession)
+        .filter_by(tenant_id=tenant_id, task_id=task.id)
+        .all()
+    )
+    for qs in linked_sessions:
+        if (qs.title or '').strip() in default_qa_titles:
+            qs.title = f"{task.title} · 专家追问"[:256]
+            qs.updated_at = task.updated_at
+
+    db.commit()
+    db.refresh(task)
+    record_audit(
+        db,
+        action='rename_check_task',
+        tenant_id=tenant_id,
+        user_id=current_user.get('id'),
+        target=f"task:{task_id}",
+        detail_json={'old_title': old_title, 'new_title': task.title},
+    )
+    return _task_to_out(task)
 
 
 @router.post('/{task_id}/run', response_model=RunTaskTriggerOut)
