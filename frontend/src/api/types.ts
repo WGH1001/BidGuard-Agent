@@ -67,6 +67,10 @@ export interface TenantCreateRequest {
   name: string
 }
 
+export interface TenantUpdateRequest {
+  name: string
+}
+
 export interface AdminUserOut {
   id: number
   username: string
@@ -88,6 +92,7 @@ export interface AdminUserCreateRequest {
 }
 
 export interface AdminUserUpdateRequest {
+  username?: string
   display_name?: string
   role?: UserRole
   tenant_id?: number
@@ -349,8 +354,9 @@ export interface MatchedLedgerCertOut {
   id: number
   cert_name: string
   cert_no?: string | null
-  valid_until: string
-  days_remaining: number
+  valid_until: string | null
+  is_long_term?: boolean
+  days_remaining: number | null
   status: 'valid' | 'expiring_soon' | 'expired' | string
   has_attachment: boolean
   attachment_name?: string | null
@@ -612,7 +618,8 @@ export interface BidRuleConfigOut {
 export interface CertificateUpsertRequest {
   cert_name: string
   cert_no?: string | null
-  valid_until: string
+  valid_until?: string | null
+  is_long_term?: boolean
   warn_days: number
   remark?: string | null
 }
@@ -622,9 +629,10 @@ export interface CertificateOut {
   tenant_id: number
   cert_name: string
   cert_no?: string | null
-  valid_until: string
+  valid_until: string | null
+  is_long_term?: boolean
   warn_days: number
-  days_remaining: number
+  days_remaining: number | null
   is_expired: boolean
   is_expiring_soon: boolean
   remark?: string | null
@@ -637,8 +645,10 @@ export interface CertificateOut {
 
 export interface CertificateParseOut {
   cert_name_hint?: string | null
+  cert_name_source?: 'ocr' | 'filename_fallback' | null
   cert_no_hint?: string | null
   valid_until_hint?: string | null
+  is_long_term_hint?: boolean
   ocr_chars: number
   text_excerpt: string
 }

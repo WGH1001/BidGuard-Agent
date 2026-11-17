@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { authApi } from '@/api'
@@ -9,6 +10,7 @@ import { useAuthStore } from '@/stores/auth'
 defineOptions({ name: 'UsersManageView' })
 
 const authStore = useAuthStore()
+const router = useRouter()
 
 const loading = ref(false)
 const tenants = ref<TenantOut[]>([])
@@ -19,6 +21,7 @@ const creatingTenant = ref(false)
 
 const filterTenantId = ref<number | ''>('')
 const searchKeyword = ref('')
+const showDisabledUsers = ref(false)
 
 // 新建用户弹窗
 const createDialogVisible = ref(false)
@@ -36,6 +39,7 @@ const editDialogVisible = ref(false)
 const savingEdit = ref(false)
 const editTarget = ref<AdminUserOut | null>(null)
 const editForm = reactive({
+  username: '',
   display_name: '',
   role: 'member' as UserRole,
   tenant_id: 0,
@@ -51,9 +55,20 @@ const activeAdminCount = computed(
   () => users.value.filter((u) => u.role === 'admin' && u.is_active).length,
 )
 
+const activeUserCount = computed(
+  () => users.value.filter((u) => u.is_active).length,
+)
+
+const disabledUserCount = computed(
+  () => users.value.length - activeUserCount.value,
+)
+
 const filteredUsers = computed(() => {
   const kw = searchKeyword.value.trim().toLowerCase()
   return users.value.filter((u) => {
+    if (!showDisabledUsers.value && !u.is_active) {
+      return false
+    }
     if (filterTenantId.value !== '' && u.tenant_id !== filterTenantId.value) {
       return false
     }
@@ -120,6 +135,41 @@ async function handleCreateTenant(): Promise<void> {
   }
 }
 
+async function handleRenameTenant(tenant: TenantOut): Promise<void> {
+  let promptResult: { value: string }
+  try {
+    promptResult = await ElMessageBox.prompt(
+      `请输入部门「${tenant.name}」的新名称（全系统所有成员与任务展示将同步更新）：`,
+      '重命名部门',
+      {
+        inputValue: tenant.name,
+        confirmButtonText: '保存名称',
+        cancelButtonText: '取消',
+        inputValidator: (val: string) => {
+          if (!val || !val.trim()) return '部门名称不能为空'
+          if (val.trim().length > 128) return '部门名称长度不能超过 128 个字符'
+          return true
+        },
+      },
+    )
+  } catch {
+    return
+  }
+
+  const nextName = promptResult.value.trim()
+  if (!nextName || nextName === tenant.name) return
+  try {
+    const updated = await authApi.updateTenant(tenant.id, { name: nextName })
+    ElMessage.success(`部门已重命名为「${updated.name}」`)
+    await loadAll()
+    if (authStore.user?.tenant_id === tenant.id) {
+      await authStore.refreshMe()
+    }
+  } catch {
+    // 已由全局 http 拦截器提示
+  }
+}
+
 function openCreateUser(): void {
   createForm.username = ''
   createForm.display_name = ''
@@ -163,6 +213,7 @@ async function submitCreateUser(): Promise<void> {
 
 function openEditUser(row: AdminUserOut): void {
   editTarget.value = row
+  editForm.username = row.username
   editForm.display_name = row.display_name || row.username
   editForm.role = row.role
   editForm.tenant_id = row.tenant_id
@@ -172,16 +223,52 @@ function openEditUser(row: AdminUserOut): void {
 async function submitEditUser(): Promise<void> {
   const target = editTarget.value
   if (!target) return
+  const nextUsername = editForm.username.trim()
+  if (!nextUsername) {
+    ElMessage.warning('请填写登录账号')
+    return
+  }
+
+  const usernameChanged = nextUsername !== target.username
+  const editingSelf = isSelf(target)
+  if (usernameChanged) {
+    try {
+      await ElMessageBox.confirm(
+        editingSelf
+          ? `您正在修改当前登录管理员的登录账号（${target.username} → ${nextUsername}）。保存后当前登录令牌将立即失效并自动退出至登录页，本地置顶会话需重新置顶，确定继续吗？`
+          : `修改登录账号（${target.username} → ${nextUsername}）后，该员工需重新登录，本地置顶会话需重新置顶。确定保存吗？`,
+        '修改登录账号确认',
+        {
+          confirmButtonText: '确认修改',
+          cancelButtonText: '取消',
+          type: 'warning',
+        },
+      )
+    } catch {
+      return
+    }
+  }
+
   savingEdit.value = true
   try {
-    await authApi.updateUser(target.id, {
-      display_name: editForm.display_name.trim() || target.username,
+    const updated = await authApi.updateUser(target.id, {
+      ...(usernameChanged ? { username: nextUsername } : {}),
+      display_name: editForm.display_name.trim() || nextUsername,
       role: editForm.role,
       tenant_id: editForm.tenant_id,
     })
-    ElMessage.success(`已更新账号「${target.username}」信息`)
     editDialogVisible.value = false
+    if (usernameChanged && editingSelf) {
+      ElMessage.success(`登录账号已修改为「${updated.username}」，请重新登录`)
+      authStore.logout()
+      void router.push('/login')
+      return
+    }
+    ElMessage.success(`已更新账号「${updated.username}」信息`)
     await loadAll()
+    if (editingSelf) {
+      await authStore.refreshMe()
+    }
   } catch {
     // 已由全局 http 拦截器提示
   } finally {
@@ -290,6 +377,9 @@ onMounted(() => {
           <el-tag size="small" :type="t.is_active ? 'success' : 'info'">
             {{ t.is_active ? '启用中' : '已停用' }}
           </el-tag>
+          <el-button link type="primary" size="small" @click="handleRenameTenant(t)">
+            重命名
+          </el-button>
         </div>
         <div v-if="!loading && tenants.length === 0" class="empty-tip">暂无部门数据</div>
       </div>
@@ -299,13 +389,23 @@ onMounted(() => {
     <section class="bg-panel section-card">
       <div class="section-hd">
         <div>
-          <h2>平台成员账号台账（共 {{ users.length }} 人）</h2>
+          <h2>
+            平台成员账号台账（启用 {{ activeUserCount }} / 共 {{ users.length }} 人）
+          </h2>
           <p class="section-sub">
-            支持为团队成员分配独立账号、切换所属部门、重置忘记的密码及立即禁用离职/停用账号。
+            支持为团队成员分配独立账号、修改登录账号与姓名、切换所属部门、重置密码及禁用离职账号<span
+              v-if="disabledUserCount > 0 && !showDisabledUsers"
+            >（当前已隐藏 {{ disabledUserCount }} 个已禁用账号）</span>。
           </p>
         </div>
 
         <div class="toolbar-actions">
+          <el-switch
+            v-model="showDisabledUsers"
+            active-text="显示已禁用"
+            title="默认隐藏已禁用历史账号；开启后可查看并恢复启用"
+          />
+
           <el-select
             v-model="filterTenantId"
             clearable
@@ -471,10 +571,16 @@ onMounted(() => {
     </el-dialog>
 
     <!-- 编辑账号弹窗 -->
-    <el-dialog v-model="editDialogVisible" title="编辑账号部门与角色" width="440px" destroy-on-close>
+    <el-dialog v-model="editDialogVisible" title="编辑账号信息与部门角色" width="460px" destroy-on-close>
       <el-form v-if="editTarget" label-width="96px">
-        <el-form-item label="登录账号">
-          <el-input :model-value="editTarget.username" disabled />
+        <el-form-item label="登录账号" required>
+          <el-input
+            v-model.trim="editForm.username"
+            placeholder="字母/数字/下划线/点/短横线"
+          />
+          <div class="field-hint">
+            修改登录账号后，该账号现有令牌将立即失效并需重新登录
+          </div>
         </el-form-item>
         <el-form-item label="姓名/备注">
           <el-input v-model.trim="editForm.display_name" />

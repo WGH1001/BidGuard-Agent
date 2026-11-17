@@ -33,6 +33,7 @@ from backend.schemas import (
     OkResponse,
     TenantCreateRequest,
     TenantOut,
+    TenantUpdateRequest,
     UserProfileOut,
 )
 
@@ -65,6 +66,20 @@ def _validate_password(raw_password: str) -> str:
             detail={'code': 'INVALID_PASSWORD', 'message': '密码长度不能少于 6 位'},
         )
     return pw
+
+
+def _validate_username(raw_username: str) -> str:
+    """校验用户名格式（允许 1~64 位字母、数字、下划线、点或短横线）。"""
+    cleaned = raw_username.strip()
+    if not _USERNAME_RE.match(cleaned):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                'code': 'INVALID_USERNAME',
+                'message': '用户名仅允许 1~64 位字母、数字、下划线、点或短横线',
+            },
+        )
+    return cleaned
 
 
 def _tenant_to_out(tenant: Tenant) -> TenantOut:
@@ -259,6 +274,50 @@ def create_tenant(
     return _tenant_to_out(tenant)
 
 
+@router.patch('/tenants/{tenant_id}', response_model=TenantOut)
+def update_tenant(
+    tenant_id: int,
+    body: TenantUpdateRequest,
+    admin: AuthUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> TenantOut:
+    """[Admin] 重命名业务部门租户（全局唯一性排除自身 + 审计留痕）。"""
+    tenant = db.query(Tenant).filter_by(id=tenant_id).first()
+    if tenant is None:
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'TENANT_NOT_FOUND', 'message': '目标部门不存在'},
+        )
+
+    new_name = body.name.strip()
+    if not new_name:
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'INVALID_TENANT_NAME', 'message': '部门名称不能为空'},
+        )
+    existing = db.query(Tenant).filter(Tenant.name == new_name, Tenant.id != tenant_id).first()
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={'code': 'TENANT_EXISTS', 'message': f'部门租户「{new_name}」已存在'},
+        )
+
+    old_name = tenant.name
+    tenant.name = new_name
+    db.commit()
+    db.refresh(tenant)
+
+    record_audit(
+        db,
+        action='rename_tenant',
+        tenant_id=admin.get('tenant_id'),
+        user_id=admin.get('id'),
+        target=f"tenant:{tenant.id}",
+        detail_json={'tenant_id': tenant.id, 'old_name': old_name, 'new_name': tenant.name},
+    )
+    return _tenant_to_out(tenant)
+
+
 @router.get('/users', response_model=List[AdminUserOut])
 def list_users(
     tenant_id: Optional[int] = None,
@@ -283,15 +342,7 @@ def create_user(
 ) -> AdminUserOut:
     """[Admin] 创建新用户账号并归属指定部门与角色。"""
     role = _validate_user_role(body.role)
-    username = body.username.strip()
-    if not _USERNAME_RE.match(username):
-        raise HTTPException(
-            status_code=422,
-            detail={
-                'code': 'INVALID_USERNAME',
-                'message': '用户名仅允许 1~64 位字母、数字、下划线、点或短横线',
-            },
-        )
+    username = _validate_username(body.username)
     password = _validate_password(body.password)
 
     tenant = db.query(Tenant).filter_by(id=body.tenant_id).first()
@@ -399,6 +450,24 @@ def update_user(
             },
         )
 
+    new_username = target_user.username
+    if body.username is not None:
+        new_username = _validate_username(body.username)
+        if new_username != target_user.username:
+            dup_user = (
+                db.query(User)
+                .filter(User.username == new_username, User.id != target_user.id)
+                .first()
+            )
+            if dup_user is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={'code': 'USERNAME_EXISTS', 'message': f'用户名「{new_username}」已存在'},
+                )
+
+    old_username = target_user.username
+    if new_username != old_username:
+        target_user.username = new_username
     if body.display_name is not None:
         cleaned_name = body.display_name.strip()
         target_user.display_name = cleaned_name or target_user.username
@@ -410,19 +479,23 @@ def update_user(
     db.refresh(target_user)
 
     tenant_names = {t.id: t.name for t in db.query(Tenant).all()}
+    audit_detail: dict = {
+        'user_id': target_user.id,
+        'username': target_user.username,
+        'role': target_user.role,
+        'tenant_id': target_user.tenant_id,
+        'is_active': bool(target_user.is_active),
+    }
+    if new_username != old_username:
+        audit_detail['old_username'] = old_username
+        audit_detail['new_username'] = target_user.username
     record_audit(
         db,
         action='admin_update_user',
         tenant_id=admin.get('tenant_id'),
         user_id=admin.get('id'),
         target=f"user:{target_user.username}",
-        detail_json={
-            'user_id': target_user.id,
-            'username': target_user.username,
-            'role': target_user.role,
-            'tenant_id': target_user.tenant_id,
-            'is_active': bool(target_user.is_active),
-        },
+        detail_json=audit_detail,
     )
     return _user_to_admin_out(target_user, tenant_names)
 

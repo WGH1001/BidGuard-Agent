@@ -71,6 +71,10 @@ class TenantCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=128)
 
 
+class TenantUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+
+
 class AdminUserOut(BaseModel):
     id: int
     username: str
@@ -92,6 +96,7 @@ class AdminUserCreateRequest(BaseModel):
 
 
 class AdminUserUpdateRequest(BaseModel):
+    username: Optional[str] = Field(default=None, max_length=64)
     display_name: Optional[str] = Field(default=None, max_length=128)
     role: Optional[str] = None
     tenant_id: Optional[int] = None
@@ -241,8 +246,9 @@ class MatchedLedgerCertOut(BaseModel):
     id: int
     cert_name: str
     cert_no: Optional[str] = None
-    valid_until: str
-    days_remaining: int
+    valid_until: Optional[str] = None
+    is_long_term: bool = False
+    days_remaining: Optional[int] = None
     status: Literal['valid', 'expiring_soon', 'expired']
     has_attachment: bool = False
     attachment_name: Optional[str] = None
@@ -448,7 +454,8 @@ class BidRuleConfigOut(BaseModel):
 class CertificateUpsertRequest(BaseModel):
     cert_name: str = Field(min_length=1, max_length=256)
     cert_no: Optional[str] = Field(default=None, max_length=128)
-    valid_until: date
+    valid_until: Optional[date] = None
+    is_long_term: bool = False
     warn_days: int = Field(default=30, ge=1, le=365)
     remark: Optional[str] = Field(default=None, max_length=500)
 
@@ -458,9 +465,10 @@ class CertificateOut(BaseModel):
     tenant_id: int
     cert_name: str
     cert_no: Optional[str] = None
-    valid_until: str
+    valid_until: Optional[str] = None
+    is_long_term: bool = False
     warn_days: int = 30
-    days_remaining: int = 0
+    days_remaining: Optional[int] = None
     is_expired: bool = False
     is_expiring_soon: bool = False
     remark: Optional[str] = None
@@ -473,8 +481,10 @@ class CertificateOut(BaseModel):
 
 class CertificateParseOut(BaseModel):
     cert_name_hint: Optional[str] = None
+    cert_name_source: Optional[Literal['ocr', 'filename_fallback']] = None
     cert_no_hint: Optional[str] = None
     valid_until_hint: Optional[str] = None
+    is_long_term_hint: bool = False
     ocr_chars: int = 0
     text_excerpt: str = ''
 

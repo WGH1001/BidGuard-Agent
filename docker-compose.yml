@@ -20,6 +20,7 @@ services:
       - AUTH_SECRET=${AUTH_SECRET:-ChangeMe_BidGuard_Auth_Secret_2026_Str0ng!}
       - SSO_SECRET=${SSO_SECRET:-ChangeMe_BidGuard_SSO_Secret_2026_Str0ng!}
       - ADMIN_INITIAL_PASSWORD=${ADMIN_INITIAL_PASSWORD:-BidGuard2026!}
+      - DEFAULT_TENANT_NAME=${DEFAULT_TENANT_NAME:-默认机构}
       - DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER:-bidguard}:${POSTGRES_PASSWORD:-ChangeMe_2026_Str0ng!}@postgres:5432/${POSTGRES_DB:-bidguard}
       - REDIS_URL=redis://redis:6379/0
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}

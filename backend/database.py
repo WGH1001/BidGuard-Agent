@@ -49,6 +49,7 @@ __all__ = [
     'SessionLocal',
     'get_db',
     'init_db',
+    'ensure_bootstrap_admin',
     'seed_demo_data',
     'seed_regulation_laws',
     'Base',
@@ -69,11 +70,23 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
 DEFAULT_SQLITE_REL_URL: str = 'sqlite:///./data/bidguard.db'
 REGULATION_SEED_DIR: Path = PROJECT_ROOT / 'data' / 'corpus' / 'regulations'
 
+DEFAULT_TENANT_NAME_FALLBACK: str = '默认机构'
+
 SEED_TENANTS = [
     '政企系统集成投标部',
     '弱电智能化工程部',
     '智能装备销售中心',
 ]
+
+
+def resolve_default_tenant_name() -> str:
+    """读取生产基线默认部门名称（环境变量 DEFAULT_TENANT_NAME，缺省 '默认机构'）。"""
+    return os.environ.get('DEFAULT_TENANT_NAME', '').strip() or DEFAULT_TENANT_NAME_FALLBACK
+
+
+def resolve_initial_admin_password() -> str:
+    """读取初始管理员密码（环境变量 ADMIN_INITIAL_PASSWORD，缺省 'BidGuard2026!'）。"""
+    return os.environ.get('ADMIN_INITIAL_PASSWORD', '').strip() or 'BidGuard2026!'
 
 
 def _utc_now() -> datetime:
@@ -271,8 +284,65 @@ def seed_regulation_laws(session: Session, seed_dir: Optional[Path] = None) -> d
     return stats
 
 
+def ensure_bootstrap_admin(session: Session) -> dict[str, int]:
+    """E35 底线初始化层（无条件幂等）：无论 SEED_DEMO_DATA 为何值，库无租户/管理员时创建中性默认部门 + admin + 中性空规则。"""
+    from backend.auth import hash_password
+
+    counts = {
+        'tenants': 0,
+        'users': 0,
+        'rule_configs': 0,
+    }
+
+    tenant_count = session.query(Tenant).count()
+    if tenant_count == 0:
+        t_obj = Tenant(name=resolve_default_tenant_name(), is_active=True)
+        session.add(t_obj)
+        session.flush()
+        counts['tenants'] += 1
+
+    primary_tenant = (
+        session.query(Tenant).filter_by(is_active=True).order_by(Tenant.id.asc()).first()
+        or session.query(Tenant).order_by(Tenant.id.asc()).first()
+    )
+
+    admin_count = session.query(User).filter(User.role == 'admin').count()
+    if admin_count == 0 and primary_tenant is not None:
+        base_username = 'admin'
+        if session.query(User).filter_by(username=base_username).first() is not None:
+            base_username = 'sysadmin'
+        admin_user = User(
+            tenant_id=primary_tenant.id,
+            username=base_username,
+            password_hash=hash_password(resolve_initial_admin_password()),
+            display_name='系统管理员',
+            role='admin',
+            is_active=True,
+        )
+        session.add(admin_user)
+        session.flush()
+        counts['users'] += 1
+
+    if primary_tenant is not None and session.query(BidRuleConfig).filter_by(tenant_id=primary_tenant.id).count() == 0:
+        neutral_rule = BidRuleConfig(
+            tenant_id=primary_tenant.id,
+            name='默认核查规则',
+            price_cap=None,
+            open_date=None,
+            buyer_name='',
+            required_social_months_json=[],
+            custom_redlines_json=[],
+            is_default=True,
+        )
+        session.add(neutral_rule)
+        session.flush()
+        counts['rule_configs'] += 1
+
+    return counts
+
+
 def seed_demo_data(session: Session) -> dict[str, int]:
-    """幂等写入基础租户、默认管理员与投标专员账号、默认核查规则与证照台账。"""
+    """E35 演示数据层：写入多演示部门、admin/liming 账号、演示核查规则与演示证照台账。"""
     from backend.auth import hash_password
 
     counts = {
@@ -293,7 +363,7 @@ def seed_demo_data(session: Session) -> dict[str, int]:
         tenant_map[t_name] = t_obj
 
     primary_tenant = tenant_map[SEED_TENANTS[0]]
-    init_pwd = os.environ.get('ADMIN_INITIAL_PASSWORD', '').strip() or 'BidGuard2026!'
+    init_pwd = resolve_initial_admin_password()
 
     seed_users_spec = [
         {'username': 'admin', 'display_name': '系统管理员', 'role': 'admin', 'tenant': primary_tenant},
@@ -334,10 +404,6 @@ def seed_demo_data(session: Session) -> dict[str, int]:
             session.flush()
             counts['rule_configs'] += 1
 
-    raw_seed_demo = os.environ.get('SEED_DEMO_DATA', '1').strip().lower()
-    if raw_seed_demo in ('0', 'false', 'no', 'off'):
-        return counts
-
     existing_cert = session.query(CompanyCertificate).filter_by(tenant_id=primary_tenant.id).first()
     if existing_cert is None:
         certs = [
@@ -366,7 +432,7 @@ def seed_demo_data(session: Session) -> dict[str, int]:
 
 
 def init_db(database_url: Optional[str] = None, seed: bool = False):
-    """显式初始化数据库：创建全部 11 张表，幂等导入 4 部种子法规，并在 seed=True 时写入演示数据。"""
+    """显式初始化数据库：创建全部 11 张表，幂等导入 4 部种子法规；seed=True 写入演示数据，否则仅保底创建中性部门与 admin。"""
     eng = get_engine(database_url, ensure_dir=True)
     Base.metadata.create_all(bind=eng)
 
@@ -377,6 +443,7 @@ def init_db(database_url: Optional[str] = None, seed: bool = False):
         seed_regulation_laws(session)
         if seed:
             seed_demo_data(session)
+        ensure_bootstrap_admin(session)
         session.commit()
     except Exception:
         session.rollback()

@@ -303,32 +303,37 @@ def get_current_user(
         if sub:
             user_obj = db.query(User).filter_by(username=str(sub)).first()
 
-        if user_obj is not None:
-            if not user_obj.is_active:
-                raise HTTPException(
-                    status_code=401,
-                    detail={'code': 'USER_DISABLED', 'message': '该用户账号已被禁用'},
-                )
-            tenant_obj = db.query(Tenant).filter_by(id=user_obj.tenant_id).first()
-            if tenant_obj is not None and not tenant_obj.is_active:
-                raise HTTPException(
-                    status_code=401,
-                    detail={'code': 'TENANT_DISABLED', 'message': '所属部门租户已被禁用'},
-                )
-            return AuthUser({
-                'id': user_obj.id,
-                'uid': user_obj.id,
-                'user_id': user_obj.id,
-                'username': user_obj.username,
-                'sub': user_obj.username,
-                'display_name': user_obj.display_name,
-                'role': user_obj.role,
-                'tenant': user_obj.tenant_id,
-                'tenant_id': user_obj.tenant_id,
-                'tenant_name': tenant_obj.name if tenant_obj is not None else '',
-                'is_active': user_obj.is_active,
-                'exp': payload.get('exp'),
-            })
+        if user_obj is None:
+            raise HTTPException(
+                status_code=401,
+                detail={'code': 'USER_NOT_FOUND', 'message': '账号不存在或用户名已变更，请重新登录'},
+            )
+
+        if not user_obj.is_active:
+            raise HTTPException(
+                status_code=401,
+                detail={'code': 'USER_DISABLED', 'message': '该用户账号已被禁用'},
+            )
+        tenant_obj = db.query(Tenant).filter_by(id=user_obj.tenant_id).first()
+        if tenant_obj is not None and not tenant_obj.is_active:
+            raise HTTPException(
+                status_code=401,
+                detail={'code': 'TENANT_DISABLED', 'message': '所属部门租户已被禁用'},
+            )
+        return AuthUser({
+            'id': user_obj.id,
+            'uid': user_obj.id,
+            'user_id': user_obj.id,
+            'username': user_obj.username,
+            'sub': user_obj.username,
+            'display_name': user_obj.display_name,
+            'role': user_obj.role,
+            'tenant': user_obj.tenant_id,
+            'tenant_id': user_obj.tenant_id,
+            'tenant_name': tenant_obj.name if tenant_obj is not None else '',
+            'is_active': user_obj.is_active,
+            'exp': payload.get('exp'),
+        })
 
     return AuthUser({
         'id': None,

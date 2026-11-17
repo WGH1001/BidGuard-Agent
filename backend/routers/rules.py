@@ -18,9 +18,11 @@ from sqlalchemy.orm import Session
 from backend.auth import AuthUser, get_current_user, record_audit
 from backend.database import PROJECT_ROOT, get_db
 from backend.models import (
+    LONG_TERM_SENTINEL_DATE,
     BidRuleConfig,
     CompanyCertificate,
     ensure_company_certificates_columns,
+    ensure_company_certificates_e35_columns,
 )
 from backend.schemas import (
     BidRuleConfigOut,
@@ -61,11 +63,21 @@ _CERT_VALID_UNTIL_PATTERNS = (
 )
 
 
-def _extract_cert_fields_from_text(text: str) -> dict[str, Optional[str]]:
-    """E25 §2.6.2：0-Token 确定性正则从证照 OCR/PDF 文本中预提取证书名称、证书编号与有效期截止日。"""
+_CERT_LONG_TERM_RE = re.compile(
+    r'(?:长期有效|无固定期限|(?:有效|营业|使用)?期限[^\n。；;]{0,24}?(?:长期|永久)|(?:^|[\s：:，。；;至到])(?:长期|永久)(?:$|[\s，。；;]))'
+)
+
+
+def _extract_cert_fields_from_text(text: str) -> dict[str, Any]:
+    """E25 / E35：0-Token 确定性正则从证照 OCR/PDF 文本中预提取证书名称、证书编号、有效期截止日与长期有效标记。"""
     clean_text = (text or '').strip()
     if not clean_text:
-        return {'cert_name_hint': None, 'cert_no_hint': None, 'valid_until_hint': None}
+        return {
+            'cert_name_hint': None,
+            'cert_no_hint': None,
+            'valid_until_hint': None,
+            'is_long_term_hint': False,
+        }
 
     cert_name_hint: Optional[str] = None
     for pat in _CERT_NAME_PATTERNS:
@@ -97,10 +109,13 @@ def _extract_cert_fields_from_text(text: str) -> dict[str, Optional[str]]:
         if valid_until_hint:
             break
 
+    is_long_term_hint = (valid_until_hint is None) and bool(_CERT_LONG_TERM_RE.search(clean_text))
+
     return {
         'cert_name_hint': cert_name_hint,
         'cert_no_hint': cert_no_hint,
         'valid_until_hint': valid_until_hint,
+        'is_long_term_hint': is_long_term_hint,
     }
 
 
@@ -120,23 +135,57 @@ def _rule_to_out(r: BidRuleConfig) -> BidRuleConfigOut:
     )
 
 
+def _ensure_cert_migrations(bind: Any) -> None:
+    ensure_company_certificates_columns(bind)
+    ensure_company_certificates_e35_columns(bind)
+
+
+def _is_cert_long_term(c: CompanyCertificate) -> bool:
+    return bool(getattr(c, 'is_long_term', False)) or (getattr(c, 'valid_until', None) == LONG_TERM_SENTINEL_DATE)
+
+
+def _resolve_cert_expiry(body: CertificateUpsertRequest) -> tuple[bool, date]:
+    if bool(getattr(body, 'is_long_term', False)):
+        return True, LONG_TERM_SENTINEL_DATE
+    if body.valid_until is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                'code': 'MISSING_VALID_UNTIL',
+                'message': '非长期有效证照必须填写有效期截止日期',
+            },
+        )
+    return False, body.valid_until
+
+
 def _cert_to_out(c: CompanyCertificate) -> CertificateOut:
     today = date.today()
-    days_rem = (c.valid_until - today).days if c.valid_until else 0
+    is_long = _is_cert_long_term(c)
     warn_limit = int(c.warn_days if c.warn_days is not None else 30)
     att_name = getattr(c, 'attachment_name', None)
     att_path = getattr(c, 'attachment_path', None)
     att_size = getattr(c, 'attachment_size', None)
+    if is_long:
+        valid_until_str: Optional[str] = None
+        days_rem: Optional[int] = None
+        is_exp = False
+        is_soon = False
+    else:
+        days_rem = (c.valid_until - today).days if c.valid_until else 0
+        valid_until_str = c.valid_until.isoformat() if c.valid_until else None
+        is_exp = (days_rem < 0)
+        is_soon = (days_rem <= warn_limit)
     return CertificateOut(
         id=c.id,
         tenant_id=c.tenant_id,
         cert_name=c.cert_name,
         cert_no=c.cert_no,
-        valid_until=c.valid_until.isoformat(),
+        valid_until=valid_until_str,
+        is_long_term=is_long,
         warn_days=warn_limit,
         days_remaining=days_rem,
-        is_expired=(days_rem < 0),
-        is_expiring_soon=(days_rem <= warn_limit),
+        is_expired=is_exp,
+        is_expiring_soon=is_soon,
         remark=c.remark,
         attachment_name=att_name,
         attachment_size=int(att_size) if att_size is not None else None,
@@ -172,8 +221,8 @@ def list_rule_configs(
         default_cfg = BidRuleConfig(
             tenant_id=tenant_id,
             name='默认核查规则',
-            price_cap=Decimal('1450000.00'),
-            open_date=date(2026, 11, 5),
+            price_cap=None,
+            open_date=None,
             buyer_name='',
             required_social_months_json=[],
             custom_redlines_json=[],
@@ -240,7 +289,7 @@ def list_certificates(
     db: Session = Depends(get_db),
 ) -> list[CertificateOut]:
     """查询企业证照效期台账（expiring_only=True 时仅返回 valid_until - today <= warn_days 的预警/过期证照）。"""
-    ensure_company_certificates_columns(db.get_bind())
+    _ensure_cert_migrations(db.get_bind())
     tenant_id = int(current_user.tenant_id)
     rows = (
         db.query(CompanyCertificate)
@@ -292,11 +341,23 @@ def parse_certificate_file_for_prefill(
         parsed = parse_qa_attachment(tmp_path)
         full_text = str(parsed.get('text') or '')
         hints = _extract_cert_fields_from_text(full_text)
-        name_hint = hints['cert_name_hint'] or Path(orig_name).stem
+        ocr_name = hints['cert_name_hint']
+        stem_name = Path(orig_name).stem.strip()
+        if ocr_name:
+            name_hint: Optional[str] = ocr_name
+            cert_name_source: Optional[str] = 'ocr'
+        elif stem_name:
+            name_hint = stem_name
+            cert_name_source = 'filename_fallback'
+        else:
+            name_hint = None
+            cert_name_source = None
         return CertificateParseOut(
             cert_name_hint=name_hint,
+            cert_name_source=cert_name_source,
             cert_no_hint=hints['cert_no_hint'],
             valid_until_hint=hints['valid_until_hint'],
+            is_long_term_hint=bool(hints['is_long_term_hint']),
             ocr_chars=len(full_text.strip()),
             text_excerpt=full_text.strip()[:300],
         )
@@ -318,13 +379,15 @@ def create_certificate(
     db: Session = Depends(get_db),
 ) -> CertificateOut:
     """新增企业投标证照记录。"""
-    ensure_company_certificates_columns(db.get_bind())
+    _ensure_cert_migrations(db.get_bind())
     tenant_id = int(current_user.tenant_id)
+    is_long, resolved_date = _resolve_cert_expiry(body)
     cert = CompanyCertificate(
         tenant_id=tenant_id,
         cert_name=body.cert_name.strip(),
         cert_no=body.cert_no.strip() if body.cert_no else None,
-        valid_until=body.valid_until,
+        valid_until=resolved_date,
+        is_long_term=is_long,
         warn_days=body.warn_days,
         remark=body.remark,
     )
@@ -338,7 +401,11 @@ def create_certificate(
         tenant_id=tenant_id,
         user_id=current_user.get('id'),
         target=f"cert:{cert.id}",
-        detail_json={'cert_name': cert.cert_name, 'valid_until': cert.valid_until.isoformat()},
+        detail_json={
+            'cert_name': cert.cert_name,
+            'valid_until': None if is_long else cert.valid_until.isoformat(),
+            'is_long_term': is_long,
+        },
     )
     return _cert_to_out(cert)
 
@@ -351,7 +418,7 @@ def update_certificate(
     db: Session = Depends(get_db),
 ) -> CertificateOut:
     """更新本租户下的指定证照记录。"""
-    ensure_company_certificates_columns(db.get_bind())
+    _ensure_cert_migrations(db.get_bind())
     tenant_id = int(current_user.tenant_id)
     cert = db.query(CompanyCertificate).filter_by(id=cert_id, tenant_id=tenant_id).first()
     if cert is None:
@@ -359,9 +426,11 @@ def update_certificate(
             status_code=404,
             detail={'code': 'CERT_NOT_FOUND', 'message': '证照记录不存在或无权访问'},
         )
+    is_long, resolved_date = _resolve_cert_expiry(body)
     cert.cert_name = body.cert_name.strip()
     cert.cert_no = body.cert_no.strip() if body.cert_no else None
-    cert.valid_until = body.valid_until
+    cert.valid_until = resolved_date
+    cert.is_long_term = is_long
     cert.warn_days = body.warn_days
     cert.remark = body.remark
     db.commit()
@@ -373,6 +442,11 @@ def update_certificate(
         tenant_id=tenant_id,
         user_id=current_user.get('id'),
         target=f"cert:{cert.id}",
+        detail_json={
+            'cert_name': cert.cert_name,
+            'valid_until': None if is_long else cert.valid_until.isoformat(),
+            'is_long_term': is_long,
+        },
     )
     return _cert_to_out(cert)
 
@@ -385,7 +459,7 @@ def upload_certificate_attachment(
     db: Session = Depends(get_db),
 ) -> CertificateOut:
     """E25 §2.6.2：为指定企业证照上传并绑定原件扫件（落盘至 data/uploads/certs/{tenant_id}/{cert_id}/）。"""
-    ensure_company_certificates_columns(db.get_bind())
+    _ensure_cert_migrations(db.get_bind())
     tenant_id = int(current_user.tenant_id)
     cert = db.query(CompanyCertificate).filter_by(id=cert_id, tenant_id=tenant_id).first()
     if cert is None:
@@ -460,7 +534,7 @@ def download_certificate_attachment(
     db: Session = Depends(get_db),
 ):
     """E25 §2.6.2：按租户权限安全下载/预览证照绑定的原件扫件。"""
-    ensure_company_certificates_columns(db.get_bind())
+    _ensure_cert_migrations(db.get_bind())
     tenant_id = int(current_user.tenant_id)
     cert = db.query(CompanyCertificate).filter_by(id=cert_id, tenant_id=tenant_id).first()
     if cert is None:
@@ -502,7 +576,7 @@ def delete_certificate_attachment(
     db: Session = Depends(get_db),
 ) -> CertificateOut:
     """E25 §2.6.2：移除证照绑定的原件附件并清理磁盘文件。"""
-    ensure_company_certificates_columns(db.get_bind())
+    _ensure_cert_migrations(db.get_bind())
     tenant_id = int(current_user.tenant_id)
     cert = db.query(CompanyCertificate).filter_by(id=cert_id, tenant_id=tenant_id).first()
     if cert is None:
@@ -535,7 +609,7 @@ def delete_certificate(
     db: Session = Depends(get_db),
 ) -> OkResponse:
     """删除本租户下的指定证照记录，并级联清理磁盘上的证照原件目录。"""
-    ensure_company_certificates_columns(db.get_bind())
+    _ensure_cert_migrations(db.get_bind())
     tenant_id = int(current_user.tenant_id)
     cert = db.query(CompanyCertificate).filter_by(id=cert_id, tenant_id=tenant_id).first()
     if cert is None:

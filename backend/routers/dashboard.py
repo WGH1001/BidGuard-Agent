@@ -9,7 +9,14 @@ from sqlalchemy.orm import Session
 
 from backend.auth import AuthUser, get_current_user
 from backend.database import get_db
-from backend.models import BidCheckTask, BidFinding, BidRuleConfig, CompanyCertificate
+from backend.models import (
+    LONG_TERM_SENTINEL_DATE,
+    BidCheckTask,
+    BidFinding,
+    BidRuleConfig,
+    CompanyCertificate,
+    ensure_company_certificates_e35_columns,
+)
 from backend.schemas import (
     BidTaskOut,
     CountdownTaskItem,
@@ -94,11 +101,17 @@ def get_dashboard_stats(
         DefenseMatrixItem(module='F6', title='投前控标雷达扫描', hit_count=mod_counts['F6'], status='ok'),
     ]
 
-    # 证照到期预警数
+    # 证照到期预警数（E35：长期有效证照恒不计入临期/过期预警）
+    ensure_company_certificates_e35_columns(db.get_bind())
     today = date.today()
     certs = db.query(CompanyCertificate).filter_by(tenant_id=tenant_id).all()
     expiring_certs = sum(
-        1 for c in certs if c.valid_until and (c.valid_until - today).days <= int(c.warn_days or 30)
+        1
+        for c in certs
+        if not bool(getattr(c, 'is_long_term', False))
+        and c.valid_until is not None
+        and c.valid_until != LONG_TERM_SENTINEL_DATE
+        and (c.valid_until - today).days <= int(c.warn_days or 30)
     )
 
     # E23 §2.2：截标倒计时与重点任务看板

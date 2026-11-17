@@ -421,20 +421,26 @@ function ledgerStatusMeta(item: RequiredCertItemOut): { label: string; cls: stri
   const st = item.ledger_status
   const mc = item.matched_cert
   if (st === 'valid') {
+    if (mc?.is_long_term) {
+      return {
+        label: '台账有效 · 长期',
+        cls: 'ok',
+      }
+    }
     return {
-      label: mc ? `台账有效 · 剩 ${mc.days_remaining} 天` : '台账有效',
+      label: mc && mc.days_remaining != null ? `台账有效 · 剩 ${mc.days_remaining} 天` : '台账有效',
       cls: 'ok',
     }
   }
   if (st === 'expiring_soon') {
     return {
-      label: mc ? `临期预警 · 剩 ${mc.days_remaining} 天` : '临期预警',
+      label: mc && mc.days_remaining != null ? `临期预警 · 剩 ${mc.days_remaining} 天` : '临期预警',
       cls: 'warning',
     }
   }
   if (st === 'expired') {
     return {
-      label: mc ? `台账已过期 ${Math.abs(mc.days_remaining)} 天` : '台账已过期',
+      label: mc && mc.days_remaining != null ? `台账已过期 ${Math.abs(mc.days_remaining)} 天` : '台账已过期',
       cls: 'error',
     }
   }
@@ -888,7 +894,10 @@ onBeforeUnmount(() => {
                   <span v-if="item.matched_cert.cert_no" class="mono-num">
                     （编号：{{ item.matched_cert.cert_no }}）
                   </span>
-                  <span class="mono-num">有效期至 {{ item.matched_cert.valid_until }}</span>
+                  <span v-if="item.matched_cert.is_long_term" class="mono-num">有效期：长期有效</span>
+                  <span v-else-if="item.matched_cert.valid_until" class="mono-num">
+                    有效期至 {{ item.matched_cert.valid_until }}
+                  </span>
                   <span v-if="item.matched_cert.has_attachment" class="sev-pill ok">
                     已留档原件{{ item.matched_cert.attachment_name ? `：${item.matched_cert.attachment_name}` : '' }}
                   </span>

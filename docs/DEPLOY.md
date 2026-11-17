@@ -109,8 +109,9 @@ vim .env
 | `AUTH_SECRET` | 32 位以上随机字符串 | 可在 Linux 运行 `openssl rand -hex 32` 生成；配合 `DEBUG=0` 使用 |
 | `DEBUG` | `0` | 设为 `0` 时 `backend/auth.py` 会强校验 `AUTH_SECRET`，未改默认值会直接拒绝启动 |
 | `ADMIN_INITIAL_PASSWORD` | 自定义强密码 | 默认是 `BidGuard2026!`，首次建库前务必改成内部管理员初始密码 |
-| `SEED_DEMO_DATA` | **首次 `1`，建库后按需 `0`** | **⚠️ 首次部署必保持 `1`**：`SEED_DEMO_DATA=0` 会跳过默认租户与 `admin` 账号初始化，导致空库无账号登录；首次启动登录确认后可改为 `0` 并重建 `app`（生产三件套之一：按需建库后关闭） |
-| `SHOW_DEMO_LOGIN` | **`0`**（生产必关） | 控制登录页演示账号一键填充区显隐（默认未显式置 `0` 时开启，且仅在 `SEED_DEMO_DATA!=0` 时生效）。`docker-compose.yml` 默认透传 `${SHOW_DEMO_LOGIN:-1}`，生产务必在 `.env` 显式设为 `0`（生产三件套：**`SEED_DEMO_DATA` 按需 + `ADMIN_INITIAL_PASSWORD` 自定义 + `SHOW_DEMO_LOGIN=0`**） |
+| `DEFAULT_TENANT_NAME` | 企业简称或 `'默认机构'` | 生产模式（`SEED_DEMO_DATA=0`）下自动创建的唯一默认部门名称（缺省 `'默认机构'`）；支持登录后在「用户管理」随时重命名 |
+| `SEED_DEMO_DATA` | **`0`**（生产推荐） | **生产全新空库可直接设为 `0`**：仅初始化 `DEFAULT_TENANT_NAME` 单个中性部门 + `admin` 管理员 + 中性空规则，**不会写入任何演示部门、`liming` 或演示规则/证照**；设为 `1` 则写入完整开发演示数据 |
+| `SHOW_DEMO_LOGIN` | **`0`**（生产必关） | 控制登录页演示账号一键填充区显隐（默认未显式置 `0` 时开启，且仅在 `SEED_DEMO_DATA!=0` 时生效）。`docker-compose.yml` 默认透传 `${SHOW_DEMO_LOGIN:-1}`，生产务必在 `.env` 显式设为 `0`（生产核心配置：**`SEED_DEMO_DATA=0` + `ADMIN_INITIAL_PASSWORD` 自定义 + 可选 `DEFAULT_TENANT_NAME` + `SHOW_DEMO_LOGIN=0`**） |
 | `ENABLE_API_DOCS` | `0` | 关闭 `/docs`、`/redoc` 与 `/openapi.json`，防止接口信息枚举 |
 | `MODEL_ENV` | `prod` | 对应 `config/models.yaml` 内网网关地址（按公司实际地址调整 `config/models.yaml`）；如用各人前端自填 Key，可留默认并在网页端配 |
 | `PRIVATE_API_KEY` | 内网模型密钥 | 与 `MODEL_ENV=prod` 配套使用（也可在网页「私有模型服务配置」按用户单独加密绑定） |
@@ -301,7 +302,7 @@ docker compose ps
    - 确认构建前已在宿主机运行 `npm --prefix frontend run build`；
    - 关闭宿主机 Clash/v2rayN 系统代理及 TUN 模式后重试。
 2. **首次启动进入系统登录失败（或提示用户不存在）**：
-   - 检查首次建库时 `.env` 是否误设了 `SEED_DEMO_DATA=0`。空库初始化必须保持 `SEED_DEMO_DATA=1` 才会写入默认租户和 `admin` 账号（建库后可改回 `0`）。
+   - 检查是否已正确设置 `ADMIN_INITIAL_PASSWORD`，以及库是否已初始化完成；自 E35 起无论 `SEED_DEMO_DATA` 为 `0` 或 `1`，首次启动均会自动初始化默认部门与 `admin` 管理员账号，可用预设的 `ADMIN_INITIAL_PASSWORD` 直接登录。
 3. **容器一直重启，`app` 日志报 `RuntimeError` 关于 `AUTH_SECRET`**：
    - 当 `.env` 配置了 `DEBUG=0` 时，必须把 `AUTH_SECRET` 修改为非开发默认值的强随机串。
 4. **启动报 `环境中未找到配置: private`**：

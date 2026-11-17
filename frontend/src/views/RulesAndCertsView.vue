@@ -33,11 +33,11 @@ const AVAILABLE_MONTHS = [
 ]
 
 const ruleForm = reactive({
-  name: '政企投标默认防废标规则',
-  price_cap: '1450000.00',
-  open_date: '2026-11-05',
+  name: '默认核查规则',
+  price_cap: '',
+  open_date: '',
   buyer_name: '',
-  required_social_months_json: ['2026-08', '2026-09', '2026-10'] as string[],
+  required_social_months_json: [] as string[],
   custom_redlines_json: [] as CustomRedlineItem[],
 })
 
@@ -47,9 +47,9 @@ async function fetchRuleConfig(): Promise<void> {
     const list = await rulesApi.listRules()
     const cfg = list.find((r) => r.is_default) || list[0]
     if (cfg) {
-      ruleForm.name = cfg.name || '默认防废标核查规则'
+      ruleForm.name = cfg.name || '默认核查规则'
       ruleForm.price_cap = cfg.price_cap || ''
-      ruleForm.open_date = cfg.open_date || '2026-11-05'
+      ruleForm.open_date = cfg.open_date || ''
       ruleForm.buyer_name = cfg.buyer_name || ''
       ruleForm.required_social_months_json = [...(cfg.required_social_months_json || [])]
       ruleForm.custom_redlines_json = (cfg.custom_redlines_json || []).map((item) => ({
@@ -113,11 +113,13 @@ const pendingCertFile = ref<File | null>(null)
 const parsingCertFile = ref(false)
 const certParseHintSummary = ref('')
 const editingExistingAttachmentName = ref<string | null>(null)
+const certNameSource = ref<'ocr' | 'filename_fallback' | null>(null)
 
 const certForm = reactive({
   cert_name: '',
   cert_no: '',
-  valid_until: '2026-11-20',
+  valid_until: '',
+  is_long_term: false,
   warn_days: 30,
   remark: '',
 })
@@ -135,12 +137,14 @@ function openCreateCert(): void {
   editingCertId.value = null
   certForm.cert_name = ''
   certForm.cert_no = ''
-  certForm.valid_until = '2027-06-30'
+  certForm.valid_until = ''
+  certForm.is_long_term = false
   certForm.warn_days = 30
   certForm.remark = ''
   pendingCertFile.value = null
   parsingCertFile.value = false
   certParseHintSummary.value = ''
+  certNameSource.value = null
   editingExistingAttachmentName.value = null
   certDialogVisible.value = true
 }
@@ -149,14 +153,22 @@ function openEditCert(row: Partial<CertificateOut>): void {
   editingCertId.value = row.id ?? null
   certForm.cert_name = row.cert_name ?? ''
   certForm.cert_no = row.cert_no || ''
-  certForm.valid_until = row.valid_until ?? ''
+  certForm.is_long_term = Boolean(row.is_long_term)
+  certForm.valid_until = certForm.is_long_term ? '' : (row.valid_until ?? '')
   certForm.warn_days = row.warn_days ?? 30
   certForm.remark = row.remark || ''
   pendingCertFile.value = null
   parsingCertFile.value = false
   certParseHintSummary.value = ''
+  certNameSource.value = null
   editingExistingAttachmentName.value = row.has_attachment ? (row.attachment_name || '已上传原件') : null
   certDialogVisible.value = true
+}
+
+function onLongTermToggle(val: boolean | string | number): void {
+  if (val) {
+    certForm.valid_until = ''
+  }
 }
 
 async function onCertFileChange(ev: Event): Promise<void> {
@@ -187,17 +199,31 @@ async function onCertFileChange(ev: Event): Promise<void> {
     const isCreate = editingCertId.value === null
     if (parsed.cert_name_hint && (isCreate || !certForm.cert_name.trim())) {
       certForm.cert_name = parsed.cert_name_hint
+      certNameSource.value = parsed.cert_name_source ?? null
     }
     if (parsed.cert_no_hint && (isCreate || !certForm.cert_no.trim())) {
       certForm.cert_no = parsed.cert_no_hint
     }
-    if (parsed.valid_until_hint && (isCreate || !certForm.valid_until.trim())) {
+    if (parsed.is_long_term_hint && (isCreate || (!certForm.valid_until.trim() && !certForm.is_long_term))) {
+      certForm.is_long_term = true
+      certForm.valid_until = ''
+    } else if (parsed.valid_until_hint && !certForm.is_long_term && (isCreate || !certForm.valid_until.trim())) {
       certForm.valid_until = parsed.valid_until_hint
     }
     const parts: string[] = [`已识别 ${parsed.ocr_chars} 字`]
-    if (parsed.cert_name_hint) parts.push(`名称：${parsed.cert_name_hint}`)
+    if (parsed.cert_name_hint) {
+      parts.push(
+        parsed.cert_name_source === 'filename_fallback'
+          ? `名称：${parsed.cert_name_hint}（文件名兜底）`
+          : `名称：${parsed.cert_name_hint}`,
+      )
+    }
     if (parsed.cert_no_hint) parts.push(`编号：${parsed.cert_no_hint}`)
-    if (parsed.valid_until_hint) parts.push(`截止日：${parsed.valid_until_hint}`)
+    if (parsed.is_long_term_hint) {
+      parts.push('有效期：长期有效')
+    } else if (parsed.valid_until_hint) {
+      parts.push(`截止日：${parsed.valid_until_hint}`)
+    }
     certParseHintSummary.value = parts.join(' ｜ ')
     ElMessage.success('证照文字预识别完成，请核对上方预填字段后保存')
   } catch {
@@ -208,8 +234,12 @@ async function onCertFileChange(ev: Event): Promise<void> {
 }
 
 async function handleSaveCert(): Promise<void> {
-  if (!certForm.cert_name.trim() || !certForm.valid_until.trim()) {
-    ElMessage.warning('请填写证照名称与有效期截止日（YYYY-MM-DD）')
+  if (!certForm.cert_name.trim()) {
+    ElMessage.warning('请填写证照名称')
+    return
+  }
+  if (!certForm.is_long_term && !certForm.valid_until.trim()) {
+    ElMessage.warning('请填写有效期截止日（YYYY-MM-DD），或勾选「长期有效」')
     return
   }
   savingCert.value = true
@@ -217,7 +247,8 @@ async function handleSaveCert(): Promise<void> {
     const payload = {
       cert_name: certForm.cert_name.trim(),
       cert_no: certForm.cert_no.trim() || null,
-      valid_until: certForm.valid_until.trim(),
+      valid_until: certForm.is_long_term ? null : certForm.valid_until.trim(),
+      is_long_term: certForm.is_long_term,
       warn_days: Number(certForm.warn_days) || 30,
       remark: certForm.remark.trim() || null,
     }
@@ -651,27 +682,32 @@ onMounted(() => {
 
               <el-table-column prop="valid_until" label="有效期截止日" width="140">
                 <template #default="{ row }">
-                  <span class="mono-num">{{ row.valid_until }}</span>
+                  <span v-if="row.is_long_term" class="sev-pill ok">长期有效</span>
+                  <span v-else class="mono-num">{{ row.valid_until || '—' }}</span>
                 </template>
               </el-table-column>
 
               <el-table-column label="剩余天数与状态" width="210">
                 <template #default="{ row }">
-                  <span v-if="row.is_expired" class="sev-pill error">
-                    已过期 {{ Math.abs(row.days_remaining) }} 天
+                  <span v-if="row.is_long_term" class="sev-pill ok">
+                    长期有效 · 持续有效
+                  </span>
+                  <span v-else-if="row.is_expired" class="sev-pill error">
+                    已过期 {{ Math.abs(row.days_remaining ?? 0) }} 天
                   </span>
                   <span v-else-if="row.is_expiring_soon" class="sev-pill warning">
-                    临期预警 · 仅剩 {{ row.days_remaining }} 天
+                    临期预警 · 仅剩 {{ row.days_remaining ?? 0 }} 天
                   </span>
                   <span v-else class="sev-pill ok">
-                    有效 · 剩余 {{ row.days_remaining }} 天
+                    有效 · 剩余 {{ row.days_remaining ?? 0 }} 天
                   </span>
                 </template>
               </el-table-column>
 
               <el-table-column prop="warn_days" label="预警阈值" width="100">
                 <template #default="{ row }">
-                  <span class="mono-num">≤ {{ row.warn_days }} 天</span>
+                  <span v-if="row.is_long_term" class="muted-txt">—</span>
+                  <span v-else class="mono-num">≤ {{ row.warn_days }} 天</span>
                 </template>
               </el-table-column>
 
@@ -954,20 +990,34 @@ onMounted(() => {
           <el-input
             v-model="certForm.cert_name"
             placeholder="例如：ISO/IEC 27001 信息安全管理体系认证证书"
+            @input="certNameSource = null"
           />
+          <div v-if="certNameSource === 'filename_fallback'" class="cert-source-warn">
+            名称来自文件名兜底，请人工核对
+          </div>
         </el-form-item>
 
         <el-form-item label="证书编号">
           <el-input v-model="certForm.cert_no" placeholder="例如：ISO27001-CN-2026001" />
         </el-form-item>
 
+        <div style="margin-bottom: 10px">
+          <el-checkbox v-model="certForm.is_long_term" @change="onLongTermToggle">
+            长期有效（无固定到期日，如新版营业执照）
+          </el-checkbox>
+        </div>
+
         <div class="rule-grid-2">
-          <el-form-item label="有效期截止日期 (YYYY-MM-DD)" required>
-            <el-input v-model="certForm.valid_until" placeholder="2026-11-25" />
+          <el-form-item label="有效期截止日期 (YYYY-MM-DD)" :required="!certForm.is_long_term">
+            <el-input
+              v-model="certForm.valid_until"
+              :disabled="certForm.is_long_term"
+              :placeholder="certForm.is_long_term ? '长期有效，无需填写截止日' : '例如：2028-12-31'"
+            />
           </el-form-item>
 
           <el-form-item label="提前预警天数 (warn_days)">
-            <el-input v-model.number="certForm.warn_days" type="number" />
+            <el-input v-model.number="certForm.warn_days" type="number" :disabled="certForm.is_long_term" />
           </el-form-item>
         </div>
 
@@ -1462,5 +1512,12 @@ onMounted(() => {
 .muted-txt {
   font-size: 12px;
   color: var(--txt-muted);
+}
+
+.cert-source-warn {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #b45309;
+  font-weight: 600;
 }
 </style>

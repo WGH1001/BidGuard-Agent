@@ -47,6 +47,7 @@ import type {
   RunTaskTriggerOut,
   TenantCreateRequest,
   TenantOut,
+  TenantUpdateRequest,
   UserProfileOut,
   VerifyArticleOut,
   QaAttachmentOut,
@@ -128,6 +129,9 @@ export const authApi = {
   },
   createTenant(payload: TenantCreateRequest): Promise<TenantOut> {
     return post<TenantOut>('/auth/tenants', payload)
+  },
+  updateTenant(tenantId: number, payload: TenantUpdateRequest): Promise<TenantOut> {
+    return patch<TenantOut>(`/auth/tenants/${tenantId}`, payload)
   },
   listUsers(tenantId?: number): Promise<AdminUserOut[]> {
     return get<AdminUserOut[]>(

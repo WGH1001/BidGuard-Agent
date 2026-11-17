@@ -31,8 +31,9 @@ from core.quote_verifier import verify_quote
 
 __all__ = ['scan_qualifications', 'parse_cn_date', 'parse_month',
            'collect_covered_months', 'resolve_effective_social_requirement',
-           'match_required_certificates_with_ledger', 'PLACEHOLDER_RE']
+           'match_required_certificates_with_ledger', 'LONG_TERM_SENTINEL_DATE', 'PLACEHOLDER_RE']
 
+LONG_TERM_SENTINEL_DATE = date(9999, 12, 31)
 _DAYS_NEAR_WARN = 30
 _CTX = 30                       # 串名命中上下文半径
 
@@ -674,22 +675,31 @@ def match_required_certificates_with_ledger(
             if not c_name or not _is_cert_match(req_name, c_name):
                 continue
 
+            is_long = bool(_field(cert, 'is_long_term', False))
             raw_vu = _field(cert, 'valid_until')
             if isinstance(raw_vu, date):
                 vu_date = raw_vu
             else:
                 vu_date = parse_cn_date(str(raw_vu or ''))
-            if vu_date is None:
-                continue
+            if vu_date == LONG_TERM_SENTINEL_DATE:
+                is_long = True
 
-            warn_days = int(_field(cert, 'warn_days', 30) or 30)
-            days_left = (vu_date - ref_d).days
-            if days_left < 0:
-                c_status = 'expired'
-            elif days_left <= warn_days:
-                c_status = 'expiring_soon'
-            else:
+            if is_long:
                 c_status = 'valid'
+                days_left: Optional[int] = None
+                valid_until_out: Optional[str] = None
+            else:
+                if vu_date is None:
+                    continue
+                warn_days = int(_field(cert, 'warn_days', 30) or 30)
+                days_left = (vu_date - ref_d).days
+                if days_left < 0:
+                    c_status = 'expired'
+                elif days_left <= warn_days:
+                    c_status = 'expiring_soon'
+                else:
+                    c_status = 'valid'
+                valid_until_out = vu_date.isoformat()
 
             att_name = _field(cert, 'attachment_name')
             att_path = _field(cert, 'attachment_path')
@@ -698,7 +708,8 @@ def match_required_certificates_with_ledger(
                 'id': int(_field(cert, 'id', 0) or 0),
                 'cert_name': c_name,
                 'cert_no': _field(cert, 'cert_no'),
-                'valid_until': vu_date.isoformat(),
+                'valid_until': valid_until_out,
+                'is_long_term': is_long,
                 'days_remaining': days_left,
                 'status': c_status,
                 'has_attachment': has_att,
@@ -706,7 +717,11 @@ def match_required_certificates_with_ledger(
             })
 
         candidates.sort(
-            key=lambda c: (status_rank.get(c['status'], 0), c['days_remaining']),
+            key=lambda c: (
+                status_rank.get(c['status'], 0),
+                1 if c['is_long_term'] else 0,
+                c['days_remaining'] if c['days_remaining'] is not None else 0,
+            ),
             reverse=True,
         )
         best = candidates[0] if candidates else None

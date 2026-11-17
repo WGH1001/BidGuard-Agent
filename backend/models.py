@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -28,6 +28,9 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
+
+
+LONG_TERM_SENTINEL_DATE = date(9999, 12, 31)
 
 
 def _utc_now() -> datetime:
@@ -206,6 +209,7 @@ class CompanyCertificate(Base):
     cert_name = Column(String(256), nullable=False)
     cert_no = Column(String(128), nullable=True)
     valid_until = Column(Date, nullable=False)
+    is_long_term = Column(Boolean, nullable=False, default=False)
     warn_days = Column(Integer, nullable=False, default=30)
     remark = Column(Text, nullable=True)
     # E25 §2.6：企业证照可选上传原件留档字段
@@ -342,48 +346,12 @@ _E11_TASK_NEW_COLS = (
 )
 
 
-def ensure_bid_check_tasks_columns(bind_or_conn: Any) -> list[str]:
-    """E11 §2.1：探测已有数据库的 bid_check_tasks 表，若缺少 started_at / finished_at / duration_json
-    则自动执行 ALTER TABLE ADD COLUMN 平滑补齐（兼容 PostgreSQL 与 SQLite，已有行默认 NULL）。
-    返回本次實際补齐的列名列表。
-    """
-    added: list[str] = []
-    if bind_or_conn is None:
-        return added
-    try:
-        insp = inspect(bind_or_conn)
-        if not insp.has_table('bid_check_tasks'):
-            return added
-        existing_cols = {c['name'] for c in insp.get_columns('bid_check_tasks')}
-        dialect_name = getattr(getattr(bind_or_conn, 'dialect', None), 'name', 'sqlite')
-
-        missing_specs = [
-            (col_name, pg_type if dialect_name == 'postgresql' else sqlite_type)
-            for col_name, pg_type, sqlite_type in _E11_TASK_NEW_COLS
-            if col_name not in existing_cols
-        ]
-        if not missing_specs:
-            return added
-
-        if hasattr(bind_or_conn, 'begin') and not hasattr(bind_or_conn, 'in_transaction'):
-            with bind_or_conn.begin() as conn:
-                for col_name, col_type in missing_specs:
-                    conn.execute(text(f"ALTER TABLE bid_check_tasks ADD COLUMN {col_name} {col_type}"))
-                    added.append(col_name)
-        else:
-            for col_name, col_type in missing_specs:
-                bind_or_conn.execute(text(f"ALTER TABLE bid_check_tasks ADD COLUMN {col_name} {col_type}"))
-                added.append(col_name)
-            if hasattr(bind_or_conn, 'commit') and getattr(bind_or_conn, 'in_transaction', lambda: False)():
-                bind_or_conn.commit()
-    except Exception:
-        pass
-    return added
-
 def _ensure_table_columns_generic(
     bind_or_conn: Any,
     table_name: str,
     col_specs: tuple[tuple[str, str, str], ...],
+    *,
+    auto_commit: bool = True,
 ) -> list[str]:
     """通用老库平滑加列辅助函数（兼容 PostgreSQL 与 SQLite）。"""
     added: list[str] = []
@@ -413,28 +381,42 @@ def _ensure_table_columns_generic(
             for col_name, col_ddl in missing_specs:
                 bind_or_conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_ddl}"))
                 added.append(col_name)
-            if hasattr(bind_or_conn, 'commit') and getattr(bind_or_conn, 'in_transaction', lambda: False)():
+            if auto_commit and hasattr(bind_or_conn, 'commit') and getattr(bind_or_conn, 'in_transaction', lambda: False)():
                 bind_or_conn.commit()
     except Exception:
         pass
     return added
 
 
-def ensure_qa_sessions_columns(bind_or_conn: Any) -> list[str]:
+def ensure_bid_check_tasks_columns(bind_or_conn: Any, *, auto_commit: bool = True) -> list[str]:
+    """E11 §2.1：探测已有数据库的 bid_check_tasks 表，若缺少 started_at / finished_at / duration_json
+    则自动执行 ALTER TABLE ADD COLUMN 平滑补齐（兼容 PostgreSQL 与 SQLite，已有行默认 NULL）。
+    """
+    return _ensure_table_columns_generic(
+        bind_or_conn,
+        'bid_check_tasks',
+        _E11_TASK_NEW_COLS,
+        auto_commit=auto_commit,
+    )
+
+
+def ensure_qa_sessions_columns(bind_or_conn: Any, *, auto_commit: bool = True) -> list[str]:
     """E24 §2.2：探测老库 qa_sessions 表，若缺少 attachments_json 列则自动补齐（默认值 '[]'）。"""
     return _ensure_table_columns_generic(
         bind_or_conn,
         'qa_sessions',
         (("attachments_json", "JSON NOT NULL DEFAULT '[]'", "JSON NOT NULL DEFAULT '[]'"),),
+        auto_commit=auto_commit,
     )
 
 
-def ensure_user_model_configs_columns(bind_or_conn: Any) -> list[str]:
+def ensure_user_model_configs_columns(bind_or_conn: Any, *, auto_commit: bool = True) -> list[str]:
     """E24 §2.2：探测老库 user_model_configs 表，若缺少 supports_vision 列则自动补齐（默认值 FALSE/0）。"""
     return _ensure_table_columns_generic(
         bind_or_conn,
         'user_model_configs',
         (('supports_vision', 'BOOLEAN NOT NULL DEFAULT FALSE', 'BOOLEAN NOT NULL DEFAULT 0'),),
+        auto_commit=auto_commit,
     )
 
 
@@ -444,23 +426,39 @@ _E25_CERT_NEW_COLS = (
     ('attachment_size', 'INTEGER', 'INTEGER'),
 )
 
+_E35_CERT_NEW_COLS = (
+    ('is_long_term', 'BOOLEAN NOT NULL DEFAULT FALSE', 'BOOLEAN NOT NULL DEFAULT 0'),
+)
 
-def ensure_company_certificates_columns(bind_or_conn: Any) -> list[str]:
+
+def ensure_company_certificates_columns(bind_or_conn: Any, *, auto_commit: bool = True) -> list[str]:
     """E25 §2.6：探测老库 company_certificates 表，若缺少 attachment_name / attachment_path / attachment_size 则自动补齐。"""
     return _ensure_table_columns_generic(
         bind_or_conn,
         'company_certificates',
         _E25_CERT_NEW_COLS,
+        auto_commit=auto_commit,
+    )
+
+
+def ensure_company_certificates_e35_columns(bind_or_conn: Any, *, auto_commit: bool = True) -> list[str]:
+    """E35 §3.5：探测老库 company_certificates 表，若缺少 is_long_term 列则自动补齐（默认值 FALSE/0）。"""
+    return _ensure_table_columns_generic(
+        bind_or_conn,
+        'company_certificates',
+        _E35_CERT_NEW_COLS,
+        auto_commit=auto_commit,
     )
 
 
 @event.listens_for(Base.metadata, 'after_create')
 def _auto_migrate_bid_check_tasks_after_create(target, connection, **kwargs):
-    """在 Base.metadata.create_all（含 init_db 启动时）完成后自动探测老库并补齐 E11 / E24 / E25 新列。"""
-    ensure_bid_check_tasks_columns(connection)
-    ensure_qa_sessions_columns(connection)
-    ensure_user_model_configs_columns(connection)
-    ensure_company_certificates_columns(connection)
+    """在 Base.metadata.create_all（含 init_db 启动时）完成后自动探测老库并补齐 E11 / E24 / E25 / E35 新列。"""
+    ensure_bid_check_tasks_columns(connection, auto_commit=False)
+    ensure_qa_sessions_columns(connection, auto_commit=False)
+    ensure_user_model_configs_columns(connection, auto_commit=False)
+    ensure_company_certificates_columns(connection, auto_commit=False)
+    ensure_company_certificates_e35_columns(connection, auto_commit=False)
 
 
 def apply_sqlite_pragmas(engine: Any) -> None:
@@ -493,11 +491,11 @@ def apply_sqlite_pragmas(engine: Any) -> None:
             mc_cols = {row[1] for row in cursor.fetchall()}
             if mc_cols and 'supports_vision' not in mc_cols:
                 cursor.execute("ALTER TABLE user_model_configs ADD COLUMN supports_vision BOOLEAN NOT NULL DEFAULT 0")
-            # E25：同步探测补齐 company_certificates 的 3 个附件列
+            # E25 / E35：同步探测补齐 company_certificates 的附件列与 is_long_term
             cursor.execute("PRAGMA table_info(company_certificates)")
             cc_cols = {row[1] for row in cursor.fetchall()}
             if cc_cols:
-                for col_name, _pg_t, sq_t in _E25_CERT_NEW_COLS:
+                for col_name, _pg_t, sq_t in (_E25_CERT_NEW_COLS + _E35_CERT_NEW_COLS):
                     if col_name not in cc_cols:
                         cursor.execute(f"ALTER TABLE company_certificates ADD COLUMN {col_name} {sq_t}")
         except Exception:
