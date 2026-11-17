@@ -55,6 +55,7 @@ const detailLoading = ref(false)
 const runningTrigger = ref(false)
 const cancellingTask = ref(false)
 const renamingTask = ref(false)
+const exportingClean = ref(false)
 const editingDetailTitle = ref(false)
 const detailTitleDraft = ref('')
 const tasks = ref<BidTaskOut[]>([])
@@ -369,6 +370,27 @@ async function handleDownloadRedline(): Promise<void> {
     `${currentTask.value.title}_原位标红批注件.docx`,
   )
   ElMessage.success('已下载投标书原位标红批注件')
+}
+
+async function handleExportCleanBid(): Promise<void> {
+  if (!currentTask.value || exportingClean.value) return
+  if (currentTask.value.bid_filename?.toLowerCase().endsWith('.pdf')) {
+    ElMessage.warning('PDF 原件受格式保护不支持自动无损修订导出，请在 Word 原件（.docx）中修改后再核验')
+    return
+  }
+  exportingClean.value = true
+  try {
+    const res = await reportsApi.exportCleanBid(currentTask.value.id, {})
+    await reportsApi.downloadCleanBid(
+      currentTask.value.id,
+      `${currentTask.value.title}_修订定稿版投标书.docx`,
+    )
+    ElMessage.success(
+      `Clean 定稿导出成功：原位替换 ${res.applied_count} 处，另 ${res.manual_pending_count} 项待人工补写`,
+    )
+  } finally {
+    exportingClean.value = false
+  }
 }
 
 function handlePageChange(newPage: number): void {
@@ -688,6 +710,20 @@ onBeforeUnmount(() => {
             </el-button>
             <el-button @click="handleDownloadRedline">
               下载标红批注件
+            </el-button>
+            <el-button
+              type="primary"
+              plain
+              :loading="exportingClean"
+              @click="handleExportCleanBid"
+            >
+              导出 Clean 修订正本
+            </el-button>
+            <el-button
+              plain
+              @click="router.push({ path: '/composer', query: { tab: 'clean', taskId: String(currentTask.id) } })"
+            >
+              精修定稿中心
             </el-button>
             <el-button
               type="danger"

@@ -8,6 +8,8 @@ import CheckDetailView from '@/views/CheckDetailView.vue'
 import DeviationView from '@/views/DeviationView.vue'
 import RadarView from '@/views/RadarView.vue'
 import QaChatView from '@/views/QaChatView.vue'
+import SimilarityCheckView from '@/views/SimilarityCheckView.vue'
+import BidComposerView from '@/views/BidComposerView.vue'
 import RulesAndCertsView from '@/views/RulesAndCertsView.vue'
 import ReportsAndAuditView from '@/views/ReportsAndAuditView.vue'
 import ChangePasswordView from '@/views/ChangePasswordView.vue'
@@ -74,6 +76,24 @@ const routes: RouteRecordRaw[] = [
     meta: {
       title: 'F7 标书专家追问',
       moduleCode: 'F7',
+    },
+  },
+  {
+    path: '/similarity',
+    name: 'similarity',
+    component: SimilarityCheckView,
+    meta: {
+      title: '多标书交叉比对',
+      moduleCode: 'COMPARE',
+    },
+  },
+  {
+    path: '/composer',
+    name: 'composer',
+    component: BidComposerView,
+    meta: {
+      title: '标书编制输出中心',
+      moduleCode: 'COMPOSER',
     },
   },
   {

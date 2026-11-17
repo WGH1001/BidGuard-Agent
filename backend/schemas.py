@@ -536,4 +536,128 @@ class ModelConfigTestOut(BaseModel):
     message: str
 
 
+# ── 11. /api/similarity 契约（E36 多标书交叉比对）─────────────────────────
+class SimilarityBidderOut(BaseModel):
+    index: int
+    label: str
+    filename: str
+    chars: int = 0
+    net_chars: int = 0
+    pages: int = 1
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    media_count: int = 0
+    bid_total: Optional[str] = None
+
+
+class SimilarityPairOut(BaseModel):
+    a_index: int
+    b_index: int
+    a_label: str
+    b_label: str
+    net_similarity_pct: float = 0.0
+    raw_similarity_pct: float = 0.0
+    risk_level: Literal['low', 'medium', 'high'] = 'low'
+    shared_passage_count: int = 0
+    shared_passages: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SimilarityFindingOut(BaseModel):
+    code: str
+    severity: Literal['error', 'warning', 'info'] = 'warning'
+    dimension: str
+    a_label: str
+    b_label: str
+    message: str
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class SimilarityReportSummaryOut(BaseModel):
+    id: int
+    tenant_id: int
+    user_id: Optional[int] = None
+    title: str
+    tender_filename: Optional[str] = None
+    bidder_count: int = 0
+    max_similarity_pct: float = 0.0
+    risk_level: Literal['low', 'medium', 'high'] = 'low'
+    finding_count: int = 0
+    created_at: Optional[str] = None
+
+
+class SimilarityReportDetailOut(SimilarityReportSummaryOut):
+    bidders: list[SimilarityBidderOut] = Field(default_factory=list)
+    pair_matrix: list[SimilarityPairOut] = Field(default_factory=list)
+    findings: list[SimilarityFindingOut] = Field(default_factory=list)
+    export_url: str = ''
+
+
+class SimilarityReportListOut(BaseModel):
+    total: int = 0
+    items: list[SimilarityReportSummaryOut] = Field(default_factory=list)
+
+
+# ── 12. /api/composer 与 /clean-bid 契约（E37 标书编制与无损修订交付）─────
+class ComposeDraftSummaryOut(BaseModel):
+    id: int
+    tenant_id: int
+    user_id: Optional[int] = None
+    title: str
+    tender_filename: str
+    compose_mode: Literal['skeleton_v1', 'knowledge_draft_v2'] = 'skeleton_v1'
+    project_name: str = ''
+    project_code: str = ''
+    open_date: Optional[str] = None
+    price_cap: Optional[str] = None
+    manual_item_count: int = 0
+    scoring_fill_mode: str = 'outline_stub'
+    stats: dict[str, Any] = Field(default_factory=dict)
+    download_url: str = ''
+    created_at: Optional[str] = None
+
+
+class ComposeDraftDetailOut(ComposeDraftSummaryOut):
+    blueprint: dict[str, Any] = Field(default_factory=dict)
+
+
+class ComposeDraftListOut(BaseModel):
+    total: int = 0
+    items: list[ComposeDraftSummaryOut] = Field(default_factory=list)
+
+
+class CleanBidExportRequest(BaseModel):
+    replacements: dict[int, str] = Field(default_factory=dict)
+    finding_ids: Optional[list[int]] = None
+
+
+class CleanBidAppliedItemOut(BaseModel):
+    finding_id: Optional[int] = None
+    code: str = ''
+    clause_no: str = ''
+    old_text: str = ''
+    new_text: str = ''
+    occurrences: int = 0
+
+
+class CleanBidPendingItemOut(BaseModel):
+    finding_id: Optional[int] = None
+    code: str = ''
+    severity: str = 'warning'
+    clause_no: str = ''
+    quote: str = ''
+    message: str = ''
+    suggestion: str = ''
+    reason: str = ''
+
+
+class CleanBidExportOut(BaseModel):
+    task_id: int
+    output_filename: str
+    output_path: str
+    download_url: str
+    applied_count: int = 0
+    manual_pending_count: int = 0
+    applied_items: list[CleanBidAppliedItemOut] = Field(default_factory=list)
+    manual_pending_items: list[CleanBidPendingItemOut] = Field(default_factory=list)
+
+
 DashboardStatsOut.model_rebuild()

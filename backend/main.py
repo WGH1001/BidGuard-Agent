@@ -21,6 +21,7 @@ from backend.models import BidCheckTask, ensure_bid_check_tasks_columns
 from backend.routers import (
     auth as auth_router_mod,
     checks as checks_router_mod,
+    composer as composer_router_mod,
     dashboard as dashboard_router_mod,
     deviation as deviation_router_mod,
     extract as extract_router_mod,
@@ -30,6 +31,7 @@ from backend.routers import (
     regulations as regulations_router_mod,
     reports as reports_router_mod,
     rules as rules_router_mod,
+    similarity as similarity_router_mod,
 )
 from backend.schemas import HealthOut
 from backend.worker import _utc_now, get_worker
@@ -197,6 +199,8 @@ def create_app(
     app.include_router(reports_router_mod.router)
     app.include_router(model_config_router_mod.router)
     app.include_router(regulations_router_mod.router)
+    app.include_router(similarity_router_mod.router)
+    app.include_router(composer_router_mod.router)
 
     @app.get('/api/health', response_model=HealthOut)
     def root_health() -> HealthOut:

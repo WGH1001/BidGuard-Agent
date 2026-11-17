@@ -19,7 +19,7 @@ from typing import Optional
 import zipfile
 
 from docx import Document
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -27,9 +27,16 @@ from sqlalchemy.orm import Session
 from backend.auth import AuthUser, get_current_user, record_audit, require_admin
 from backend.database import PROJECT_ROOT, get_db
 from backend.models import AuditLog, BidCheckTask, BidFinding
-from backend.schemas import AuditLogItemOut, AuditLogListOut
+from backend.schemas import (
+    AuditLogItemOut,
+    AuditLogListOut,
+    CleanBidAppliedItemOut,
+    CleanBidExportOut,
+    CleanBidExportRequest,
+    CleanBidPendingItemOut,
+)
 from backend.worker import build_and_cache_deviation_artifacts, resolve_effective_llm_client, resolve_project_path
-from core.redline import inject_pdf_highlights, inject_word_comments
+from core.redline import export_clean_revised_docx, inject_pdf_highlights, inject_word_comments
 from core.tender_extractor import build_review_checklist
 
 router = APIRouter(prefix='/api/reports', tags=['reports'])
@@ -328,6 +335,111 @@ def download_redline_bid(
         media = 'application/pdf'
 
     return FileResponse(str(out_path), media_type=media, filename=f"{task.id}_标红原件{ext}")
+
+
+@router.post('/{task_id}/clean-bid', response_model=CleanBidExportOut)
+def export_clean_bid_document(
+    task_id: int,
+    body: CleanBidExportRequest = Body(default_factory=CleanBidExportRequest),
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> CleanBidExportOut:
+    """E37 §3.3：基于任务已采纳整改项（feedback=='accepted'）生成 Clean 无批注《修订定稿版投标书.docx》。
+
+    合规拦截：仅支持 .docx 原件；.pdf 原件明确返回 422 PDF_CLEAN_EXPORT_UNSUPPORTED。
+    """
+    tenant_id = int(current_user.tenant_id)
+    task = db.query(BidCheckTask).filter_by(id=task_id, tenant_id=tenant_id).first()
+    if task is None:
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'TASK_NOT_FOUND', 'message': '任务不存在或无权访问'},
+        )
+
+    bid_abs = resolve_project_path(task.bid_path)
+    if not bid_abs.is_file():
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'BID_FILE_MISSING', 'message': '投标文件原件不存在'},
+        )
+
+    if bid_abs.suffix.lower() != '.docx':
+        raise HTTPException(
+            status_code=422,
+            detail={
+                'code': 'PDF_CLEAN_EXPORT_UNSUPPORTED',
+                'message': 'PDF 原件暂不支持安全无损修订导出，请在 Word 原件（.docx）中修改后再核验，以免破坏版面与电子签章。',
+            },
+        )
+
+    q = db.query(BidFinding).filter_by(task_id=task.id, feedback='accepted')
+    if body.finding_ids is not None:
+        allowed_ids = [int(x) for x in body.finding_ids]
+        q = q.filter(BidFinding.id.in_(allowed_ids)) if allowed_ids else q.filter(BidFinding.id == -1)
+    accepted_rows = q.order_by(BidFinding.id.asc()).all()
+
+    _DELIVER_DIR.mkdir(parents=True, exist_ok=True)
+    out_filename = f"{task.id}_修订定稿版投标书.docx"
+    out_abs = (_DELIVER_DIR / f"{tenant_id}_{out_filename}").resolve()
+    if not out_abs.is_relative_to(_DELIVER_DIR):
+        raise HTTPException(status_code=422, detail={'code': 'PATH_TRAVERSAL', 'message': '非法导出路径'})
+
+    result = export_clean_revised_docx(
+        bid_abs,
+        accepted_rows,
+        out_abs,
+        replacements=body.replacements,
+    )
+    rel_out = out_abs.relative_to(PROJECT_ROOT.resolve()).as_posix()
+
+    record_audit(
+        db,
+        action='export_clean_bid',
+        tenant_id=tenant_id,
+        user_id=current_user.get('id'),
+        target=f"task:{task.id}",
+        detail_json={
+            'accepted_count': len(accepted_rows),
+            'applied_count': result['applied_count'],
+            'manual_pending_count': result['manual_pending_count'],
+            'output': out_abs.name,
+        },
+    )
+
+    return CleanBidExportOut(
+        task_id=task.id,
+        output_filename=out_filename,
+        output_path=rel_out,
+        download_url=f"/api/reports/{task.id}/clean-bid/download",
+        applied_count=int(result['applied_count']),
+        manual_pending_count=int(result['manual_pending_count']),
+        applied_items=[CleanBidAppliedItemOut(**it) for it in result['applied_items']],
+        manual_pending_items=[CleanBidPendingItemOut(**it) for it in result['manual_pending_items']],
+    )
+
+
+@router.get('/{task_id}/clean-bid/download')
+def download_clean_bid_document(
+    task_id: int,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """下载最近生成的《修订定稿版投标书.docx》。"""
+    tenant_id = int(current_user.tenant_id)
+    task = db.query(BidCheckTask).filter_by(id=task_id, tenant_id=tenant_id).first()
+    if task is None:
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'TASK_NOT_FOUND', 'message': '任务不存在或无权访问'},
+        )
+    out_filename = f"{task.id}_修订定稿版投标书.docx"
+    out_abs = (_DELIVER_DIR / f"{tenant_id}_{out_filename}").resolve()
+    if not out_abs.is_relative_to(_DELIVER_DIR) or not out_abs.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'CLEAN_BID_NOT_GENERATED', 'message': '尚未生成修订定稿文件，请先执行导出计算'},
+        )
+    return FileResponse(str(out_abs), media_type=_DOCX_MIME, filename=out_filename)
 
 
 @router.get('/{task_id}/deliver.zip')

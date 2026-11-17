@@ -21,7 +21,7 @@
 - **登录响应**（POST /api/auth/login，入参 `{username, password}`）：
   `{"token": "...", "user": {"id","username","display_name","role","tenant_id"}}`。
 
-## 2. 端点总清单（11 组，路径即真实路径）
+## 2. 端点总清单（13 组，路径即真实路径）
 
 | 视图消费方 | 端点 | 说明 |
 |---|---|---|
@@ -50,11 +50,14 @@
 | | `POST/GET/DELETE /api/rules/certificates/{cert_id}/attachment` | 证照原件上传留档、安全下载与解绑 |
 | 法规库 (E4) | `GET /api/regulations/laws`、`GET /api/regulations/laws/{id}/articles`、`POST /api/regulations/verify-article`、`POST /api/regulations/crawl`、`DELETE /api/regulations/articles/{id}` | 法条真伪三态核验、官网源更新检查与管理员单条条文删除 |
 | 交付与审计 | `GET /api/reports/{task_id}/redline` | 标红批注原件（docx/pdf 文件流） |
+| | `POST /api/reports/{task_id}/clean-bid`、`GET /api/reports/{task_id}/clean-bid/download` | E37 Clean 无批注修订定稿导出（`.pdf` 诚实返回 `422 PDF_CLEAN_EXPORT_UNSUPPORTED`） |
 | | `GET /api/reports/{task_id}/deliver.zip` | 交付包 ZIP（标红原件+偏离表+签字单） |
 | | `GET /api/reports/{task_id}/signoff` | 《人工终核签字确认单.docx》单独下载 |
 | | `POST /api/reports/batch-zip` | 多任务自选内容批量打包 |
 | | `GET /api/reports/audit-logs`（admin，403 拦 member） | 安全操作审计留痕列表 |
 | | `GET /api/reports/audit-logs/export`（admin） | 导出 UTF-8 BOM CSV 审计日志（带公式注入转义） |
+| 交叉比对 (E36) | `POST /api/similarity/compare`、`GET /api/similarity`、`GET /api/similarity/{id}`、`GET /api/similarity/{id}/export`、`DELETE /api/similarity/{id}` | 多标书五维查重对比（2~6 份）、矩阵与脱敏碰撞详情、分析报告导出与级联清理 |
+| 编制输出 (E37) | `POST /api/composer/generate`、`GET /api/composer/drafts`、`GET /api/composer/drafts/{id}`、`GET /api/composer/drafts/{id}/download`、`DELETE /api/composer/drafts/{id}` | 正向初稿骨架装配（V1 零幻觉+报价占位锁 / V2 方案库插槽）、蓝图预览、下载与删盘 |
 | 模型配置 | `GET/PUT /api/model-config`、`DELETE /api/model-config`、`POST /api/model-config/test` | PUT 入参 `{base_url,api_key,model_flash,model_flagship,supports_reasoning_effort,supports_vision}`；**响应永不回显明文 Key** |
 
 文件下载统一走 `GET /api/files/{相对路径}`（已做租户归属校验，跨租户 404）。
@@ -73,17 +76,19 @@ event: error      data: {"task_id":1,"status":"failed","error_msg":"..."}
 - **断线重连后重订阅会先收到终态/当前进度帧**，UI 按 status 幂等处理；
 - `stats.price_status == 'NEED_MANUAL'` 时弹出报价人工回填弹窗（调 price-manual 接口）。
 
-## 4. 视图 ↔ 端点映射（8 业务视图 + 1 法规视图 + 3 辅助视图）
+## 4. 视图 ↔ 端点映射（10 业务视图 + 1 法规视图 + 4 管理/辅助视图，共 15 个视图）
 
 1. `DashboardView`：/api/dashboard（ECharts：4 统计卡 + 六大防线矩阵热力/仪表 + 截标倒计时列表 + 在途任务台账）；
 2. `ExtractView`：/api/extract 上传 → 五张清单五 Tab 核对（★/▲ 标记条款、无标记措辞模式 A/B、审查区定位、评分细则表、**所需证照与台账对账**，含多文件排队与 localStorage LRU 缓存）；
-3. `CheckDetailView`（最重）：/api/checks 全组 + SSE——6 步流水线进度条、风险卡列表（按 severity 分级配色，采纳/驳回按钮）、报价回填弹窗、投标书原件下载与标红预览入口；
+3. `CheckDetailView`（最重）：/api/checks 全组 + SSE——6 步流水线进度条、风险卡列表（按 severity 分级配色，采纳/驳回按钮）、报价回填弹窗、投标书原件下载、标红预览及「导出 Clean 修订正本」入口；
 4. `DeviationView`：/api/deviation 预览统计 + 偏离表五维指标卡筛选 + 在途 409 防锁死与一键导出下载；
 5. `RadarView`：/api/radar 上传 → 疑似参数卡片流 + 结论横幅（"疑似"标注）+ 单条重扫与开标日期显化；
 6. `QaChatView`：/api/qa 全组——会话侧栏（KeepAlive 切页防丢）+ 多文件/图片附件上传 + 消息流（ReAct 思考轨迹 SSE 流式直播 + 7 工具折叠面板 + quotes 溯源卡 + 0-Token 动态快捷追问）；
-7. `RulesAndCertsView`：规则配置 + 企业证照台账（支持 PDF/图片扫件 OCR 预填与原件留档）+ 法规库（法条三态核验与单条条文删除维护）；
-8. `ReportsAndAuditView`：交付中心（按任务列 redline/deliver.zip/signoff 下载 + 批量打包）+ 安全操作审计日志表（admin，支持 UTF-8 BOM CSV 导出）；
-9. 辅助：`LoginView` / `ChangePasswordView` / `ModelSettingsView`（/api/model-config + test 连通性测试 + 思考参数防御与多模态视觉开关）。
+7. `SimilarityCheckView`（`/similarity`，E36）：/api/similarity——2~6 份标书对比+可选招标书剥离公共条款，矩阵热力与五维脱敏碰撞证据，中性「多标书交叉比对」界面（禁洗稿）；
+8. `BidComposerView`（`/composer`，E37）：/api/composer + `/api/reports/{id}/clean-bid`——Tab 1 正向初稿骨架（V1 零幻觉/V2 方案库槽位，待填红框高亮跳转）与 Tab 2 采纳整改导 Clean 定稿工作台；
+9. `RulesAndCertsView`：规则配置 + 企业证照台账（支持 PDF/图片扫件 OCR 预填与原件留档、长期有效开关）+ 法规库（法条三态核验与单条条文删除维护）；
+10. `ReportsAndAuditView`：交付中心（按任务列 redline/clean-bid/deliver.zip/signoff 下载 + 批量打包）+ 安全操作审计日志表（admin，支持 UTF-8 BOM CSV 导出）；
+11. 管理与辅助：`UsersManageView`（`/users`，admin 部门重命名与账号管理）/ `LoginView` / `ChangePasswordView` / `ModelSettingsView`（/api/model-config + test 连通性测试 + 思考参数防御与多模态视觉开关）。
 
 ## 5. 工程约定
 

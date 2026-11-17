@@ -21,17 +21,17 @@
 
 ```text
 ⑤ 应用展现层    Vue 3 (<script setup lang="ts">) + Vite + Element Plus (深路径按需引入) + ECharts
-                 默认工业浅岩灰侧栏（支持浅岩灰/深暖炭褐灰/莫兰迪深青灰三色切换），13 个视图全部落地
+                 默认工业浅岩灰侧栏（支持浅岩灰/深暖炭褐灰/莫兰迪深青灰三色切换），15 个视图全部落地
 ④ 异步服务层    FastAPI + Pydantic + Uvicorn + SSE 实时进度流
                  bcrypt 密码哈希、HMAC-SHA256 令牌、多租户部门隔离、写操作审计留痕、
                  Redis 7 / 进程内双模任务队列、API Key 派生密钥加密落库、静态托管 frontend/dist、
-                 11 组路由（含 /api/regulations 法规库）
-③ 智能编排层    0 Token 确定性引擎（F1正则/F2算术沙盒/F3证照串名/bid_aligner四阶段双书对齐）
+                 13 组路由（含 /api/regulations 法规库、/api/similarity 交叉比对、/api/composer 编制输出）
+③ 智能编排层    0 Token 确定性引擎（F1正则/F2算术沙盒/F3证照串名/bid_aligner四阶段双书对齐/E36多标书五维交叉比对/E37正向骨架与Clean定稿）
                  + 受控 LLM 分段核验（F1分段结构化/F4响应与矛盾核验/F6控标雷达/F7 ReAct追问）
                  + quote_verifier 强制原文逐字溯源锁账
                  + E2 混合检索：BM25 三级门控（词面/同义词45组/语义）+ MISSING_EVIDENCE 探针
                  + E4 法规库：法条三态核验（exact_match/fuzzy_hint/unverifiable，LLM 零裁决权）
-① 数据存储层    PostgreSQL 16 主库（开发/演示无缝回退 SQLite，11 张表）、Redis 7 队列与缓存、
+① 数据存储层    PostgreSQL 16 主库（开发/演示无缝回退 SQLite，13 张表）、Redis 7 队列与缓存、
                  data/rules/ 招投标法规与废标规则库、data/corpus/ 11份政采真语料三本账 + 法规底表
 ② 文档解析层    python-docx（Word解析/vMerge去重/OOXML批注/E6 双轨页码）、
                  PyMuPDF（PDF解析/页码换算/坐标高亮/E5 总览页与链接批注）、rapidocr-onnxruntime（扫描件与图片离线OCR缓存）
@@ -51,10 +51,10 @@ BidGuard-Agent/
 ├── config/
 │   ├── models.yaml                      # 模型网关 demo=智谱 / prod=内网私有化
 │   └── regulation_sources.yaml          # E4：8 部法律官方 URL（crawl 数据源）
-├── core/                                # 19 个模块（F1~F7 + 混合检索 + 法规库，逐项状态见 §3）
-├── backend/                             # main + models(11表) + schemas + 11 组路由
-├── frontend/                            # Vue3 + TS：13 个视图全部落地
-├── tests/                               # 40 个测试文件（test_*.py）298 项全绿
+├── core/                                # 21 个功能模块（F1~F8 + 混合检索 + 法规库 + 交叉比对 + 正向编制，逐项状态见 §3）
+├── backend/                             # main + models(13表) + schemas + 13 组路由
+├── frontend/                            # Vue3 + TS：15 个视图全部落地
+├── tests/                               # 42 个测试文件（test_*.py）307 项全绿
 ├── scripts/                             # build_f1_baseline.py / eval_f1_llm.py / probe_reasoning_efforts.py
 ├── data/
 │   ├── corpus/m0_samples/               # 11 份语料 + baseline / ground_truth / llm_eval 三本账（§4）
@@ -68,9 +68,9 @@ BidGuard-Agent/
 
 ## 2. 当前基线（截至 2026-11-17）
 
-- **开发阶段**：3 周排期全部完成 + 三十五轮增强升级（E1~E35）全量实现（E28 `67b95ac`、E29 `063e497`、E30 `0756c2a`、E31 `10a63eb`、E32 `804c45b`、E33 `72cac30`、E34 `7da711a` 均已入库；**E35 · 管理增强与部署诚实化卡已完成实现与全量验证留在工作区待确认 commit**，另 `docs/cards/` 含 `E36` / `E37` 待审草案）
-- **Git 最新功能 Commit**：`7da711a`（E34 · F7 快速通道判定）；工作区保留 E35（及 E36/E37 草案卡）待确认 commit；前序主线：`72cac30`（E33）/ `804c45b`（E32）/ `10a63eb`（E31）
-- **测试基线**：**298 项 pytest 全绿（零回归）**（在 `7da711a` 286 项基线基础上于 `tests/test_e35_admin_and_cert_honesty.py` 新增 12 项测试）+ `npm --prefix frontend run build`（`vue-tsc --noEmit && vite build` 零错误构建成功）—— 第一验收线已演进至 **298 项**
+- **开发阶段**：3 周排期全部完成 + 三十七轮增强升级（E1~E37）全量实现（E35 `c913e40` 已入库；**E36 · 多标书交叉比对卡 与 E37 · 标书编制输出与无损修订交付卡 均已完成实现与全量验证，留在工作区待确认 commit**）
+- **Git 最新功能 Commit**：`c913e40`（E35 · 管理增强与部署诚实化）；工作区保留 E36 与 E37（及全套归档卡）待确认 commit；前序主线：`7da711a`（E34）/ `72cac30`（E33）/ `804c45b`（E32）
+- **测试基线**：**307 项 pytest 全绿（零回归）**（在 `c913e40` 298 项基线基础上：`tests/test_e36_bid_similarity.py` 新增 5 项、`tests/test_e37_bid_composer_and_clean_export.py` 新增 4 项，13 张表校验通过）+ `npm --prefix frontend run build`（`vue-tsc --noEmit && vite build` 1859 模块零错误构建成功）—— 第一验收线已演进至 **307 项**
 - **模型网关基线**：`config/models.yaml` 当前工作区设为 `default_env: prod`（内网私有网关 `http://10.0.2.81:3000/v1`，`GLM-5.3-Flash`，`timeout: 60`）；并行提供 `demo` 环境（智谱开放平台 `glm-5.3-flash`、`embedding: embedding-3` 激活 L2 混合检索、`timeout: 60`），`LLMClient` 统一控重试与 TUN/私有 IP 报错排查提示
 - **运行环境**：本机开发用项目自带 `.venv`（依赖已全量钉死）；生产走 Docker 四容器（`docker compose up -d --build`，默认宿主机 `APP_PORT=8000` + `POSTGRES_PORT=15432`，与老项目 `8080` + `5432` 并行共存不冲突）
 - **快速验收命令**：
@@ -82,7 +82,7 @@ BidGuard-Agent/
 
 ---
 
-## 3. 核心模块实现清单（`core/` 下 19 个文件逐项状态）
+## 3. 核心模块实现清单（`core/` 下 21 个功能文件逐项状态）
 
 | 序号 | 文件路径 | 所属模块 | 一句话职责说明 | 当前状态与实测验收数据 |
 |---|---|---|---|---|
@@ -105,6 +105,8 @@ BidGuard-Agent/
 | 17 | `core/hybrid_retriever.py` | **E2 混合检索** | BM25 三级门控（词面精确/同义词扩展 45 组/语义兜底）+ MISSING_EVIDENCE 探针；E12 正式激活 L2 向量嵌入重排（带 `.emb.npy` 维度校验失效重算）；**E33 加固** 按 `doc_sha` 分段互斥锁 + 临时文件 `os.replace()` 原子写缓存防并发竞争 | **已验收**（E2 + E12 + E33 并发压测全绿） |
 | 18 | `core/regulation_library.py` | **E4 法规库** | 8 部法律条文库：三态核验（exact_match/fuzzy_hint/unverifiable，**LLM 对真伪零裁决权**）、中文/阿拉伯条号归一、张冠李戴降级 fuzzy_hint、四格式导入（json/txt/docx/pdf，content_hash 幂等） | **已验收**（E4 卡，含 crawl 集成测试外网隔离） |
 | 19 | `core/regulation_crawler.py` | **E4 法规爬取** | 静态 HTML 适配器，运行时读 `config/regulation_sources.yaml`（8 个官方 URL）；占位源诚实报"源未配置"；超时重试一次转 manual_required；SHA256 条文指纹发现官网修订 | **已验收** |
+| 20 | `core/bid_similarity.py` | **E36 多标书交叉比对** | 五维 0-Token 客观查重与异常一致排查（`.docx`/`.pdf` 元数据与内嵌图哈希、剔除招标底稿 12-gram 与套话后净正文 8-gram Jaccard 及 ≥25 字连续长句、非标错名/实体碰撞含身份证与手机号前 3 后 4 脱敏、Decimal 规律性报价关联与等差检测、`export_similarity_report_docx`）；严禁洗稿/伪造指纹 | **已验收**（5 新项 + 真语料实测全绿） |
+| 21 | `core/bid_composer.py` | **E37/F8 正向编制输出** | 统一蓝图 IR（`BidBlueprint`/`BlueprintSection`）+ V1 0 幻觉确定性装配（封面/限价 Decimal 占位锁 `[待人工填报金额...]`/长期有效证照台账对齐/★▲偏离表预制/评分要点大纲）+ V2 可插拔 `KnowledgeSnippetProvider`（`LocalKnowledgeSnippetProvider` 防跨章污染并优雅回退 `outline_stub`）+ `export_composed_bid_docx`；协同 `core/redline.py::export_clean_revised_docx` 无损导出干净定稿 | **已验收**（4 新项 + 真语料正反双向实测全绿） |
 
 ---
 
@@ -145,7 +147,9 @@ BidGuard-Agent/
 6. **~~F7 问答工作台布局与并发增强（E28）~~ 已交付（主体 `1ba30e0` 已入库；重命名与 F1 概览条网格补强待确认 commit）**：在 `dff8855` 入库后按 `AGENTS.md` §三.4 串行完成 `QaChatView.vue` 多会话 `cachedRuntimes` Map 并发流式生成、同会话单流令牌约束、Antigravity 风格 `Pinned Conversations`（`localStorage` 按用户名隔离）与 `Projects` 树形侧栏、`.stream-grid-spinner` 活跃指示、`backend/routers/qa.py` `_QA_DB_WRITE_LOCK` 串行落库及 `backend/models.py` `PRAGMA busy_timeout=5000`，并追加 `PATCH /api/qa/sessions/{id}` 重命名、首问自动命名与 `ExtractView.vue` F1 概览条 3×2 Grid 对齐。
 7. **F2-2 / F2 阶段七/八已交付**：E7（`891b3ab`）、E8（`d56a9af`）、E9（`2137047`）、E13（`38bb1d1`）、E14（`e8d1465`）均已验收入库，11 份仿真语料相关算术盲区已清零。
 8. **~~E34 · F7 快速通道判定卡~~ 已验收入库（`7da711a`）**：元问题与基于 `prior_history` 的整理类请求首轮直出 `final (route="direct_meta")`，配 Python 确定性领域关键词单次回弹护栏（`MAX_UNGROUNDED_BOUNCE_PER_TURN = 1`）及全链路 `grounded=False / fast_path=True` 微标签持久化呈现。
-9. **~~E35 · 管理增强与部署诚实化卡~~ 已实现验证（工作区待确认 commit）**：生产空库 `SEED_DEMO_DATA=0` 分层保底建 `'默认机构'`/`admin`/中性规则且零演示泄漏、`401 USER_NOT_FOUND` 鉴权补漏、部门与账号 `username` 重命名 + 禁用账号隐藏、证照 OCR 来源标注 + 去假日期 + 长期有效全链路闭环。
+9. **~~E35 · 管理增强与部署诚实化卡~~ 已验收入库（`c913e40`）**：生产空库 `SEED_DEMO_DATA=0` 分层保底建 `'默认机构'`/`admin`/中性规则且零演示泄漏、`401 USER_NOT_FOUND` 鉴权补漏、部门与账号 `username` 重命名 + 禁用账号隐藏、证照 OCR 来源标注 + 去假日期 + 长期有效全链路闭环。
+10. **~~E36 · 多标书防雷同对比与合规清标体检卡~~ 已实现验证（工作区待确认 commit）**：`core/bid_similarity.py` 五维 0-Token 交叉比对引擎（剔除招标公共文本+脱敏+Decimal规律报价）+ `similarity_reports` 第 12 表 + `/api/similarity` 第 12 组路由 + `SimilarityCheckView.vue` 中性UI（严锁禁洗稿/禁篡改指纹）。
+11. **~~E37 · 标书编制输出与无损修订交付卡~~ 已实现验证（工作区待确认 commit）**：`core/bid_composer.py`（V1 正向骨架+台账/限价锁+V2 方案库可插拔槽位与回退）+ `core/redline.py::export_clean_revised_docx`（Run 级保样替换并清零 `w:comment*`/`comments*.xml`）+ `bid_compose_drafts` 第 13 表 + `/api/composer` 第 13 组路由 + `/api/reports/{id}/clean-bid`（`.pdf` 422 拦截）+ `BidComposerView.vue`（`/composer`）与详情/交付快捷入口。
 
 ---
 
@@ -191,14 +195,16 @@ BidGuard-Agent/
 | E32 | F7 轮数耗尽强制收口、登录页安全脱敏与轻量管理员用户管理卡：`core/bid_react_agent.py` 达到 `max_rounds` 后追加 1 次强制收口 LLM 调用（`_FORCED_WRAPUP_PROMPT` 防历史合同张冠李戴 + 强制 `verify_quote` + `forced_final` 与异常优雅降级透传 `BaseException`）；`/api/health` 与 `/api/auth/health` 下发 `show_demo_login`（联动 `SHOW_DEMO_LOGIN`+`SEED_DEMO_DATA`）+ `LoginView.vue` fail-closed 隐藏演示账号；新增 6 个 `require_admin` 部门/用户管理端点（`422 INVALID_ROLE` 白名单、`409 LAST_ADMIN_PROTECTED` 先于 `CANNOT_MODIFY_SELF` 防自锁双护栏、禁用即时 `401 USER_DISABLED` 与脱敏审计）+ `UserProfileOut.tenant_name` 动态部门显示 + `UsersManageView.vue`（`/users`） | **已验收入库（`804c45b`）** | 272 项 + `vue-tsc` + `vite build` |
 | E33 | F7 自主检索与并行工具调度卡：`core/bid_react_agent.py` 新增 `_extract_round_actions` 支持同轮批量 `actions`（上限 `MAX_PARALLEL_ACTIONS_PER_ROUND=4`）、`_dispatch_single_tool` + `ThreadPoolExecutor` 并发保序执行（单工具自愈 + `BaseException` 快速撤池透传）、`_EFFORT_UPSTREAM_MAP` 与 `max_rounds: Optional[int] = None` 解耦为 `low=7/medium=8/high=12`（兼容 E21 显式断言）及每轮剩余预算与偏移桶同源空转去重提示；`core/hybrid_retriever.py` 按 `doc_sha` 分段加锁+原子 `os.replace()` 写缓存；`backend/schemas.py` `QaAskRequest.max_rounds` 放宽至 `le=12`；前端 `types.ts`/`QaChatView.vue`/`ReActSteps.vue`/`QaMessageList.vue` 区分思考回合与执行步数并展示并行微标 | **已验收入库（`72cac30`）** | 280 项 + `vue-tsc` + `vite build` |
 | E34 | F7 快速通道判定卡：`core/bid_react_agent.py` 扩展 `_REACT_SYSTEM_PROMPT` 放行三类无须查标书的直答并置入 Python 确定性单次回弹护栏（`MAX_UNGROUNDED_BOUNCE_PER_TURN=1`，覆盖首轮 `final` 与纯文本裸答、要求 `bool(formatted_history)` 防空会话整理绕过、`r_idx < limit` 边界与带图附件免回弹），done 帧新增 `grounded/fast_path/route`；`backend/schemas.py` `QaAskResponseOut` 与 `backend/routers/qa.py`（`/ask`、`/ask/stream` 与 `messages_json` 持久化）全链路透传；前端 `types.ts`/`QaChatView.vue`/`QaMessageList.vue` 仅对 `grounded === false` 展示「未检索标书原文 · 仅供参考」徽标 | **已验收入库（`7da711a`）** | 286 项 + `vue-tsc` + `vite build` |
-| E35 | 管理增强与部署诚实化卡：`backend/database.py` 拆分 `ensure_bootstrap_admin()` 与 `seed_demo_data()`（`SEED_DEMO_DATA=0` 仅创建 `DEFAULT_TENANT_NAME` 默认 `'默认机构'` + `admin` + 中性空规则，零演示数据）；`backend/auth.py` 补齐 `get_current_user` 查库空用户即抛 `401 USER_NOT_FOUND`；新增 `PATCH /api/auth/tenants/{tenant_id}`（`rename_tenant` 审计）与 `PATCH /api/auth/users/{user_id}` 扩展 `username` 改名（`409`/`422`/`old_username`/`new_username` 审计）；`backend/models.py` 为 `CompanyCertificate` 新增 `is_long_term`、`ensure_company_certificates_e35_columns` 与 `auto_commit=False` `after_create` 事务修补；`backend/routers/rules.py`、`dashboard.py` 与 `core/qualification_scanner.py` 实现文件名兜底标注（`cert_name_source`）、长期 hint 正则及 `is_long_term` 全链路（哨兵 `9999-12-31` 对外屏蔽 `valid_until=None`）；前端 `UsersManageView.vue` / `RulesAndCertsView.vue` / `ExtractView.vue` 与部署模板/文档同步完成 | **工作区已完成待确认 commit** | **298 项** + `vue-tsc` + `vite build` |
+| E35 | 管理增强与部署诚实化卡：`backend/database.py` 拆分 `ensure_bootstrap_admin()` 与 `seed_demo_data()`（`SEED_DEMO_DATA=0` 仅创建 `DEFAULT_TENANT_NAME` 默认 `'默认机构'` + `admin` + 中性空规则，零演示数据）；`backend/auth.py` 补齐 `get_current_user` 查库空用户即抛 `401 USER_NOT_FOUND`；新增 `PATCH /api/auth/tenants/{tenant_id}`（`rename_tenant` 审计）与 `PATCH /api/auth/users/{user_id}` 扩展 `username` 改名（`409`/`422`/`old_username`/`new_username` 审计）；`backend/models.py` 为 `CompanyCertificate` 新增 `is_long_term`、`ensure_company_certificates_e35_columns` 与 `auto_commit=False` `after_create` 事务修补；`backend/routers/rules.py`、`dashboard.py` 与 `core/qualification_scanner.py` 实现文件名兜底标注（`cert_name_source`）、长期 hint 正则及 `is_long_term` 全链路（哨兵 `9999-12-31` 对外屏蔽 `valid_until=None`）；前端 `UsersManageView.vue` / `RulesAndCertsView.vue` / `ExtractView.vue` 与部署模板/文档同步完成 | **已验收入库（`c913e40`）** | 298 项 + `vue-tsc` + `vite build` |
+| E36 | 多标书交叉比对与相似度分析卡（防异常一致排查）：`core/bid_similarity.py` 五维 0-Token 引擎（docx/pdf 元数据与内嵌图哈希、剔除招标底稿 12-gram 与公文套话后 8-gram Jaccard 及连续 ≥25 字原句溯源、非标错名与身份证/手机号前 3 后 4 全链路脱敏、`Decimal` 规律性报价比例/差额与等差探测、导出《多标书交叉比对与相似度分析报告.docx》）；`similarity_reports` 第 12 表 + `/api/similarity` 第 12 组路由 + `SimilarityCheckView.vue`（`/similarity`）中性界面与全链路禁洗稿/禁篡改合规锁 | **工作区已完成待确认 commit** | **303 项** + `vue-tsc` + `vite build` |
+| E37 | 标书编制输出与无损修订交付卡（正向骨架 V1 + V2 方案库槽位 & Clean 定稿导出）：新增 `core/bid_composer.py` 统一蓝图 IR（封面与投标函、企业长期/常规证照台账对齐、`Decimal` 限价下的 `[待人工填报金额...]` 报价锁、★/▲ 实质性偏离表预制、按评分细则生成方案大纲及 V2 可插拔 `KnowledgeSnippetProvider` 并支持无资料回退 `outline_stub`）与 `export_composed_bid_docx`；`core/redline.py` 提取共享 `_locate_and_split_quote_runs` 并新增 `export_clean_revised_docx`（Run 级保样替换并清零全文及 ZIP 内 `w:comment*`/`comments*.xml`，漏应答诚实归入 `manual_pending_items`）；`bid_compose_drafts` 第 13 表 + `/api/composer` 第 13 组路由 + `/api/reports/{task_id}/clean-bid`（`.pdf` 返回 `422 PDF_CLEAN_EXPORT_UNSUPPORTED`）；前端 `BidComposerView.vue`（`/composer`）与详情/交付快捷入口全链路打通 | **工作区已完成待确认 commit** | **307 项** + `vue-tsc` + `vite build` |
 | chore | requirements 全量钉死（`59e6b64`）、基础镜像 digest 钉死、弹窗会话记忆 | `90a1947` | — |
 
 ---
 
 ## 7. 协作纪律与工程红线（完整版见 `AGENTS.md`）
 
-1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线已演进至 **298 项**（含 E35 新增 12 项部署诚实化、管理增强、安全断链与长期证照对账回归）。
+1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线已演进至 **307 项**（含 E36 5 项 + E37 4 项及 13 表检验）。
 2. **凡能算的绝不进大模型（0 Token 优先）**；金额全程 `Decimal` 禁 `float`（ROUND_HALF_UP 量化 0.01）。
 3. **LLM 只吃局部窗口 + 强制 `quote_verifier` 溯源**；严禁整本标书直塞。
 4. **宁缺毋滥显式降级**：无法对齐必返回 NEED_MANUAL；找不到位置绝不乱锚（E5 五级定位链 + 置信护栏）；页码诚实回退字符偏移并标"不一定准确"。
@@ -219,7 +225,7 @@ BidGuard-Agent/
 | `INTERFACE.md` | core↔backend 契约锁死 | 涉签名改动时同步 |
 | `FRONTEND.md` | 前端架构说明 | 前端结构变化时同步 |
 | `docs/DEPLOY.md` | 本机直跑 + Linux Docker/离线/裸机部署手册 | 部署变化时同步 |
-| `docs/cards/` | 任务卡归档（B1~E35，含 E36/E37 草案） | 每立卡/收卡时归档 |
+| `docs/cards/` | 任务卡归档（B1~E37 全套定稿与验收记录） | 每立卡/收卡时归档 |
 | `.workbuddy/memory/`（不入库） | 架构侧 AI 工作日志 | 每日实质工作后追加 |
 
 **冷启动口令**（新会话开场）：「先读取 AGENTS.md 和 HANDOVER.md，然后读 docs/cards/ 里最新一张卡，汇报理解后等我派活。」
@@ -228,7 +234,7 @@ BidGuard-Agent/
 
 ## 9. 本文档信息来源
 
-1. `docs/cards/` B1~E35 全部任务卡与验收记录（及 E36/E37 草案）；`派发归档/` 各阶段派发包全文
-2. Git 提交链（`git log --oneline`，已演进至 `7da711a` E34 终版；E35 · 管理增强与部署诚实化卡留在工作区待确认 commit）；298 项 pytest + `vue-tsc` + `vite build` 实测回执
+1. `docs/cards/` B1~E37 全部任务卡与验收记录；`派发归档/` 各阶段派发包全文
+2. Git 提交链（`git log --oneline`，已演进至 `c913e40` E35 终版；E36 与 E37 均已完成全量验证留在工作区待确认 commit）；307 项 pytest + `vue-tsc` + `vite build` 实测回执
 3. `data/corpus/m0_samples/` 三本账 + `语料清单.md`、`data/corpus/sim_bids/_README.md`；`data/corpus/regulations/` 法规种子
 4. `E:\agent\Contract-Review-Agent\HANDOVER_V2.md`（文档骨架参照）

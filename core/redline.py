@@ -16,8 +16,11 @@ import copy
 import datetime
 import difflib
 import io
+import json
 import os
+from pathlib import Path
 import re
+from typing import Any, Optional
 import zipfile
 
 import docx
@@ -145,23 +148,50 @@ def _make_comment_markers(comment_id: int):
     return start_el, end_el, ref_run
 
 
-def _iter_all_paragraphs(doc) -> list:
-    """收集文档正文段落与表格单元格内的段落（保持文档顺序）。"""
-    paras = list(doc.paragraphs)
-    for table in doc.tables:
+def _collect_container_paragraphs(container, paras: list, seen_p: set, seen_tc: set) -> None:
+    """按文档顺序递归收集容器内的段落（表格单元格按 cell._tc 本体去重，遵循 AGENTS.md §一.6）。"""
+    for p in getattr(container, 'paragraphs', []) or []:
+        if p._p not in seen_p:
+            seen_p.add(p._p)
+            paras.append(p)
+    for table in getattr(container, 'tables', []) or []:
         for row in table.rows:
             for cell in row.cells:
-                for p in cell.paragraphs:
-                    if p not in paras:
-                        paras.append(p)
+                if cell._tc in seen_tc:
+                    continue
+                seen_tc.add(cell._tc)
+                _collect_container_paragraphs(cell, paras, seen_p, seen_tc)
+
+
+def _iter_all_paragraphs(doc, include_headers_footers: bool = False) -> list:
+    """收集文档正文段落与表格单元格内的段落（保持文档顺序，可选含页眉/页脚）。"""
+    paras: list = []
+    seen_p: set = set()
+    seen_tc: set = set()
+    _collect_container_paragraphs(doc, paras, seen_p, seen_tc)
+    if include_headers_footers:
+        for sec in getattr(doc, 'sections', []) or []:
+            for attr in (
+                'header', 'footer',
+                'first_page_header', 'first_page_footer',
+                'even_page_header', 'even_page_footer',
+            ):
+                hf = getattr(sec, attr, None)
+                if hf is not None:
+                    _collect_container_paragraphs(hf, paras, seen_p, seen_tc)
     return paras
 
 
-def _try_attach_quote_in_paragraph(p, norm_quote: str, comment_id: int,
-                                   allow_longest_submatch: bool = False) -> bool:
-    """在单个段落 p 中按 normalize_zh 映射定位 norm_quote，支持单 Run 与跨 Run 切分包裹。"""
+def _locate_and_split_quote_runs(
+    p,
+    norm_quote: str,
+    *,
+    allow_longest_submatch: bool = False,
+    start_norm_offset: int = 0,
+) -> Optional[tuple[list, list[str], int, int, int, int]]:
+    """在单个段落 p 中按 normalize_zh 映射定位并切分 Run，返回 (text_runs, run_texts, start_run_idx, end_run_idx, match_idx, match_len)。"""
     if not norm_quote:
-        return False
+        return None
 
     text_runs = []
     run_texts = []
@@ -172,33 +202,33 @@ def _try_attach_quote_in_paragraph(p, norm_quote: str, comment_id: int,
             run_texts.append(raw_t)
 
     if not text_runs:
-        return False
+        return None
 
     norm_chars = []
     pos_map = []
     for r_idx, raw_t in enumerate(run_texts):
-        for c_idx, ch in enumerate(run_texts[r_idx]):
+        for c_idx, ch in enumerate(raw_t):
             n_ch = normalize_zh(ch)
             for sub_ch in n_ch:
                 norm_chars.append(sub_ch)
                 pos_map.append((r_idx, c_idx))
 
     norm_para = ''.join(norm_chars)
-    if not norm_para:
-        return False
+    if not norm_para or start_norm_offset >= len(norm_para):
+        return None
 
-    match_idx = norm_para.find(norm_quote)
+    match_idx = norm_para.find(norm_quote, max(0, start_norm_offset))
     match_len = len(norm_quote)
 
     if match_idx == -1 and allow_longest_submatch and len(norm_quote) >= 10:
         matcher = difflib.SequenceMatcher(None, norm_quote, norm_para, autojunk=False)
         longest = matcher.find_longest_match(0, len(norm_quote), 0, len(norm_para))
-        if longest.size >= max(8, int(len(norm_quote) * 0.75)):
+        if longest.size >= max(8, int(len(norm_quote) * 0.75)) and longest.b >= start_norm_offset:
             match_idx = longest.b
             match_len = longest.size
 
     if match_idx == -1 or match_len <= 0:
-        return False
+        return None
 
     start_run_idx, start_char_idx = pos_map[match_idx]
     end_run_idx, end_char_idx = pos_map[match_idx + match_len - 1]
@@ -222,6 +252,24 @@ def _try_attach_quote_in_paragraph(p, norm_quote: str, comment_id: int,
         start_r_el.addprevious(prefix_r_el)
         _set_run_text(start_r_el, target_text)
         run_texts[start_run_idx] = target_text
+
+    return text_runs, run_texts, start_run_idx, end_run_idx, match_idx, match_len
+
+
+def _try_attach_quote_in_paragraph(p, norm_quote: str, comment_id: int,
+                                   allow_longest_submatch: bool = False) -> bool:
+    """在单个段落 p 中按 normalize_zh 映射定位 norm_quote，支持单 Run 与跨 Run 切分包裹。"""
+    located = _locate_and_split_quote_runs(
+        p,
+        norm_quote,
+        allow_longest_submatch=allow_longest_submatch,
+    )
+    if located is None:
+        return False
+
+    text_runs, _run_texts, start_run_idx, end_run_idx, _m_idx, _m_len = located
+    start_r_el = text_runs[start_run_idx]
+    end_r_el = text_runs[end_run_idx]
 
     start_el, end_el, ref_run = _make_comment_markers(comment_id)
     start_r_el.addprevious(start_el)
@@ -401,6 +449,318 @@ def inject_word_comments(src_docx_path: str, findings: list,
         with open(out_docx_path, 'wb') as f:
             f.write(result_bytes)
     return result_bytes
+
+
+# ---------------------------------------------------------------- E37 原位无损修订导出 Clean 定稿
+
+_COMMENT_TAG_LOCALNAMES = frozenset({
+    'commentRangeStart',
+    'commentRangeEnd',
+    'commentReference',
+})
+_KEEP_RUN_CHILD_LOCALNAMES = frozenset({
+    't', 'drawing', 'pict', 'br', 'tab', 'sym', 'object', 'cr', 'noBreakHyphen',
+})
+_COMMENT_PART_RE = re.compile(r'^word/(?:_rels/)?comments[^/]*\.xml(?:\.rels)?$', re.IGNORECASE)
+
+
+def _xml_localname(tag: str) -> str:
+    if '}' in tag:
+        return tag.split('}', 1)[1]
+    return tag
+
+
+def _strip_comments_from_word_xml_bytes(xml_bytes: bytes) -> bytes:
+    """移除任意 Word XML 部件中的 w:commentRangeStart / End / Reference 及孤立批注引用 Run。"""
+    try:
+        root = ET.fromstring(xml_bytes)
+    except Exception:
+        return xml_bytes
+
+    changed = False
+    to_remove: list[Any] = []
+    candidate_runs: list[Any] = []
+
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
+        lname = _xml_localname(el.tag)
+        if lname in _COMMENT_TAG_LOCALNAMES:
+            if lname == 'commentReference':
+                parent = el.getparent()
+                if parent is not None and _xml_localname(parent.tag) == 'r':
+                    candidate_runs.append(parent)
+            to_remove.append(el)
+
+    for el in to_remove:
+        parent = el.getparent()
+        if parent is not None:
+            parent.remove(el)
+            changed = True
+
+    seen_runs: set[Any] = set()
+    for r_el in candidate_runs:
+        if r_el in seen_runs or r_el.getparent() is None:
+            continue
+        seen_runs.add(r_el)
+        has_content = any(
+            isinstance(ch.tag, str) and _xml_localname(ch.tag) in _KEEP_RUN_CHILD_LOCALNAMES
+            for ch in r_el
+        )
+        if not has_content:
+            r_el.getparent().remove(r_el)
+            changed = True
+
+    if not changed:
+        return xml_bytes
+    return ET.tostring(root, xml_declaration=True, encoding='UTF-8', standalone='yes')
+
+
+def _strip_comments_from_content_types_xml(ct_bytes: bytes) -> bytes:
+    """从 [Content_Types].xml 清理 /word/comments*.xml Override 声明。"""
+    try:
+        root = ET.fromstring(ct_bytes)
+    except Exception:
+        return ct_bytes
+    changed = False
+    for child in list(root):
+        if not isinstance(child.tag, str) or _xml_localname(child.tag) != 'Override':
+            continue
+        pname = (child.get('PartName') or '').lower()
+        if pname.startswith('/word/comments'):
+            root.remove(child)
+            changed = True
+    return ET.tostring(root, xml_declaration=True, encoding='UTF-8', standalone='yes') if changed else ct_bytes
+
+
+def _strip_comments_from_rels_xml(rels_bytes: bytes) -> bytes:
+    """从 .rels 清理 comments 关联关系。"""
+    try:
+        root = ET.fromstring(rels_bytes)
+    except Exception:
+        return rels_bytes
+    changed = False
+    for child in list(root):
+        if not isinstance(child.tag, str) or _xml_localname(child.tag) != 'Relationship':
+            continue
+        rel_type = (child.get('Type') or '').lower()
+        target = (child.get('Target') or '').lower()
+        if 'comments' in rel_type or 'comments' in os.path.basename(target):
+            root.remove(child)
+            changed = True
+    return ET.tostring(root, xml_declaration=True, encoding='UTF-8', standalone='yes') if changed else rels_bytes
+
+
+def _strip_comments_from_docx_zip(docx_bytes: bytes) -> bytes:
+    """无损剥离 .docx 压缩包内全部 Word 批注标记、关系及 comments*.xml 部件。"""
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(docx_bytes), 'r') as zin:
+        with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for info in zin.infolist():
+                fname = info.filename
+                if _COMMENT_PART_RE.match(fname):
+                    continue
+                data = zin.read(fname)
+                low = fname.lower()
+                if low == '[content_types].xml':
+                    data = _strip_comments_from_content_types_xml(data)
+                elif low.endswith('.rels'):
+                    data = _strip_comments_from_rels_xml(data)
+                elif low.startswith('word/') and low.endswith('.xml'):
+                    data = _strip_comments_from_word_xml_bytes(data)
+                zout.writestr(info, data)
+    return out_buf.getvalue()
+
+
+def _replace_quote_in_paragraph(p, norm_target: str, replacement_text: str) -> int:
+    """在段落 p 内按 Run 级无损替换全部精确命中的 norm_target（保留首 Run <w:rPr> 样式）。"""
+    if not norm_target:
+        return 0
+    replaced_count = 0
+    cursor_norm = 0
+    norm_rep_len = max(1, len(normalize_zh(replacement_text)))
+    for _ in range(50):
+        located = _locate_and_split_quote_runs(
+            p,
+            norm_target,
+            allow_longest_submatch=False,
+            start_norm_offset=cursor_norm,
+        )
+        if located is None:
+            break
+        text_runs, _run_texts, start_idx, end_idx, match_idx, _match_len = located
+        start_r_el = text_runs[start_idx]
+        _set_run_text(start_r_el, replacement_text)
+        for k in range(start_idx + 1, end_idx + 1):
+            r_el = text_runs[k]
+            parent = r_el.getparent()
+            if parent is not None:
+                parent.remove(r_el)
+        replaced_count += 1
+        cursor_norm = match_idx + norm_rep_len
+    return replaced_count
+
+
+def _finding_attr(item: Any, key: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(key, default)
+    return getattr(item, key, default)
+
+
+def _parse_finding_detail(item: Any) -> dict[str, Any]:
+    raw = _finding_attr(item, 'detail_json', None)
+    if raw is None:
+        raw = _finding_attr(item, 'detail', None)
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            obj = json.loads(raw)
+            return obj if isinstance(obj, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def export_clean_revised_docx(
+    bid_docx_path: str | Path,
+    accepted_findings: list[Any],
+    output_path: str | Path,
+    *,
+    replacements: Optional[dict[Any, str]] = None,
+) -> dict[str, Any]:
+    """E37 §3.2：对已采纳整改项执行 Run 级原位无损替换并剥离全部 w:comment* XML，生成干净定稿 .docx。
+
+    宁缺毋滥铁律：
+    - 仅当具备明确替换靶标（前端显式传入 replacements[finding_id] 或明确安全规则）且能精确命中原文时执行替换；
+    - 缺失确定替换值或大段漏应答（如 MISSING_RESPONSE）绝不编造正文，诚实收入 manual_pending_items；
+    - 彻底保留原 .docx 封面、页眉/页脚、签章定位与表格样式，并清理一切残余 Word 批注气泡与标签。
+    """
+    src_p = Path(bid_docx_path)
+    if not str(bid_docx_path or '').strip() or not src_p.is_file():
+        raise RuntimeError(f"Word 源文件不存在：{bid_docx_path}")
+    if src_p.suffix.lower() != '.docx':
+        raise RuntimeError(f"仅支持 .docx 格式原件进行无损修订导出：{src_p.name}")
+    if accepted_findings is None or not isinstance(accepted_findings, (list, tuple)):
+        raise TypeError("accepted_findings 必须为 list 或 tuple")
+
+    src_bytes = src_p.read_bytes()
+    # 先剥离批注节点，避免先前 inject_word_comments 的 w:commentReference 干扰 Run 文本切分
+    clean_input_bytes = _strip_comments_from_docx_zip(src_bytes)
+    try:
+        doc = docx.Document(io.BytesIO(clean_input_bytes))
+    except Exception as exc:
+        raise RuntimeError(f"无法解析 .docx 文件（格式损坏或非法）：{src_p}: {exc}") from exc
+
+    rep_map: dict[str, str] = {}
+    for k, v in (replacements or {}).items():
+        if v is None:
+            continue
+        val_s = str(v)
+        if val_s.strip():
+            rep_map[str(k)] = val_s
+
+    all_paragraphs = _iter_all_paragraphs(doc, include_headers_footers=True)
+    applied_items: list[dict[str, Any]] = []
+    manual_pending_items: list[dict[str, Any]] = []
+
+    for item in accepted_findings:
+        fid = _finding_attr(item, 'id')
+        code = str(_finding_attr(item, 'code', '') or '').strip()
+        severity = str(_finding_attr(item, 'severity', 'warning') or 'warning').strip()
+        clause_no = str(_finding_attr(item, 'clause_no', '') or '全文').strip()
+        message = str(_finding_attr(item, 'message', '') or '').strip()
+        suggestion = str(_finding_attr(item, 'suggestion', '') or '').strip()
+        bid_quote = str(_finding_attr(item, 'bid_quote', '') or '').strip()
+        quote = str(_finding_attr(item, 'quote', '') or '').strip()
+        detail = _parse_finding_detail(item)
+
+        old_target = str(
+            _finding_attr(item, 'target_text')
+            or detail.get('wrong_text')
+            or detail.get('stale_name')
+            or bid_quote
+            or quote
+            or ''
+        ).strip()
+
+        new_text: Optional[str] = None
+        if fid is not None and str(fid) in rep_map:
+            new_text = rep_map[str(fid)]
+        elif code != 'MISSING_RESPONSE':
+            explicit_inline = (
+                _finding_attr(item, 'replacement')
+                or detail.get('replacement')
+                or detail.get('new_text')
+            )
+            if isinstance(explicit_inline, str) and explicit_inline.strip():
+                new_text = explicit_inline
+            elif code in ('CROSS_PROJECT_NAME', 'STALE_PROJECT_NAME'):
+                target_proj = detail.get('target_project_name') or detail.get('expected_name')
+                if isinstance(target_proj, str) and target_proj.strip():
+                    new_text = target_proj.strip()
+
+        def _append_pending(reason_text: str) -> None:
+            manual_pending_items.append({
+                'finding_id': fid,
+                'code': code,
+                'severity': severity,
+                'clause_no': clause_no,
+                'quote': old_target or quote or bid_quote,
+                'message': message,
+                'suggestion': suggestion,
+                'reason': reason_text,
+            })
+
+        if not new_text or not new_text.strip():
+            reason = (
+                '大段漏应答/结构性缺项需人工补写响应正文，系统未自动改写原稿'
+                if code == 'MISSING_RESPONSE'
+                else '未提供明确替换文本，已保留原文待人工修改'
+            )
+            _append_pending(reason)
+            continue
+
+        if not old_target:
+            _append_pending('该发现缺少原文定位片段，无法执行安全原位替换')
+            continue
+
+        norm_target = normalize_zh(old_target)
+        if not norm_target:
+            _append_pending('定位片段归一化后为空，无法安全替换')
+            continue
+
+        occ_total = 0
+        for p in all_paragraphs:
+            occ_total += _replace_quote_in_paragraph(p, norm_target, new_text)
+
+        if occ_total > 0:
+            applied_items.append({
+                'finding_id': fid,
+                'code': code,
+                'clause_no': clause_no,
+                'old_text': old_target,
+                'new_text': new_text,
+                'occurrences': occ_total,
+            })
+        else:
+            _append_pending('未能在 Word 原文中精确命中该片段，已跳过替换以保护原排版')
+
+    mid_buf = io.BytesIO()
+    doc.save(mid_buf)
+    final_bytes = _strip_comments_from_docx_zip(mid_buf.getvalue())
+
+    out_p = Path(output_path)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    out_p.write_bytes(final_bytes)
+
+    return {
+        'output_path': str(out_p),
+        'applied_count': len(applied_items),
+        'manual_pending_count': len(manual_pending_items),
+        'applied_items': applied_items,
+        'manual_pending_items': manual_pending_items,
+    }
 
 
 # ---------------------------------------------------------------- PDF 高亮批注与 E5 多级定位增强实现

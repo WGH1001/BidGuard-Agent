@@ -804,6 +804,172 @@ export interface RegulationCrawlOut {
   results: CrawlSourceResultItem[]
 }
 
+// ── 13. E36 多标书交叉比对 (/api/similarity) ─────────────────────────────
+export type SimilarityRiskLevel = 'low' | 'medium' | 'high'
+
+export interface SimilarityBidderOut {
+  index: number
+  label: string
+  filename: string
+  chars: number
+  net_chars: number
+  pages: number
+  metadata: Record<string, unknown>
+  media_count: number
+  bid_total?: string | null
+}
+
+export interface SimilaritySharedPassageItem {
+  norm_chars: number
+  a_quote: string
+  a_offset: number
+  a_page?: number | null
+  b_quote: string
+  b_offset: number
+  b_page?: number | null
+}
+
+export interface SimilarityPairOut {
+  a_index: number
+  b_index: number
+  a_label: string
+  b_label: string
+  net_similarity_pct: number
+  raw_similarity_pct: number
+  risk_level: SimilarityRiskLevel
+  shared_passage_count: number
+  shared_passages: SimilaritySharedPassageItem[]
+}
+
+export interface SimilarityFindingOut {
+  code: string
+  severity: SeverityType
+  dimension: string
+  a_label: string
+  b_label: string
+  message: string
+  detail: Record<string, unknown>
+}
+
+export interface SimilarityReportSummaryOut {
+  id: number
+  tenant_id: number
+  user_id?: number | null
+  title: string
+  tender_filename?: string | null
+  bidder_count: number
+  max_similarity_pct: number
+  risk_level: SimilarityRiskLevel
+  finding_count: number
+  created_at?: string | null
+}
+
+export interface SimilarityReportDetailOut extends SimilarityReportSummaryOut {
+  bidders: SimilarityBidderOut[]
+  pair_matrix: SimilarityPairOut[]
+  findings: SimilarityFindingOut[]
+  export_url: string
+}
+
+export interface SimilarityReportListOut {
+  total: number
+  items: SimilarityReportSummaryOut[]
+}
+
+export type ComposeModeType = 'skeleton_v1' | 'knowledge_draft_v2'
+
+export interface ComposeManualItem {
+  section_id: string
+  field: string
+  reason: string
+  hint: string
+}
+
+export interface ComposeBlueprintSection {
+  section_id: string
+  title: string
+  slot_type: string
+  fill_mode: string
+  tender_requirements: Array<Record<string, unknown>>
+  content_blocks: Array<Record<string, unknown>>
+  needs_manual_items: ComposeManualItem[]
+  source_refs: Array<Record<string, unknown>>
+}
+
+export interface ComposeBlueprintData {
+  project_name: string
+  project_code: string
+  buyer_name: string
+  open_date?: string | null
+  open_date_source?: string | null
+  price_cap?: string | null
+  package_no?: number | null
+  compose_mode: ComposeModeType
+  tender_filename: string
+  sections: ComposeBlueprintSection[]
+  manual_checklist: ComposeManualItem[]
+  cert_match_summary: Record<string, unknown>
+  stats: Record<string, unknown>
+}
+
+export interface ComposeDraftSummaryOut {
+  id: number
+  tenant_id: number
+  user_id?: number | null
+  title: string
+  tender_filename: string
+  compose_mode: ComposeModeType
+  project_name: string
+  project_code: string
+  open_date?: string | null
+  price_cap?: string | null
+  manual_item_count: number
+  scoring_fill_mode: string
+  stats: Record<string, unknown>
+  download_url: string
+  created_at?: string | null
+}
+
+export interface ComposeDraftDetailOut extends ComposeDraftSummaryOut {
+  blueprint: ComposeBlueprintData | Record<string, unknown>
+}
+
+export interface ComposeDraftListOut {
+  total: number
+  items: ComposeDraftSummaryOut[]
+}
+
+export interface CleanBidAppliedItemOut {
+  finding_id?: number | null
+  code: string
+  clause_no: string
+  old_text: string
+  new_text: string
+  occurrences: number
+}
+
+export interface CleanBidPendingItemOut {
+  finding_id?: number | null
+  code: string
+  severity: string
+  clause_no: string
+  quote: string
+  message: string
+  suggestion: string
+  reason: string
+}
+
+export interface CleanBidExportOut {
+  task_id: number
+  output_filename: string
+  output_path: string
+  download_url: string
+  applied_count: number
+  manual_pending_count: number
+  applied_items: CleanBidAppliedItemOut[]
+  manual_pending_items: CleanBidPendingItemOut[]
+}
+
 export interface PageFormatOptions {
   isDocx?: boolean
   footerPage?: number | null

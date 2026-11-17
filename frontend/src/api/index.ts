@@ -18,6 +18,9 @@ import type {
   CertificateParseOut,
   CertificateUpsertRequest,
   ChangePasswordRequest,
+  CleanBidExportOut,
+  ComposeDraftDetailOut,
+  ComposeDraftListOut,
   DashboardStatsOut,
   DeliverIncludeKey,
   DeviationExportOut,
@@ -45,6 +48,8 @@ import type {
   RegulationLawDetailOut,
   RegulationLawOut,
   RunTaskTriggerOut,
+  SimilarityReportDetailOut,
+  SimilarityReportListOut,
   TenantCreateRequest,
   TenantOut,
   TenantUpdateRequest,
@@ -465,6 +470,21 @@ export const reportsApi = {
   downloadRedline(taskId: number, fallbackName = `${taskId}_标红原件.docx`): Promise<string> {
     return downloadFromApi(`/reports/${taskId}/redline`, fallbackName)
   },
+  exportCleanBid(
+    taskId: number,
+    payload: { replacements?: Record<number, string>; finding_ids?: number[] } = {},
+  ): Promise<CleanBidExportOut> {
+    return post<CleanBidExportOut>(`/reports/${taskId}/clean-bid`, {
+      replacements: payload.replacements || {},
+      ...(payload.finding_ids ? { finding_ids: payload.finding_ids } : {}),
+    })
+  },
+  downloadCleanBid(
+    taskId: number,
+    fallbackName = `${taskId}_修订定稿版投标书.docx`,
+  ): Promise<string> {
+    return downloadFromApi(`/reports/${taskId}/clean-bid/download`, fallbackName)
+  },
   downloadSignoff(
     taskId: number,
     fallbackName = `${taskId}_封标前人工终核签字确认单.docx`,
@@ -553,5 +573,91 @@ export const regulationsApi = {
   },
   deleteArticle(articleId: number): Promise<OkResponse> {
     return del<OkResponse>(`/regulations/articles/${articleId}`)
+  },
+}
+
+/** E36 多标书交叉比对 API (/api/similarity) */
+export const similarityApi = {
+  compare(payload: {
+    bidFiles: File[]
+    labels?: string[]
+    tenderFile?: File | null
+    title?: string
+  }): Promise<SimilarityReportDetailOut> {
+    const fd = new FormData()
+    for (const f of payload.bidFiles) {
+      fd.append('bid_files', f, f.name)
+    }
+    if (payload.tenderFile) {
+      fd.append('tender_file', payload.tenderFile, payload.tenderFile.name)
+    }
+    if (payload.title && payload.title.trim()) {
+      fd.append('title', payload.title.trim())
+    }
+    if (payload.labels && payload.labels.length > 0) {
+      fd.append('labels_json', JSON.stringify(payload.labels))
+    }
+    return post<SimilarityReportDetailOut>('/similarity/compare', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000,
+    })
+  },
+  list(): Promise<SimilarityReportListOut> {
+    return get<SimilarityReportListOut>('/similarity')
+  },
+  detail(reportId: number): Promise<SimilarityReportDetailOut> {
+    return get<SimilarityReportDetailOut>(`/similarity/${reportId}`)
+  },
+  downloadReport(reportId: number, fallbackName = `比对报告_${reportId}.docx`): Promise<string> {
+    return downloadFromApi(`/similarity/${reportId}/export`, fallbackName)
+  },
+  remove(reportId: number): Promise<OkResponse> {
+    return del<OkResponse>(`/similarity/${reportId}`)
+  },
+}
+
+/** E37 标书编制输出与无损修订中心 API (/api/composer) */
+export const composerApi = {
+  generate(payload: {
+    tenderFile?: File | null
+    taskId?: number | null
+    knowledgeFiles?: File[]
+    composeMode?: 'skeleton_v1' | 'knowledge_draft_v2'
+    title?: string
+    packageNo?: number | null
+  }): Promise<ComposeDraftDetailOut> {
+    const fd = new FormData()
+    if (payload.tenderFile) {
+      fd.append('tender_file', payload.tenderFile, payload.tenderFile.name)
+    }
+    if (typeof payload.taskId === 'number' && payload.taskId > 0) {
+      fd.append('task_id', String(payload.taskId))
+    }
+    for (const kf of payload.knowledgeFiles || []) {
+      fd.append('knowledge_files', kf, kf.name)
+    }
+    fd.append('compose_mode', payload.composeMode || 'skeleton_v1')
+    if (payload.title && payload.title.trim()) {
+      fd.append('title', payload.title.trim())
+    }
+    if (typeof payload.packageNo === 'number' && payload.packageNo > 0) {
+      fd.append('package_no', String(payload.packageNo))
+    }
+    return post<ComposeDraftDetailOut>('/composer/generate', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000,
+    })
+  },
+  listDrafts(): Promise<ComposeDraftListOut> {
+    return get<ComposeDraftListOut>('/composer/drafts')
+  },
+  getDraft(draftId: number): Promise<ComposeDraftDetailOut> {
+    return get<ComposeDraftDetailOut>(`/composer/drafts/${draftId}`)
+  },
+  downloadDraft(draftId: number, fallbackName = `${draftId}_投标文件初稿骨架.docx`): Promise<string> {
+    return downloadFromApi(`/composer/drafts/${draftId}/download`, fallbackName)
+  },
+  deleteDraft(draftId: number): Promise<OkResponse> {
+    return del<OkResponse>(`/composer/drafts/${draftId}`)
   },
 }

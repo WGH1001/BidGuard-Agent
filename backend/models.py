@@ -57,6 +57,8 @@ class Tenant(Base):
     tasks = relationship('BidCheckTask', back_populates='tenant', cascade='all, delete-orphan')
     rule_configs = relationship('BidRuleConfig', back_populates='tenant', cascade='all, delete-orphan')
     certificates = relationship('CompanyCertificate', back_populates='tenant', cascade='all, delete-orphan')
+    similarity_reports = relationship('SimilarityReport', back_populates='tenant', cascade='all, delete-orphan')
+    compose_drafts = relationship('BidComposeDraft', back_populates='tenant', cascade='all, delete-orphan')
 
 
 # ── 2. users（用户与角色鉴权表）──────────────────────────────────────────
@@ -336,6 +338,47 @@ class RegulationArticle(Base):
     updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
 
     law = relationship('RegulationLaw', back_populates='articles')
+
+
+# ── 12. similarity_reports（E36 多标书交叉比对与相似度分析报告表）──────────
+class SimilarityReport(Base):
+    __tablename__ = 'similarity_reports'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    title = Column(String(256), nullable=False)
+    tender_filename = Column(String(256), nullable=True)
+    tender_path = Column(String(512), nullable=True)
+    bidders_json = Column(JSON, nullable=False, default=list)
+    pair_matrix_json = Column(JSON, nullable=False, default=list)
+    findings_json = Column(JSON, nullable=False, default=list)
+    max_similarity_pct = Column(Numeric(5, 2), nullable=False, default=Decimal('0.00'))
+    risk_level = Column(String(16), nullable=False, default='low')  # 'low' | 'medium' | 'high'
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
+    updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
+
+    tenant = relationship('Tenant', back_populates='similarity_reports')
+
+
+# ── 13. bid_compose_drafts（E37 标书编制输出与蓝图草稿表）───────────────────
+class BidComposeDraft(Base):
+    __tablename__ = 'bid_compose_drafts'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    title = Column(String(256), nullable=False)
+    tender_filename = Column(String(256), nullable=False)
+    tender_path = Column(String(512), nullable=False)
+    compose_mode = Column(String(32), nullable=False, default='skeleton_v1')  # 'skeleton_v1' | 'knowledge_draft_v2'
+    blueprint_json = Column(JSON, nullable=False, default=dict)
+    output_path = Column(String(512), nullable=False, default='')
+    stats_json = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
+    updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
+
+    tenant = relationship('Tenant', back_populates='compose_drafts')
 
 
 # ── E11 老库平滑加列守卫（无 Alembic 环境下自动探测缺列并执行 ALTER TABLE）────

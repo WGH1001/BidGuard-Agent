@@ -77,7 +77,7 @@ def test_nine_tables_created_and_schema_matches_interface(db_session):
     eng, session = db_session
     inspector = inspect(eng)
     actual_tables = set(inspector.get_table_names())
-    # E4 起扩容为 11 张表：B1 原有 9 张 + 法规库 2 张（regulation_laws / regulation_articles）
+    # E4 起扩容为 11 张表，E36 扩容为 12 张表（similarity_reports），E37 扩容为 13 张表（bid_compose_drafts）
     expected_tables = {
         'tenants',
         'users',
@@ -90,9 +90,11 @@ def test_nine_tables_created_and_schema_matches_interface(db_session):
         'user_model_configs',
         'regulation_laws',
         'regulation_articles',
+        'similarity_reports',
+        'bid_compose_drafts',
     }
     assert actual_tables == expected_tables
-    assert len(actual_tables) == 11
+    assert len(actual_tables) == 13
 
     # 逐表核对 INTERFACE.md §2 关键字段
     expected_cols = {
@@ -134,6 +136,16 @@ def test_nine_tables_created_and_schema_matches_interface(db_session):
         'user_model_configs': {
             'id', 'user_id', 'base_url', 'api_key_encrypted', 'model_flash',
             'model_flagship', 'supports_reasoning_effort', 'created_at', 'updated_at',
+        },
+        'similarity_reports': {
+            'id', 'tenant_id', 'user_id', 'title', 'tender_filename', 'tender_path',
+            'bidders_json', 'pair_matrix_json', 'findings_json', 'max_similarity_pct',
+            'risk_level', 'created_at', 'updated_at',
+        },
+        'bid_compose_drafts': {
+            'id', 'tenant_id', 'user_id', 'title', 'tender_filename', 'tender_path',
+            'compose_mode', 'blueprint_json', 'output_path', 'stats_json',
+            'created_at', 'updated_at',
         },
     }
     for tbl_name, req_cols in expected_cols.items():

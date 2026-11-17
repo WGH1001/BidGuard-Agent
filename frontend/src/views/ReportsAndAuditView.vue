@@ -199,6 +199,29 @@ async function handleDownloadDeliverZip(task: Partial<BidTaskOut>): Promise<void
   }
 }
 
+async function handleExportCleanBidRow(task: Partial<BidTaskOut>): Promise<void> {
+  if (task.id === undefined) return
+  const key = `${task.id}_clean`
+  if (busyDownload.value[key]) return
+  if (task.bid_filename?.toLowerCase().endsWith('.pdf')) {
+    ElMessage.warning('PDF 原件不支持安全无损修订导出，请使用 Word (.docx) 原件在编制中心操作')
+    return
+  }
+  busyDownload.value[key] = true
+  try {
+    const res = await reportsApi.exportCleanBid(task.id, {})
+    await reportsApi.downloadCleanBid(
+      task.id,
+      `${task.title}_修订定稿版投标书.docx`,
+    )
+    ElMessage.success(
+      `已生成 Clean 定稿（原位替换 ${res.applied_count} 处，待人工 ${res.manual_pending_count} 项）`,
+    )
+  } finally {
+    busyDownload.value[key] = false
+  }
+}
+
 async function handleDeleteDeliveredTask(task: Partial<BidTaskOut>): Promise<void> {
   if (task.id === undefined) return
   if (task.status && ['extracting', 'checking', 'grading'].includes(task.status)) {
@@ -420,6 +443,15 @@ onMounted(() => {
                       @click="handleDownloadDeliverZip(row)"
                     >
                       交付包 ZIP
+                    </el-button>
+                    <el-button
+                      size="small"
+                      type="primary"
+                      plain
+                      :loading="Boolean(busyDownload[`${row.id}_clean`])"
+                      @click="handleExportCleanBidRow(row)"
+                    >
+                      Clean 定稿
                     </el-button>
                     <el-button
                       size="small"

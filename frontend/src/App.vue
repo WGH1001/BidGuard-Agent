@@ -28,6 +28,8 @@ const NAV_ITEMS: NavItem[] = [
   { path: '/deviation', label: '偏离表一键生成', badge: 'F5', group: 'core' },
   { path: '/radar', label: '投前控标雷达', badge: 'F6', group: 'core' },
   { path: '/qa', label: '标书专家追问', badge: 'F7', group: 'core' },
+  { path: '/similarity', label: '多标书交叉比对', badge: '查重对比', group: 'core' },
+  { path: '/composer', label: '标书编制输出中心', badge: 'F8 编制', group: 'core' },
   { path: '/rules', label: '废标规则与证照底表', group: 'asset' },
   { path: '/reports', label: '封标交付中心与审计', group: 'asset' },
   { path: '/users', label: '部门与账号管理', group: 'system', adminOnly: true },
