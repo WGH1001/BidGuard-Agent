@@ -57,7 +57,7 @@
 | | `GET /api/reports/audit-logs`（admin，403 拦 member） | 安全操作审计留痕列表 |
 | | `GET /api/reports/audit-logs/export`（admin） | 导出 UTF-8 BOM CSV 审计日志（带公式注入转义） |
 | 交叉比对 (E36/E38) | `POST /api/similarity/compare`、`POST /api/similarity/{id}/cancel`、`GET /api/similarity`、`GET /api/similarity/{id}`、`GET /api/similarity/{id}/export`、`DELETE /api/similarity/{id}` | 多标书五维查重对比（**仅卡 `>=2` 份、解除 6 份上限**）、可选 `enable_ai_review` 语义同构复核与 `async_run` 后台异步队列、中断取消、分析报告（含第五章 AI 综述）导出与级联清理 |
-| 编制输出 (E37/E38) | `GET/POST /api/composer/skills`、`PUT/DELETE /api/composer/skills/{id}`、`POST /api/composer/skills/preview-url\|import-url\|import-file`、`POST /api/composer/generate`、`POST /api/composer/drafts/{id}/cancel`、`GET /api/composer/drafts`、`GET /api/composer/drafts/{id}`、`GET /api/composer/drafts/{id}/download`、`DELETE /api/composer/drafts/{id}` | 写作 Skills 管理（内置 3 套 + GitHub/Gitee 预览降级导入 + 本地 `.md`/`.json` 上传）、AI 依据 Skill 动态构章与分节撰稿（`skill_id` / `use_ai` / `async_run` 后台不中断）、独立居中封面与原生 Heading/TOC 导出及删盘 |
+| 编制输出 (E37/E38/E41) | `GET/POST /api/composer/skills`、`PUT/DELETE /api/composer/skills/{id}`、`POST /api/composer/skills/preview-url\|import-url\|import-file`、`GET /api/composer/indicators?biz_line=`、`POST /api/composer/generate`、`POST /api/composer/drafts/{id}/cancel`、`GET /api/composer/drafts`、`GET /api/composer/drafts/{id}`、`GET /api/composer/drafts/{id}/download`、`DELETE /api/composer/drafts/{id}` | 写作 Skills 管理（内置 5 套含 `general/security/maas` 三业务线 + GitHub/Gitee 预览降级导入 + 本地 `.md`/`.json` 上传）、业务线核心指标与评分标准参考预览、AI 依据 Skill 与指标库动态构章撰稿（`skill_id` / `use_ai` / `use_indicator_library` / `async_run` 后台不中断）、独立居中封面与原生 Heading/TOC 导出及删盘 |
 | 模型配置 | `GET/PUT /api/model-config`、`DELETE /api/model-config`、`POST /api/model-config/test` | PUT 入参 `{base_url,api_key,model_flash,model_flagship,supports_reasoning_effort,supports_vision}`；**响应永不回显明文 Key** |
 
 文件下载统一走 `GET /api/files/{相对路径}`（已做租户归属校验，跨租户 404）。
@@ -85,7 +85,7 @@ event: error      data: {"task_id":1,"status":"failed","error_msg":"..."}
 5. `RadarView`：/api/radar 上传 → 疑似参数卡片流 + 结论横幅（"疑似"标注）+ 单条重扫与开标日期显化；
 6. `QaChatView`：/api/qa 全组——会话侧栏（KeepAlive 切页防丢）+ 多文件/图片附件上传 + 消息流（ReAct 思考轨迹 SSE 流式直播 + 7 工具折叠面板 + quotes 溯源卡 + 0-Token 动态快捷追问）；
 7. `SimilarityCheckView`（`/similarity`，E36/E38）：/api/similarity——`>=2` 份无限数量标书对比+可选招标书剥离公共条款+可选 AI 语义深层复核与误报排查、后台队列进度条与中断（`<keep-alive>` 切页不中断）、矩阵热力与脱敏证据，中性「多标书交叉比对」界面（禁洗稿）；
-8. `BidComposerView`（`/composer`，E37/E38/E39）：/api/composer + `/api/reports/{id}/clean-bid`——Tab 1 正向初稿（Skill 写作规范选择与 GitHub/Gitee/本地上传管理弹窗 + AI 动态规划与撰稿开关 + 后台队列进度/中断 + `<keep-alive>` + 紧凑分组待填抽屉 + 资格证照角色合并与逐项独立附页形态预览）与 Tab 2 采纳整改导 Clean 定稿工作台；
+8. `BidComposerView`（`/composer`，E37/E38/E39/E41）：/api/composer + `/api/reports/{id}/clean-bid`——Tab 1 正向初稿（Skill 写作规范与业务线分组标签及 GitHub/Gitee/本地上传管理弹窗 + 「引用公司常见指标与业务线标准应答库」开关与核心指标/典型评分标准预览卡片 + AI 动态规划与撰稿开关 + 后台队列进度/中断 + `<keep-alive>` + 紧凑分组待填抽屉 + 资格证照角色合并与逐项独立附页形态预览）与 Tab 2 采纳整改导 Clean 定稿工作台；
 9. `RulesAndCertsView`：规则配置 + 企业证照台账（支持 PDF/图片扫件 OCR 预填与原件留档、长期有效开关）+ 法规库（法条三态核验与单条条文删除维护）；
 10. `ReportsAndAuditView`：交付中心（按任务列 redline/clean-bid/deliver.zip/signoff 下载 + 批量打包）+ 安全操作审计日志表（admin，支持 UTF-8 BOM CSV 导出）；
 11. 管理与辅助：`UsersManageView`（`/users`，admin 部门重命名与账号管理）/ `LoginView` / `ChangePasswordView` / `ModelSettingsView`（/api/model-config + test 连通性测试 + 思考参数防御与多模态视觉开关）。

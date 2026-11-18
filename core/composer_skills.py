@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 import requests
 import yaml
 
+from core.indicator_library import normalize_skill_biz_line
+
 ALLOWED_GIT_HOSTS = frozenset({
     'github.com',
     'raw.githubusercontent.com',
@@ -51,6 +53,7 @@ BUILTIN_WRITING_SKILLS: tuple[dict[str, Any], ...] = (
     {
         'name': '政采严谨全响应版',
         'description': '公文体严谨应答风：仿宋正文字体、标准封面与目录，逐条点对点响应招标要求，零空话、零遗漏。',
+        'biz_line': 'general',
         'source_type': 'builtin',
         'is_builtin': True,
         'is_default': True,
@@ -77,6 +80,7 @@ BUILTIN_WRITING_SKILLS: tuple[dict[str, Any], ...] = (
     {
         'name': '技术架构深度攻坚版',
         'description': '重工程架构细节与高分打法：微软雅黑现代商务排版、深蓝高亮表头，突出高可用指标、安全机制与实施表格。',
+        'biz_line': 'general',
         'source_type': 'builtin',
         'is_builtin': True,
         'is_default': False,
@@ -103,6 +107,7 @@ BUILTIN_WRITING_SKILLS: tuple[dict[str, Any], ...] = (
     {
         'name': '简洁高效商务精编版',
         'description': '紧凑高信噪比评审友好版：宋体清晰排版、青黛色表头，直击核心得分要素，适合快速审阅与二次精修。',
+        'biz_line': 'general',
         'source_type': 'builtin',
         'is_builtin': True,
         'is_default': False,
@@ -123,6 +128,60 @@ BUILTIN_WRITING_SKILLS: tuple[dict[str, Any], ...] = (
             'append_checklist_at_end': True,
             'target_section_words': 320,
             'tone': 'concise_direct',
+        },
+    },
+    {
+        'name': '网络安全与数据安全专精版',
+        'description': '聚焦双域隔离、逻辑隔离磁盘访问控制、防勒索加密、DLP 行为审计与政采等保合规响应，自动衔接公司安全与通用运维指标。',
+        'biz_line': 'security',
+        'source_type': 'builtin',
+        'is_builtin': True,
+        'is_default': False,
+        'writing_instructions': (
+            '1. 立足网络安全与数据安全流转专业视角，紧扣「双环境物理/逻辑隔离、文件访问防泄漏、逻辑隔离磁盘防木马控制、专用磁盘防勒索加密与密文不落地灾备」清晰阐述实现机理；\n'
+            '2. 针对等保 2.0 测评级别、国密 SM2/SM3/SM4 支持或第三方检测编号，仅引用公司台账或招标已明确内容，其余严禁捏造，统一留 `[待人工确认：...]` 槽位；\n'
+            '3. 售后应急响应严格对照公司核准基线（7×24 电话/5×8 支持、故障响应 ≤1 小时、到场 ≤24 小时及同规格备机代用）组织运维矩阵表；\n'
+            '4. 严禁虚构合同金额、过往客户名称及未授权业绩日期。'
+        ),
+        'layout_spec': {
+            'cover_style': 'tech_modern',
+            'font_zh': '微软雅黑',
+            'heading_font_zh': '黑体',
+            'font_size_pt': 10.5,
+            'line_spacing': 1.35,
+            'accent_color_hex': '1E3A8A',
+            'table_header_bg': 'DBEAFE',
+            'include_toc': True,
+            'append_checklist_at_end': False,
+            'target_section_words': 650,
+            'tone': 'technical_deep',
+        },
+    },
+    {
+        'name': '并行MaaS算力服务专精版',
+        'description': '聚焦大模型多模型网关路由、Token 输入/输出/缓存计量、分布式推理集群、数据不出域与知识库 RAG 对接的专精撰写规范。',
+        'biz_line': 'maas',
+        'source_type': 'builtin',
+        'is_builtin': True,
+        'is_default': False,
+        'writing_instructions': (
+            '1. 立足「并行 MaaS 平台 / AI 智算云平台」大模型算力与服务视角，重点突出多模型统一 OpenAI 兼容网关、DeepSeek/GLM/Qwen/Llama 等长上下文（最高 1M）调度及本地/云端双模平滑切换；\n'
+            '2. Token 计量与计费机制仅说明「输入/输出/上下文缓存分项计量、账户账单可审计、额度预警与预付续购」逻辑；一切 Token 单价、折扣比例与采购金额严禁写死数字，统一用 `[待人工填报：...]` 槽位锁定；\n'
+            '3. 对 API 可用性百分比、并发 RPM/TPM/QPS 与首字延迟 TTFT 等尚未签署的硬跑分参数，务必保留 `[待人工确认：...]` 槽位，同时充分写实客户内容知识产权归属、保密责任与私有化数据不出域机制；\n'
+            '4. 紧密对应「知识库扩展 / RAG / 工作流编排 / 售后 7×24 与 1 小时响应」拿满技术评分。'
+        ),
+        'layout_spec': {
+            'cover_style': 'tech_modern',
+            'font_zh': '微软雅黑',
+            'heading_font_zh': '黑体',
+            'font_size_pt': 10.5,
+            'line_spacing': 1.35,
+            'accent_color_hex': '312E81',
+            'table_header_bg': 'E0E7FF',
+            'include_toc': True,
+            'append_checklist_at_end': False,
+            'target_section_words': 650,
+            'tone': 'technical_deep',
         },
     },
 )
@@ -223,6 +282,7 @@ def parse_skill_markdown_or_json(
         return {
             'name': name or Path(source_name or '导入写作Skill').stem[:120],
             'description': desc or instructions[:120],
+            'biz_line': normalize_skill_biz_line(obj.get('biz_line')),
             'source_type': default_source_type,
             'source_url': source_url,
             'writing_instructions': instructions[:16_000],
@@ -277,6 +337,7 @@ def parse_skill_markdown_or_json(
     return {
         'name': name[:120],
         'description': desc[:400],
+        'biz_line': normalize_skill_biz_line(meta.get('biz_line')),
         'source_type': default_source_type,
         'source_url': source_url,
         'writing_instructions': body[:16_000],

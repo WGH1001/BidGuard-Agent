@@ -781,7 +781,7 @@ def _draft_chapter_with_llm(
     ) or chapter.get('writing_brief', '')
 
     snip_desc = '\n'.join(
-        f"[参考《{sn['source_filename']}》]：{sn['snippet'][:400]}"
+        f"[参考《{sn['source_filename']}》]：{sn['snippet'][:750]}"
         for sn in ref_snippets[:3]
     ) or '（无额外历史参考片段，请仅紧扣招标需求与规范方法论撰写）'
 
@@ -791,7 +791,7 @@ def _draft_chapter_with_llm(
         f"【选定 Skill】：{skill_name}｜行文语气：{skill_layout.get('tone')}｜目标字数约 {target_words} 字。\n"
         f"【Skill 规则与格式限制】：\n{skill_instructions[:1200] or '正式专业、逐点响应'}\n"
         f"【本章对应招标需求与评分细则】：\n{req_desc[:2200]}\n"
-        f"【可借鉴企业参考片段（如有）】：\n{snip_desc[:1400]}\n"
+        f"【可借鉴企业参考片段（如有）】：\n{snip_desc[:2400]}\n"
         f"【建议附带表格（可选）】：{chapter.get('recommended_table') or '如适合则给出实施分工/SLA承诺表'}\n"
         "严格约束：\n"
         "1. 严禁虚构任何投标报价金额、过往合同编号或未授权业绩年份；\n"
@@ -1306,8 +1306,7 @@ def compose_bid_blueprint(
         provider = LocalKnowledgeSnippetProvider(list(knowledge_paths), client=client)
 
     use_rag = (
-        compose_mode == 'knowledge_draft_v2'
-        and provider is not None
+        provider is not None
         and bool(getattr(provider, 'has_documents', False))
     )
 
@@ -1315,35 +1314,49 @@ def compose_bid_blueprint(
     topic_snippets: dict[str, list[dict[str, Any]]] = {}
     s5_refs: list[dict[str, Any]] = []
     matched_rag_count = 0
+    matched_indicator_count = 0
 
     for t in topics:
         query_text = f"{t['title']} {t['tender_quote']}".strip()
         ref_snippets: list[dict[str, Any]] = []
         if use_rag:
             raw_hits = provider.retrieve(query_text, top_k=2, min_score=0.35)
+            has_ind_hit = False
             for h in raw_hits:
                 snip = str(h.get('snippet') or '').strip()
                 if not snip:
                     continue
+                is_ind = bool(h.get('is_indicator_ref', False))
+                if is_ind:
+                    has_ind_hit = True
                 aligned = (
                     _align_snippet_with_llm_optional(client, t, snip, full_text)
-                    if not ai_active
+                    if (not ai_active and not is_ind)
                     else None
                 )
+                src_fn = str(h.get('source_filename') or '参考方案库')
+                custom_notice = str(h.get('notice') or '').strip()
                 ref_snippets.append({
-                    'source_filename': str(h.get('source_filename') or '参考方案库'),
+                    'source_filename': src_fn,
                     'snippet': aligned or snip,
                     'raw_quote': snip,
                     'score': float(h.get('score') or 0.0),
                     'quote_verified': bool(h.get('quote_verified', True)),
                     'llm_aligned': aligned is not None,
-                    'notice': f"[参考片段 · 来源《{h.get('source_filename') or '参考方案库'}》 · 待人工确认改写，严禁直接照搬年份与金额]",
+                    'is_indicator_ref': is_ind,
+                    'indicator_id': h.get('indicator_id'),
+                    'scoring_ref': h.get('scoring_ref'),
+                    'notice': custom_notice or f"[参考片段 · 来源《{src_fn}》 · 待人工确认改写，严禁直接照搬年份与金额]",
                 })
                 s5_refs.append({
                     'topic_id': t['topic_id'],
-                    'source_filename': str(h.get('source_filename') or '参考方案库'),
+                    'source_filename': src_fn,
                     'score': float(h.get('score') or 0.0),
+                    'is_indicator_ref': is_ind,
+                    'indicator_id': h.get('indicator_id'),
                 })
+            if has_ind_hit:
+                matched_indicator_count += 1
         if ref_snippets:
             matched_rag_count += 1
         topic_snippets[t['topic_id']] = ref_snippets
@@ -1514,6 +1527,7 @@ def compose_bid_blueprint(
 
     _emit_progress(90, '阶段 4/4：正在封装蓝图结构与按 Skill 版式渲染 Word')
     sections = [sec_cover, sec_qual, sec_price, sec_deviation, sec_scoring, sec_appendix]
+    skill_biz_line = str(_obj_field(skill, 'biz_line', 'general') or 'general').strip() or 'general'
     stats = {
         'section_count': len(sections),
         'required_cert_count': len(matched_certs),
@@ -1521,10 +1535,16 @@ def compose_bid_blueprint(
         'scoring_topic_count': len(topics),
         'ai_chapter_count': len(planned_chapters),
         'rag_matched_topics': matched_rag_count,
+        'indicator_matched_topics': matched_indicator_count,
         'manual_item_count': len(manual_checklist),
         'scoring_fill_mode': sec_scoring_mode,
         'ai_status': ai_status,
         'skill_name': skill_name,
+        'biz_line': skill_biz_line,
+        'use_indicator_library': bool(
+            matched_indicator_count > 0
+            or (provider is not None and (hasattr(provider, 'target_lines') or hasattr(provider, '_providers')))
+        ),
     }
     return BidBlueprint(
         project_name=project_name,

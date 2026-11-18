@@ -91,9 +91,9 @@ def _collect_docx_text(docx_path: Path) -> str:
 # ── 1. core/composer_skills：解析、预设、SSRF 白名单与 GitHub->Gitee 优雅降级 ───────
 
 def test_composer_skills_builtin_parsing_ssrf_and_git_fallback(monkeypatch):
-    assert len(BUILTIN_WRITING_SKILLS) == 3
+    assert len(BUILTIN_WRITING_SKILLS) >= 3
     names = {s['name'] for s in BUILTIN_WRITING_SKILLS}
-    assert names == {'政采严谨全响应版', '技术架构深度攻坚版', '简洁高效商务精编版'}
+    assert {'政采严谨全响应版', '技术架构深度攻坚版', '简洁高效商务精编版'}.issubset(names)
 
     # 1) 极端排版数值应被安全钳位
     clamped = normalize_layout_spec({
@@ -374,10 +374,10 @@ def test_e38_composer_skills_api_and_async_generate_cancel(tmp_path: Path, monke
             assert u_b.status_code == 200
             t2_h = _login_headers(tc, 'e38_t2', 'Password123!')
 
-            # 1) 首次拉取自动初始化 3 套内置预设 Skill
+            # 1) 首次拉取自动初始化内置预设 Skill（含 E38 基础 3 套及后续扩展预设）
             r_list = tc.get('/api/composer/skills', headers=admin_h)
             assert r_list.status_code == 200
-            assert r_list.json()['total'] == 3
+            assert r_list.json()['total'] == len(BUILTIN_WRITING_SKILLS)
             default_skill = next(s for s in r_list.json()['items'] if s['is_default'])
             assert default_skill['name'] == '政采严谨全响应版'
 

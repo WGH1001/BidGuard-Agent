@@ -649,6 +649,7 @@ class ComposerSkillOut(BaseModel):
     user_id: Optional[int] = None
     name: str
     description: str = ''
+    biz_line: Literal['general', 'security', 'maas'] = 'general'
     source_type: str = 'custom'
     source_url: Optional[str] = None
     writing_instructions: str = ''
@@ -666,6 +667,7 @@ class ComposerSkillListOut(BaseModel):
 class ComposerSkillUpsertRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     description: str = ''
+    biz_line: Literal['general', 'security', 'maas'] = 'general'
     writing_instructions: str = Field(..., min_length=1)
     layout_spec: dict[str, Any] = Field(default_factory=dict)
     is_default: bool = False
@@ -679,6 +681,7 @@ class SkillImportUrlRequest(BaseModel):
 class SkillImportPreviewOut(BaseModel):
     name: str
     description: str = ''
+    biz_line: Literal['general', 'security', 'maas'] = 'general'
     source_type: str = 'github'
     source_url: Optional[str] = None
     writing_instructions: str = ''
@@ -687,12 +690,49 @@ class SkillImportPreviewOut(BaseModel):
     used_fallback: bool = False
 
 
+class IndicatorScoringRefOut(BaseModel):
+    typical_points: list[str] = Field(default_factory=list)
+    weight_hint: str = ''
+    high_score_tips: str = ''
+
+
+class IndicatorEntryOut(BaseModel):
+    indicator_id: str
+    line: Literal['common', 'security', 'maas']
+    category: str = '技术方案'
+    indicator_name: str
+    standard_response: str
+    scoring_ref: IndicatorScoringRefOut = Field(default_factory=IndicatorScoringRefOut)
+    param_slots: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    source_ref: str = ''
+
+
+class LineScoringSummaryOut(BaseModel):
+    dimension: str
+    typical_weight: str = ''
+    key_focus: str = ''
+
+
+class BizLineIndicatorOverviewOut(BaseModel):
+    biz_line: Literal['general', 'security', 'maas'] = 'general'
+    biz_line_label: str = ''
+    included_lines: list[str] = Field(default_factory=list)
+    review_status: str = 'pending_human_review'
+    reviewed_notes: list[str] = Field(default_factory=list)
+    total_indicators: int = 0
+    line_scoring_summary: list[LineScoringSummaryOut] = Field(default_factory=list)
+    indicators: list[IndicatorEntryOut] = Field(default_factory=list)
+
+
 class ComposeDraftSummaryOut(BaseModel):
     id: int
     tenant_id: int
     user_id: Optional[int] = None
     skill_id: Optional[int] = None
     skill_name: str = ''
+    biz_line: str = 'general'
+    use_indicator_library: bool = False
     title: str
     status: str = 'completed'
     progress: int = 100

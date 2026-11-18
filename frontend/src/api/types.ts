@@ -908,6 +908,8 @@ export interface SimilarityReportListOut {
 
 export type ComposeModeType = 'skeleton_v1' | 'knowledge_draft_v2'
 
+export type BizLineType = 'general' | 'security' | 'maas'
+
 export interface SkillLayoutSpec {
   cover_style: 'gov_clean' | 'navy_business' | 'tech_modern'
   font_zh: string
@@ -928,6 +930,7 @@ export interface ComposerSkillOut {
   user_id?: number | null
   name: string
   description: string
+  biz_line: BizLineType
   source_type: string
   source_url?: string | null
   writing_instructions: string
@@ -945,6 +948,7 @@ export interface ComposerSkillListOut {
 export interface ComposerSkillUpsertPayload {
   name: string
   description: string
+  biz_line?: BizLineType
   writing_instructions: string
   layout_spec: Partial<SkillLayoutSpec>
   is_default?: boolean
@@ -953,12 +957,48 @@ export interface ComposerSkillUpsertPayload {
 export interface SkillImportPreviewOut {
   name: string
   description: string
+  biz_line: BizLineType
   source_type: string
   source_url?: string | null
   writing_instructions: string
   layout_spec: SkillLayoutSpec
   fetched_from_provider: string
   used_fallback: boolean
+}
+
+export interface IndicatorScoringRefOut {
+  typical_points: string[]
+  weight_hint: string
+  high_score_tips: string
+}
+
+export interface IndicatorEntryOut {
+  indicator_id: string
+  line: 'common' | 'security' | 'maas'
+  category: string
+  indicator_name: string
+  standard_response: string
+  scoring_ref: IndicatorScoringRefOut
+  param_slots: string[]
+  keywords: string[]
+  source_ref: string
+}
+
+export interface LineScoringSummaryOut {
+  dimension: string
+  typical_weight: string
+  key_focus: string
+}
+
+export interface BizLineIndicatorOverviewOut {
+  biz_line: BizLineType
+  biz_line_label: string
+  included_lines: string[]
+  review_status: string
+  reviewed_notes: string[]
+  total_indicators: number
+  line_scoring_summary: LineScoringSummaryOut[]
+  indicators: IndicatorEntryOut[]
 }
 
 export interface ComposeManualItem {
@@ -1006,6 +1046,8 @@ export interface ComposeDraftSummaryOut {
   user_id?: number | null
   skill_id?: number | null
   skill_name?: string
+  biz_line?: string
+  use_indicator_library?: boolean
   title: string
   status?: string
   progress?: number

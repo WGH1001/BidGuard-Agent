@@ -318,7 +318,7 @@ export_similarity_report_docx(report: dict[str, Any], output_path: str | Path) -
 # ai_review.status == 'done' 时追加「五、AI 语义深层复核与误报排查综述」章节
 ```
 
-### 1.12 E37/E38 标书编制输出与无损修订交付（`BidComposerView` / `/api/composer` & `/api/reports/{task_id}/clean-bid`）
+### 1.12 E37/E38/E41 标书编制输出与无损修订交付（`BidComposerView` / `/api/composer` & `/api/reports/{task_id}/clean-bid`）
 
 ```python
 # core/bid_composer.py —— F8 标书正向动态编排引擎（Skill 约束 + AI 动态构章撰稿 + V1/V2 蓝图与排版输出）
@@ -349,10 +349,12 @@ compose_bid_blueprint(
     progress_cb: Optional[Callable[[int, str], None]] = None,
     cancel_check: Optional[Callable[[], None]] = None,
 ) -> BidBlueprint
-# E38/E39 三条防废标与防截断硬锁：① 报价栏强制 `[待人工填报金额...]`；② _UNGROUNDED_MONEY_RE / _UNGROUNDED_CONTRACT_RE 防金额/合同幻觉；
-# ③ _plan_chapters_with_llm 覆盖率兜底守卫（章节≤30/主题≤40/全覆盖）+ 剥离 eval_rule/评分细则串行与目录/投标须知程序噪音，
+# E38/E39/E41 接线契约：① 报价栏强制 `[待人工填报金额...]`；② _UNGROUNDED_MONEY_RE / _UNGROUNDED_CONTRACT_RE 防金额/合同幻觉；
+# ③ _plan_chapters_with_llm 覆盖率兜底守卫 + 剥离 eval_rule/评分细则串行与目录/投标须知程序噪音，
 #    _draft_chapter_with_llm 并发单章最多 3 次尝试自动重试 + 剥离重复章标题首行 + 表行放宽至 36；_draft_deviation_with_llm 分批 12 条覆盖全量待核对偏离行；
-#    第二部分同名证书按角色合并去重（如 `必交资格 / 加分参考`）
+#    第二部分同名证书按角色合并去重；
+# ④ E41：传入显式 knowledge_provider（如 IndicatorLibraryProvider）时，在 skeleton_v1 与 knowledge_draft_v2 模式下均可激活参考片段注入，
+#    透传 is_indicator_ref/scoring_ref 与自定义 notice 且跳过招标原文强制回引重对齐，并在 stats 记录 biz_line / use_indicator_library / indicator_matched_topics
 
 export_composed_bid_docx(blueprint: BidBlueprint | dict[str, Any], output_path: str | Path) -> Path
 # 按 skill_layout 动态渲染独立居中封面（gov_clean/navy_business/tech_modern）、原生 Heading 1/2/3 与可选 TOC 域、
@@ -371,10 +373,10 @@ export_clean_revised_docx(
 # 保留封面/页眉页脚/表格与 Run 样式，全量清除 w:commentRangeStart/End/Reference 与 comments*.xml；大段漏应答诚实归入 manual_pending_items
 ```
 
-### 1.13 E38 写作 Skill 规范解析与 GitHub/Gitee 安全导入（`core/composer_skills.py`）
+### 1.13 E38/E41 写作 Skill 规范解析与 GitHub/Gitee 安全导入（`core/composer_skills.py`）
 
 ```python
-BUILTIN_WRITING_SKILLS: list[dict[str, Any]]  # 3 套预设：政采严谨全响应版 / 技术架构深度攻坚版 / 简洁高效商务精编版
+BUILTIN_WRITING_SKILLS: tuple[dict[str, Any], ...]  # E41 扩至 5 套预设（通用 3 套 + 网络安全与数据安全专精版 + 并行MaaS算力服务专精版，含 biz_line）
 DEFAULT_LAYOUT_SPEC: dict[str, Any]
 
 class SkillImportError(RuntimeError):
@@ -386,7 +388,7 @@ normalize_layout_spec(raw: Any) -> dict[str, Any]
 parse_skill_markdown_or_json(raw_text: str, *, source_name: str = '',
                                default_source_type: str = 'custom',
                                source_url: Optional[str] = None) -> dict[str, Any]
-# 纯文本规则解析（yaml.safe_load + 正文 / JSON）；安全钳位字号 9..16pt、行距 1.0..2.5、6 位 HEX 色号、target_section_words 150..3000
+# 纯文本规则解析（yaml.safe_load + 正文 / JSON，保留并规范化 biz_line）；安全钳位字号 9..16pt、行距 1.0..2.2、6 位 HEX 色号、target_section_words 150..2000
 
 import_skill_from_git_url(url_or_repo: str, *, allow_gitee_fallback: bool = True,
                           timeout: float = 12.0) -> dict[str, Any]
@@ -415,6 +417,26 @@ sanitize_chat_messages(messages: list[Any]) -> tuple[list[Any], dict[str, int]]
 # 深拷贝 OpenAI messages 列表（仅脱敏 text/tool_calls 文本，完整保留 E24 image_url 多模态结构）
 ```
 
+### 1.15 E41 双业务线专精指标与常见指标标准应答库（`core/indicator_library.py`）
+
+```python
+# core/indicator_library.py —— 0-Token 三层指标检索 + 防报价硬锁 + 评分标准参考输出
+normalize_skill_biz_line(raw: Any) -> str                    # 'general' | 'security' | 'maas'
+resolve_target_entry_lines(biz_line: Any) -> tuple[str, ...] # security->('security','common'); maas->('maas','common'); general->('common',)
+load_indicator_library(biz_line: str = 'general', *, library_dir: Optional[str | Path] = None) -> list[dict[str, Any]]
+get_biz_line_indicator_overview(biz_line: str = 'general', *, library_dir: Optional[str | Path] = None) -> dict[str, Any]
+# 返回业务线概览、review_status、line_scoring_summary（典型评分权重参考）与全部指标条目（含 scoring_ref / param_slots）
+
+class IndicatorLibraryProvider:  # 实现 KnowledgeSnippetProvider 协议（has_documents / retrieve）
+    # 0-Token BM25 + 同义词扩展 + keywords/category 精确门控；严格跨业务线隔离（security 仅命中 security+common，maas 仅命中 maas+common）；
+    # 片段携带 [公司标准应答参考｜...] 与 [评分标准参考]；严格禁止具体投标报价金额数字
+    ...
+
+class CompositeKnowledgeSnippetProvider:
+    # 组合多 Provider（指标库优先、V2 历史标书库互补去重）
+    ...
+```
+
 ---
 
 ## 2. 数据库 14 张表规格（backend/models.py）
@@ -437,7 +459,7 @@ sanitize_chat_messages(messages: list[Any]) -> tuple[list[Any], dict[str, int]]
 | 11 | `regulation_articles` | E4 法规条文表 | `law_id` FK(级联删除)、`article_no`("第X条")、`article_title`(可空)、`content`(Text)、`content_hash`、`UNIQUE(law_id, article_no)` |
 | 12 | `similarity_reports` | E36/E38 多标书交叉比对报告 | `tenant_id`、`user_id`、`title`、`status`、`progress`、`stage_detail`、`error_msg`、`tender_filename`、`tender_path`、`bidders_json`、`pair_matrix_json`、`findings_json`、`ai_review_json`、`max_similarity_pct`(Numeric 5,2)、`risk_level`(low/medium/high)、`started_at`、`finished_at` |
 | 13 | `bid_compose_drafts` | E37/E38 标书编制草稿与蓝图 | `tenant_id`、`user_id`、`skill_id`(可空)、`title`、`status`、`progress`、`stage_detail`、`error_msg`、`tender_filename`、`tender_path`、`compose_mode`(skeleton_v1/knowledge_draft_v2)、`blueprint_json`、`output_path`、`stats_json`、`started_at`、`finished_at` |
-| 14 | `composer_skills` | E38 F8 标书写作 Skill 规范库 | `tenant_id`、`user_id`、`name`、`description`、`source_type`(builtin/custom/github/gitee/file)、`source_url`、`writing_instructions`(Text)、`layout_spec_json`、`is_builtin`、`is_default` |
+| 14 | `composer_skills` | E38/E41 F8 标书写作 Skill 规范库 | `tenant_id`、`user_id`、`name`、`description`、`biz_line`(general/security/maas)、`source_type`(builtin/custom/github/gitee/file)、`source_url`、`writing_instructions`(Text)、`layout_spec_json`、`is_builtin`、`is_default` |
 
 ---
 
@@ -456,6 +478,7 @@ sanitize_chat_messages(messages: list[Any]) -> tuple[list[Any], dict[str, int]]
 - E38 F8 写作 Skills、AI 动态编排与 E36 异步深层研判：`backend/models.py` 新增第 14 表 `composer_skills`（`ComposerSkill`）及 `ensure_similarity_reports_columns`/`ensure_bid_compose_drafts_columns` 老库幂等加列；`backend/worker.py` 新增 `BidTaskWorker.submit_background_job(job_key: str, fn, *, sync=False)` 支持字符串键（`'composer:{id}'`/`'similarity:{id}'`）异步队列与取消；`backend/main.py::recover_stale_tasks` 扩展重启复位 `BidComposeDraft` 与 `SimilarityReport`；`composer.py` 新增 `/skills` CRUD（`409 LAST_SKILL_PROTECTED`）、`/skills/preview-url`、`/skills/import-url`、`/skills/import-file` 与 `/drafts/{id}/cancel`（`/generate` 增 `skill_id`/`use_ai`/`async_run=False`）；`similarity.py` 移除 6 份上限仅校验 `>=2` 份并新增 `enable_ai_review`/`async_run=False`/`POST /{id}/cancel`；
 - E39 F8 初稿质量精修与资格逐项附页：`backend/routers/composer.py` 在 `export_composed_bid_docx` 完成台账原件扫描图嵌入后、持久化 `blueprint_json` 前清洗剔除 `cert_row.attachment_path` 物理路径（保留 `matched_cert_id`/`has_embedded_image`/`role_label`），确保宿主机路径永不外泄；
 - E40 合规底座双锁（网关三出口脱敏 + 内网模型锁 + 上传零 OCR 统计）：`backend/schemas.py` 新增 `PrivacyStatsOut` 并扩展 `BidTaskOut`/`ExtractChecklistOut`/`QaAttachmentOut` 可选 `privacy_stats`；`POST /api/checks`、`POST /api/extract` 与 `POST /api/qa/sessions/{id}/attachments` 返回 `privacy_stats` 且原盘文件保持逐字节不变；`backend/routers/model_config.py` 在 `STRICT_INNER_MODEL_ONLY=1` 时放行私网网段、`models.yaml` `envs.prod` 主机及 `INNER_MODEL_EXTRA_HOSTS` 白名单，拦截公网地址并返回 `HTTP 422 MODEL_HOST_FORBIDDEN`；`backend/worker.py::resolve_effective_llm_client` 在 strict 下忽略并告警存量公网 `UserModelConfig`、强制钉死 `prod` 内网网关；
+- E41 双业务线专精 Skills 与常见指标标准应答库：`backend/models.py` 为 `composer_skills` 新增 `biz_line`（`general|security|maas`）及老库 `ensure_composer_skills_columns` 加列迁移；`backend/routers/composer.py` `ensure_builtin_composer_skills` 幂等为存量租户补种「网络安全与数据安全专精版」与「并行MaaS算力服务专精版」、新增 `GET /api/composer/indicators`（`BizLineIndicatorOverviewOut`）透出指标库与典型评分标准参考，并于 `POST /api/composer/generate` 新增 `use_indicator_library: bool = Form(default=False)`（开关开启或 `Skill.biz_line != 'general'` 时构造 `IndicatorLibraryProvider` 并与 V2 方案库叠加，在 `skeleton_v1` 与 `knowledge_draft_v2` 双模式均可注入）；
 - 其余鉴权、多租户隔离、SSE 进度流、文件存储布局与统一错误格式约定保持不变。
 
 ---
@@ -495,3 +518,4 @@ sanitize_chat_messages(messages: list[Any]) -> tuple[list[Any], dict[str, int]]
 | 2026-11-18 | E38 F8 写作 Skills 与 AI 动态编排及 E36 异步深层研判卡：新增 `core/composer_skills.py`（3 套内置 Skill、YAML/MD 与 JSON 解析钳位、SSRF 白名单、GitHub→Gitee 优雅降级导入与离线 `EXTERNAL_SKILL_UNREACHABLE`）；`core/bid_composer.py` 修复 `eval_rule`/评分细则 Part 4 串行污染、打通 LLM 动态构章（`_plan_chapters_with_llm` + 覆盖率兜底守卫）与并发分节撰稿（`_draft_chapter_with_llm` / `_draft_deviation_with_llm` + `_UNGROUNDED_MONEY_RE` 防金额/合同幻觉）及独立居中封面/原生 Heading/TOC 域动态排版（`append_checklist_at_end` 内外分离）；`core/bid_similarity.py` 解除 6 份上限并新增 `run_similarity_ai_review`（双侧 `verify_quote` 严审与禁洗稿合规锁）；`backend/models.py` 新增第 14 表 `composer_skills` 及 `ensure_*` 老库平滑加列；`backend/worker.py` 新增 `submit_background_job` 与 `recover_stale_tasks` 扩展；`composer.py`/`similarity.py` 全链路打通异步队列/中断取消；前端 `App.vue` `<keep-alive>` 纳入双视图、`BidComposerView.vue`（Skill 弹窗与分组抽屉）与 `SimilarityCheckView.vue`（不限份数与 AI 复核）同步收尾 | 实现 + 验收 |
 | 2026-11-18 | E39 F8 初稿质量精修与资格证明逐项附页增强卡：`core/bid_composer.py` 新增 `_draft_chapter_with_llm` 单章瞬时失败最多 2 次自动重试（`PipelineCancelled` 直通穿透）、`_strip_duplicate_leading_title` 剥离重复章标题首行、`_is_procedural_topic` / `_extract_pdf_scoring_items` 清除目录与投标须知/澄清/计分方法噪音并精准提取 PDF 评分细则、解除 L483/L486/L603/L645 四处截断（偏离表分批 ≤12 条全量覆写），以及第二部分同名证照按角色合并去重（`必交资格 / 加分参考`）与「2.0 总览索引表 + 2.1~2.N 逐项独立附页（自动居中嵌入 PNG/JPG 原件扫描图，PDF 示装订框，缺省示 A4 全幅粘贴框）」；`backend/routers/composer.py` 在持久化 `blueprint_json` 前剥离宿主机 `attachment_path`；`BidComposerView.vue` 第二部分增加角色级别与附页形态预览列 | 实现 + 验收 |
 | 2026-11-18 | E40 合规底座双锁卡：新增 `core/privacy_sanitizer.py`（18 位 GB 11643 身份证校验 + 语境银行卡/对公账号等长幂等掩码、`scan_document_file` 强制 `ocr_images=False`）；`core/llm_gateway.py` 于 `chat()`/`chat_stream()`/`embed()` 三个总出口统一挂载脱敏（保全 `image_url` 多模态结构、`PRIVACY_SANITIZE_ENABLED` 开关、`total_usage()` 记录 `privacy_id_masked`/`privacy_bank_masked`）并新增 `STRICT_INNER_MODEL_ONLY` + `INNER_MODEL_EXTRA_HOSTS` 内网防外泄锁定（放行私网/prod/白名单、禁 `demo` 回退、拒接公网 `UserModelConfig`）；`backend/routers/model_config.py` 新增公网拦截 `422 MODEL_HOST_FORBIDDEN`；`backend/worker.py::resolve_effective_llm_client` 忽略存量公网配置告警回退 `prod`；`backend/schemas.py`、`checks.py`、`extract.py`、`qa.py` 新增只读 `privacy_stats` 回显且原盘文件字节零改动；前端 `types.ts`、`CheckTaskList.vue`、`ExtractView.vue`、`QaChatView.vue` 同步提示已保护数量 | 实现 + 验收 |
+| 2026-11-18 | E41 双业务线专精 Skills 与常见指标标准应答库卡：新增 `core/indicator_library.py`（`common/security/maas` 三层指标架构 + `IndicatorLibraryProvider` 0-Token BM25/同义词三级门控与跨线隔离 + `CompositeKnowledgeSnippetProvider` + `get_biz_line_indicator_overview` 评分参考输出 + `_BID_MONEY_RE` 禁具体报价硬锁）；新增 `data/rules/indicator_library/{common,security,maas}_indicators.json` 与只产出草稿的 `scripts/build_indicator_library.py`；`core/composer_skills.py` 扩至 5 套内置预设并支持 `biz_line`；`core/bid_composer.py` 放行显式 `knowledge_provider` 于非 V2 模式生效、透传 `scoring_ref`/`notice`；`backend/models.py` 扩展 `composer_skills.biz_line` 与 `ensure_composer_skills_columns`；`backend/routers/composer.py` + `schemas.py` 幂等补种存量租户新 Skill、新增 `GET /api/composer/indicators`、扩展 `POST /api/composer/generate` `use_indicator_library` 接线；前端 `types.ts`、`index.ts`、`BidComposerView.vue` 完成业务线徽标、指标开关与典型评分标准预览卡片（零新增 Element Plus 组件） | 实现 + 验收 |

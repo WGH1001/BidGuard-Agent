@@ -51,26 +51,26 @@ BidGuard-Agent/
 ├── config/
 │   ├── models.yaml                      # 模型网关 demo=智谱 / prod=内网私有化
 │   └── regulation_sources.yaml          # E4：8 部法律官方 URL（crawl 数据源）
-├── core/                                # 23 个功能模块（F1~F8 + 写作 Skills + 合规脱敏 + 混合检索 + 法规库 + 交叉比对，逐项状态见 §3）
+├── core/                                # 24 个功能模块（F1~F8 + 写作 Skills + 指标库 + 合规脱敏 + 混合检索 + 法规库 + 交叉比对，逐项状态见 §3）
 ├── backend/                             # main + models(14表) + schemas + 13 组路由
 ├── frontend/                            # Vue3 + TS：15 个视图全部落地
-├── tests/                               # 45 个测试文件（test_*.py）321 项全绿
-├── scripts/                             # build_f1_baseline.py / eval_f1_llm.py / probe_reasoning_efforts.py
+├── tests/                               # 46 个测试文件（test_*.py）325 项全绿
+├── scripts/                             # build_f1_baseline.py / build_indicator_library.py / eval_f1_llm.py / probe_reasoning_efforts.py
 ├── data/
 │   ├── corpus/m0_samples/               # 11 份语料 + baseline / ground_truth / llm_eval 三本账（§4）
 │   ├── corpus/regulations/              # E4：4 部法律 JSON 种子 + originals/ 原文（含 87 号令扫描 PDF）
-│   └── rules/law_source/                # 4 部法规官方文本
+│   └── rules/                           # law_source/ 法规官方文本 + indicator_library/（E41 常见指标与双业务线口径库）
 ├── deploy/nginx/nginx.conf              # 静态直发 + /api/ 反代 SSE 防缓冲三件套
-└── docs/                                # DEPLOY.md / cards/（任务卡归档含 B1~E40 定稿，共 47 份）/ 待立卡-E1E2升级点定案.md
+└── docs/                                # DEPLOY.md / cards/（任务卡归档含 B1~E41 定稿，共 48 份）/ 待立卡-E1E2升级点定案.md
 ```
 
 ---
 
 ## 2. 当前基线（截至 2026-11-18）
 
-- **开发阶段**：3 周排期全部完成 + 四十轮增强升级（E1~E40）全量实现（E39 `c196c84` 已入库；**E40 · 合规底座双锁卡 已完成实现与全量验证，留在工作区待确认 commit**）
-- **Git 最新功能 Commit**：`c196c84`（E39 F8 初稿质量精修与资格证明逐项附页增强）；工作区保留 E40（及全套同步文档/卡）待确认 commit；前序主线：`7b7d511`（E38）/ `caef678`（E36+E37）/ `c913e40`（E35）
-- **测试基线**：**321 项 pytest 全绿（零回归）**（在 `c196c84` 317 项基线基础上：`tests/test_e40_privacy_sanitizer_and_inner_lock.py` 新增 4 项，14 张表校验通过）+ `npm --prefix frontend run build`（`vue-tsc --noEmit && vite build` 1865 模块零错误构建成功）—— 第一验收线已演进至 **321 项**
+- **开发阶段**：3 周排期全部完成 + 四十一轮增强升级（E1~E41）全量实现（E40 `377e37d` 已入库；**E41 · 双业务线专精 Skills 与常见指标标准应答库卡 已完成实现与全量验证，留在工作区待确认 commit**）
+- **Git 最新功能 Commit**：`377e37d`（E40 合规底座双锁）；工作区保留 E41（及全套同步文档/卡）待确认 commit；前序主线：`c196c84`（E39）/ `7b7d511`（E38）/ `caef678`（E36+E37）
+- **测试基线**：**325 项 pytest 全绿（零回归）**（在 `377e37d` 321 项基线基础上：`tests/test_e41_indicator_library_and_biz_skills.py` 新增 4 项，14 张表校验通过）+ `npm --prefix frontend run build`（`vue-tsc --noEmit && vite build` 1865 模块零错误构建成功）—— 第一验收线已演进至 **325 项**
 - **模型网关基线**：`config/models.yaml` 当前工作区设为 `default_env: prod`（内网私有网关 `http://10.0.2.81:3000/v1`，`GLM-5.3-Flash`，`timeout: 60`）；并行提供 `demo` 环境（智谱开放平台 `glm-5.3-flash`、`embedding: embedding-3` 激活 L2 混合检索、`timeout: 60`），`LLMClient` 统一控重试与 TUN/私有 IP 报错排查提示
 - **运行环境**：本机开发用项目自带 `.venv`（依赖已全量钉死）；生产走 Docker 四容器（`docker compose up -d --build`，默认宿主机 `APP_PORT=8000` + `POSTGRES_PORT=15432`，与老项目 `8080` + `5432` 并行共存不冲突）
 - **快速验收命令**：
@@ -82,7 +82,7 @@ BidGuard-Agent/
 
 ---
 
-## 3. 核心模块实现清单（`core/` 下 23 个功能文件逐项状态）
+## 3. 核心模块实现清单（`core/` 下 24 个功能文件逐项状态）
 
 | 序号 | 文件路径 | 所属模块 | 一句话职责说明 | 当前状态与实测验收数据 |
 |---|---|---|---|---|
@@ -106,9 +106,10 @@ BidGuard-Agent/
 | 18 | `core/regulation_library.py` | **E4 法规库** | 8 部法律条文库：三态核验（exact_match/fuzzy_hint/unverifiable，**LLM 对真伪零裁决权**）、中文/阿拉伯条号归一、张冠李戴降级 fuzzy_hint、四格式导入（json/txt/docx/pdf，content_hash 幂等） | **已验收**（E4 卡，含 crawl 集成测试外网隔离） |
 | 19 | `core/regulation_crawler.py` | **E4 法规爬取** | 静态 HTML 适配器，运行时读 `config/regulation_sources.yaml`（8 个官方 URL）；占位源诚实报"源未配置"；超时重试一次转 manual_required；SHA256 条文指纹发现官网修订 | **已验收** |
 | 20 | `core/bid_similarity.py` | **E36/E38 多标书交叉比对** | 五维 0-Token 客观查重与异常一致排查（`.docx`/`.pdf` 元数据与内嵌图哈希、剔除招标底稿 12-gram 与套话后净正文 8-gram Jaccard 及 ≥25 字连续长句、非标错名/实体碰撞含身份证与手机号前 3 后 4 脱敏、Decimal 规律性报价关联与等差检测、`export_similarity_report_docx`）；**E38 升级**：解除 6 份上限仅卡 `>=2` 份，新增可选 `run_similarity_ai_review` 语义同构复核与误报排查（双侧 `verify_quote` 严审+禁洗稿/规避合规锁+报告追加第五章）；严禁洗稿/伪造指纹 | **已验收**（E36 + E38 + 7 份真语料实测全绿） |
-| 21 | `core/bid_composer.py` | **E37/E38/E39 F8 正向编制输出** | 统一蓝图 IR（`BidBlueprint`/`BlueprintSection`）+ V1/V2/AI 动态构章撰稿与排版；E38 打通 `client` 动态构章并发撰稿+三防废标锁+独立居中封面/Heading 1-3/TOC 域；**E39 精修**：单章瞬时失败最多 2 次自动重试（穿透 `PipelineCancelled`）、剔除首段重复章标题、过滤目录与投标须知/澄清/计分方法噪音并精准抽取 PDF 分值评分细则、解除章节/主题/表行与偏离表（分批 ≤12 条全覆盖）四处截断，第二部分同名证照按角色合并去重并输出「2.0 总览索引表 + 2.1~2.N 逐项独立附页（自动嵌台账 PNG/JPG 扫描图、PDF 示装订框、缺省示 A4 全幅粘贴框）」 | **已验收**（E37 + E38 + E39 + 北交大 04 包 PDF 实测全绿） |
-| 22 | `core/composer_skills.py` | **E38 写作 Skill 规范库** | 内置 3 套标书写作与动态版式 Skill（`政采严谨全响应版`/`技术架构深度攻坚版`/`简洁高效商务精编版`）；支持 YAML Frontmatter+Markdown 与 JSON 双格式规范化解析与安全钳位（字号/行距/颜色/目标字数）、SSRF 域名白名单及 GitHub→Gitee 离线优雅降级导入 | **已验收**（E38 全套单测与 API 全绿） |
+| 21 | `core/bid_composer.py` | **E37/E38/E39/E41 F8 正向编制输出** | 统一蓝图 IR（`BidBlueprint`/`BlueprintSection`）+ V1/V2/AI 动态构章撰稿与排版；E38 打通 `client` 动态构章并发撰稿+三防废标锁+独立居中封面/Heading 1-3/TOC 域；**E39 精修**：单章瞬时失败最多 2 次自动重试（穿透 `PipelineCancelled`）、剔除首段重复章标题、过滤目录与投标须知/澄清/计分方法噪音并精准抽取 PDF 分值评分细则、解除章节/主题/表行与偏离表（分批 ≤12 条全覆盖）四处截断，第二部分同名证照按角色合并去重并输出「2.0 总览索引表 + 2.1~2.N 逐项独立附页（自动嵌台账 PNG/JPG 扫描图、PDF 示装订框、缺省示 A4 全幅粘贴框）」；**E41 接线**：放行显式 `knowledge_provider`（如 `IndicatorLibraryProvider`）在非 V2 `skeleton_v1` 模式下同样激活、透传指标评分提示 `scoring_ref`/`notice` 并在 `stats` 记录 `biz_line`/`use_indicator_library` | **已验收**（E37 + E38 + E39 + E41 + 北交大 04/02 包实测全绿） |
+| 22 | `core/composer_skills.py` | **E38/E41 写作 Skill 规范库** | 内置 5 套标书写作与动态版式 Skill（E38 通用 3 套 + E41 新增`网络安全与数据安全专精版`/`并行MaaS算力服务专精版` 含 `biz_line`）；支持 YAML Frontmatter+Markdown 与 JSON 双格式规范化解析与安全钳位（字号/行距/颜色/目标字数）、SSRF 域名白名单及 GitHub→Gitee 离线优雅降级导入 | **已验收**（E38 + E41 全套单测与 API 全绿） |
 | 23 | `core/privacy_sanitizer.py` | **E40 合规脱敏引擎** | 0-Token 确定性等长幂等掩码（18 位 GB 11643 身份证校验 + 语境银行卡/对公账号掩码，排除项目编号/标准号/金额/无关联标签），原物理文件逐字节不改写；`scan_document_file` 强制 `ocr_images=False` 快速扫描计数，`sanitize_chat_messages` 保全 `image_url` 多模态结构 | **已验收**（E40 单测与实弹探针全绿） |
+| 24 | `core/indicator_library.py` | **E41 指标标准应答库** | 0-Token 三层（`common` 通用底座 + `security`/`maas` 专精）标准指标检索引擎，实现 `KnowledgeSnippetProvider` 协议（BM25+同义词+关键词三级门控、严格跨业务线隔离）与 `CompositeKnowledgeSnippetProvider`（指标优先+历史库互补）；内置 `_BID_MONEY_RE` 禁具体报价数字硬锁，并提供 `get_biz_line_indicator_overview` 透出典型评分标准与高分提示 | **已验收**（E41 单测与 04/02 包实弹探针全绿） |
 
 ---
 
@@ -155,8 +156,9 @@ BidGuard-Agent/
 12. **~~E38 · F8 写作 Skills 与 AI 动态编排及 E36 异步深层研判卡~~ 已验收入库（`7b7d511`）**：新增 `core/composer_skills.py`（3 套预设+GitHub→Gitee 降级+本地上传）与第 14 表 `composer_skills`、F8 AI 动态构章撰稿（防覆盖遗漏与防金钱幻觉锁+独立封面/原生 Heading/TOC+修复 Part 4 `eval_rule` 串行+紧凑待填抽屉）、E36 解除 6 份上限+AI 语义深层复核及两模块后台异步队列/取消/重启复位/`<keep-alive>` 切页不中断。
 13. **~~E39 · F8 初稿质量精修与资格证明逐项附页增强卡~~ 已验收入库（`c196c84`）**：并发单章失败自动重试 2 次、剔除 AI 冗余重复章标题、过滤目录与投标须知/澄清/计分方法噪音并提取 PDF 评分细则、解除 4 处截断（偏离表分批覆盖全量条款）、第二部分证照带角色合并去重并改造为「2.0 总览索引表 + 2.1~2.N 逐项独立附页（自动嵌台账图片原件并清洗 DB/API 宿主路径）」。
 14. **F8 二期 · 企业自有 `.docx` 投标母版上传与样式套打（单独立卡 Backlog）**：按 2026-11-18 架构边界裁决，一期（E38）由「Skill 版式约束 + AI 动态控制」承担排版；后续单独立卡支持企业上传自带封面/页眉页脚/预设样式表的 `.docx` 母版文件，将动态章节与表格无损套入母版占位符导出。
-15. **~~E40 · 合规底座双锁卡~~ 已实现验证（工作区待确认 commit）**：全局 `core/privacy_sanitizer.py` + `core/llm_gateway.py` 三出口（`chat`/`chat_stream`/`embed`）统一脱敏（仅限 GB 11643 18 位身份证与语境银行卡/对公账号，原文件逐字节不改写）、上传接口零 OCR `privacy_stats` 回显，以及 `STRICT_INNER_MODEL_ONLY` 内网模型防外泄双锁（拦截公网 `422 MODEL_HOST_FORBIDDEN`、放行私网/`prod`/白名单并忽略存量公网配置）。
-16. **E41/E42 领导业务需求规划（待后续立卡）**：① 标书评分预估（按 F1 评分细则逐项比对正文输出预估得分表+失分点+提分建议）；② 分业务线常见指标及标准应答输出（**网络安全/数据安全流转**可参照真实投标语料 `安易—02/04包` 中的环境隔离/逻辑磁盘控制/7×24 与 1 小时响应指标；**并行科技 MaaS 平台 Token 服务**已从 `E:\agent\1.合同法律\公司测试合同` 提取出真实产品体系、DeepSeek/GLM 模型 SKU、输入/输出 Token 与缓存计价维度，技术 SLA 可用性/并发 QPS/TPM 与等保口经需补充）。
+15. **~~E40 · 合规底座双锁卡~~ 已验收入库（`377e37d`）**：全局 `core/privacy_sanitizer.py` + `core/llm_gateway.py` 三出口（`chat`/`chat_stream`/`embed`）统一脱敏（仅限 GB 11643 18 位身份证与语境银行卡/对公账号，原文件逐字节不改写）、上传接口零 OCR `privacy_stats` 回显，以及 `STRICT_INNER_MODEL_ONLY` 内网模型防外泄双锁（拦截公网 `422 MODEL_HOST_FORBIDDEN`、放行私网/`prod`/白名单并忽略存量公网配置）。
+16. **~~E41 · 双业务线专精 Skills 与常见指标标准应答库卡~~ 已实现验证（工作区待确认 commit）**：落实领导【重点】需求 3（常见指标与对应内容自动化输出）+ 需求 5（不同业务线核心指标、评分标准自动化输出与参考）。新增 `core/indicator_library.py` 三层检索与 `scripts/build_indicator_library.py` 0-Token 抽提脚本、`data/rules/indicator_library/` 三库（`review_status: pending_human_review`，实测安易 04/02 口径纠偏与槽位护栏）、扩充 `网络安全与数据安全专精版`/`并行MaaS算力服务专精版` 内置预设与 `composer_skills.biz_line` 平滑迁移、`GET /api/composer/indicators` 与非 V2 模式接线及前端评分参考预览卡片。
+17. **后续规划 Backlog（E42 评分预估 / E43 暗标防废标双模式）**：① **E43 暗标防废标双模式**：F1 提取暗标格式/底纹/目录禁用规则，F8 增加暗标素颜安全导出（去封面/TOC/底纹加粗/身份线索与自定屏蔽词）；② **E42 标书评分预估**：按 F1 评分细则逐项比对正文输出预估得分表 + 失分点 + 提分建议。
 
 ---
 
@@ -207,14 +209,15 @@ BidGuard-Agent/
 | E37 | 标书编制输出与无损修订交付卡（正向骨架 V1 + V2 方案库槽位 & Clean 定稿导出）：新增 `core/bid_composer.py` 统一蓝图 IR（封面与投标函、企业长期/常规证照台账对齐、`Decimal` 限价下的 `[待人工填报金额...]` 报价锁、★/▲ 实质性偏离表预制、按评分细则生成方案大纲及 V2 可插拔 `KnowledgeSnippetProvider` 并支持无资料回退 `outline_stub`）与 `export_composed_bid_docx`；`core/redline.py` 提取共享 `_locate_and_split_quote_runs` 并新增 `export_clean_revised_docx`（Run 级保样替换并清零全文及 ZIP 内 `w:comment*`/`comments*.xml`，漏应答诚实归入 `manual_pending_items`）；`bid_compose_drafts` 第 13 表 + `/api/composer` 第 13 组路由 + `/api/reports/{task_id}/clean-bid`（`.pdf` 返回 `422 PDF_CLEAN_EXPORT_UNSUPPORTED`）；前端 `BidComposerView.vue`（`/composer`）与详情/交付快捷入口全链路打通 | **已验收入库（`caef678`）** | **307 项** + `vue-tsc` + `vite build` |
 | E38 | F8 写作 Skills 与 AI 动态编排及 E36 异步深层研判卡：新增 `core/composer_skills.py`（3 套内置预设、YAML/MD 与 JSON 解析、SSRF 白名单及 GitHub→Gitee 离线降级导入）与第 14 表 `composer_skills`；升级 `core/bid_composer.py`（LLM 动态构章+并发撰稿、覆盖率兜底+防金钱/合同幻觉锁、剥离 Part 4 `eval_rule` 串行污染、独立居中封面/原生 Heading 1-3/TOC 域与 `append_checklist_at_end` 分离）；升级 `core/bid_similarity.py`（解除 6 份上限、新增 `run_similarity_ai_review` 双侧 `verify_quote` 与禁洗稿锁）；`backend/worker.py::submit_background_job` + `recover_stale_tasks` + `composer`/`similarity` 异步队列/中断及老库加列迁移；前端 `<keep-alive>` 纳入双视图、Skill 管理弹窗、紧凑待填抽屉、无限份数与 AI 复核开关全链路收尾 | **已验收入库（`7b7d511`）** | **312 项** + `vue-tsc` + `vite build` |
 | E39 | F8 初稿质量精修与资格证明逐项附页增强卡：`core/bid_composer.py` 新增单章瞬时失败最多 2 次自动重试（`PipelineCancelled` 直通穿透）、`_strip_duplicate_leading_title` 剥离重复章标题首行、`_is_procedural_topic` / `_extract_pdf_scoring_items` 过滤目录与投标须知/澄清/计分方法噪音并精准抓取 PDF 评分细则、解除章节/主题/表行与偏离表（分批 ≤12 条覆盖全量待核对条目）四处截断；第二部分同名证照按角色合并去重（`必交资格 / 加分参考`）并改造为「2.0 总览索引表 + 2.1~2.N 逐项独立附页（自动居中嵌入台账 PNG/JPG 原件扫描图，PDF 示装订框，缺省示 A4 全幅粘贴框）」；`backend/routers/composer.py` 持久化 `blueprint_json` 前清洗宿主 `attachment_path`；`BidComposerView.vue` 第二部分增加角色级别与附页形态预览 | **已验收入库（`c196c84`）** | **317 项** + `vue-tsc` + `vite build` |
-| E40 | 合规底座双锁卡：新增 `core/privacy_sanitizer.py`（18 位 GB 11643 身份证校验与语境银行账号/分组等长幂等掩码、`scan_document_file` 强制 `ocr_images=False`）；在 `core/llm_gateway.py` `chat()`/`chat_stream()`/`embed()` 三出口统一挂载脱敏（保全 `image_url` 多模态、`PRIVACY_SANITIZE_ENABLED` 开关、`total_usage()` 记录脱敏计数）与 `STRICT_INNER_MODEL_ONLY` + `INNER_MODEL_EXTRA_HOSTS` 内网锁定（放行私网/`prod`/白名单、禁 `demo` 回退、拒接公网 `UserModelConfig`）；`model_config.py` 公网拦截 `422 MODEL_HOST_FORBIDDEN`；`worker.py::resolve_effective_llm_client` 忽略存量公网配置告警回退 `prod`；`/api/checks`、`/api/extract`、`/api/qa/sessions/{id}/attachments` 与前端 `CheckTaskList.vue`/`ExtractView.vue`/`QaChatView.vue` 透传并展示只读 `privacy_stats` 且原文件字节零改动 | **工作区已完成待确认 commit** | **321 项** + `vue-tsc` + `vite build` |
+| E40 | 合规底座双锁卡：新增 `core/privacy_sanitizer.py`（18 位 GB 11643 身份证校验与语境银行账号/分组等长幂等掩码、`scan_document_file` 强制 `ocr_images=False`）；在 `core/llm_gateway.py` `chat()`/`chat_stream()`/`embed()` 三出口统一挂载脱敏（保全 `image_url` 多模态、`PRIVACY_SANITIZE_ENABLED` 开关、`total_usage()` 记录脱敏计数）与 `STRICT_INNER_MODEL_ONLY` + `INNER_MODEL_EXTRA_HOSTS` 内网锁定（放行私网/`prod`/白名单、禁 `demo` 回退、拒接公网 `UserModelConfig`）；`model_config.py` 公网拦截 `422 MODEL_HOST_FORBIDDEN`；`worker.py::resolve_effective_llm_client` 忽略存量公网配置告警回退 `prod`；`/api/checks`、`/api/extract`、`/api/qa/sessions/{id}/attachments` 与前端 `CheckTaskList.vue`/`ExtractView.vue`/`QaChatView.vue` 透传并展示只读 `privacy_stats` 且原文件字节零改动 | **已验收入库（`377e37d`）** | **321 项** + `vue-tsc` + `vite build` |
+| E41 | 双业务线专精 Skills 与常见指标标准应答库卡：新增 `core/indicator_library.py`（`common/security/maas` 三层叠加与严格跨线隔离、`IndicatorLibraryProvider` 0-Token BM25/同义词三级门控、`CompositeKnowledgeSnippetProvider` 指标优先+历史库互补、`get_biz_line_indicator_overview` 评分参考透出及 `_BID_MONEY_RE` 禁具体报价硬锁）；新增 `data/rules/indicator_library/{common,security,maas}_indicators.json`（含 `scoring_ref` 与 `review_status: pending_human_review`）及 `scripts/build_indicator_library.py` 0-Token 草稿抽提脚本；`core/composer_skills.py` 扩至 5 套内置预设并支持 `biz_line`；`core/bid_composer.py` 放行显式 `knowledge_provider` 于非 V2 模式生效、透传 `notice`/`scoring_ref`；`backend/models.py` 为 `composer_skills` 新增 `biz_line` 与 `ensure_composer_skills_columns`；`backend/routers/composer.py` 幂等补种存量租户新 Skill、新增 `GET /api/composer/indicators` 及 `/generate` `use_indicator_library` 接线；前端 `types.ts`/`index.ts`/`BidComposerView.vue` 同步业务线徽标、开关与典型评分标准预览卡片 | **工作区已完成待确认 commit** | **325 项** + `vue-tsc` + `vite build` |
 | chore | requirements 全量钉死（`59e6b64`）、基础镜像 digest 钉死、弹窗会话记忆 | `90a1947` | — |
 
 ---
 
 ## 7. 协作纪律与工程红线（完整版见 `AGENTS.md`）
 
-1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线已演进至 **321 项**（含 E40 4 项及 14 表检验）。
+1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线已演进至 **325 项**（含 E41 4 项及 14 表检验）。
 2. **凡能算的绝不进大模型（0 Token 优先）**；金额全程 `Decimal` 禁 `float`（ROUND_HALF_UP 量化 0.01）。
 3. **LLM 只吃局部窗口 + 强制 `quote_verifier` 溯源**；严禁整本标书直塞。
 4. **宁缺毋滥显式降级**：无法对齐必返回 NEED_MANUAL；找不到位置绝不乱锚（E5 五级定位链 + 置信护栏）；页码诚实回退字符偏移并标"不一定准确"。
@@ -235,7 +238,7 @@ BidGuard-Agent/
 | `INTERFACE.md` | core↔backend 契约锁死 | 涉签名改动时同步 |
 | `FRONTEND.md` | 前端架构说明 | 前端结构变化时同步 |
 | `docs/DEPLOY.md` | 本机直跑 + Linux Docker/离线/裸机部署手册 | 部署变化时同步 |
-| `docs/cards/` | 任务卡归档（B1~E40 全套定稿与验收记录） | 每立卡/收卡时归档 |
+| `docs/cards/` | 任务卡归档（B1~E41 全套定稿与验收记录） | 每立卡/收卡时归档 |
 | `.workbuddy/memory/`（不入库） | 架构侧 AI 工作日志 | 每日实质工作后追加 |
 
 **冷启动口令**（新会话开场）：「先读取 AGENTS.md 和 HANDOVER.md，然后读 docs/cards/ 里最新一张卡，汇报理解后等我派活。」
@@ -244,7 +247,7 @@ BidGuard-Agent/
 
 ## 9. 本文档信息来源
 
-1. `docs/cards/` B1~E40 全部任务卡与验收记录；`派发归档/` 各阶段派发包全文
-2. Git 提交链（`git log --oneline`，已演进至 `c196c84` E39 终版；E40 已完成全量验证留在工作区待确认 commit）；321 项 pytest + `vue-tsc` + `vite build`（1865 模块）实测回执
+1. `docs/cards/` B1~E41 全部任务卡与验收记录；`派发归档/` 各阶段派发包全文
+2. Git 提交链（`git log --oneline`，已演进至 `377e37d` E40 终版；E41 已完成全量验证留在工作区待确认 commit）；325 项 pytest + `vue-tsc` + `vite build`（1865 模块）实测回执
 3. `data/corpus/m0_samples/` 三本账 + `语料清单.md`、`data/corpus/sim_bids/_README.md`；`data/corpus/regulations/` 法规种子
 4. `E:\agent\Contract-Review-Agent\HANDOVER_V2.md`（文档骨架参照）

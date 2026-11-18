@@ -405,6 +405,7 @@ class ComposerSkill(Base):
     user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
     name = Column(String(128), nullable=False)
     description = Column(String(512), nullable=False, default='')
+    biz_line = Column(String(32), nullable=False, default='general')  # 'general' | 'security' | 'maas'
     source_type = Column(String(32), nullable=False, default='custom')  # 'builtin' | 'custom' | 'github' | 'gitee' | 'local_file'
     source_url = Column(String(512), nullable=True)
     writing_instructions = Column(Text, nullable=False, default='')
@@ -550,6 +551,10 @@ _E38_COMPOSER_DRAFT_NEW_COLS = (
     ('finished_at', 'TIMESTAMP', 'DATETIME'),
 )
 
+_E41_COMPOSER_SKILL_NEW_COLS = (
+    ('biz_line', "VARCHAR(32) NOT NULL DEFAULT 'general'", "VARCHAR(32) NOT NULL DEFAULT 'general'"),
+)
+
 
 def ensure_similarity_reports_columns(bind_or_conn: Any, *, auto_commit: bool = True) -> list[str]:
     """E38：老库 similarity_reports 自动补齐异步进度与 AI 深层研判列。"""
@@ -571,6 +576,16 @@ def ensure_bid_compose_drafts_columns(bind_or_conn: Any, *, auto_commit: bool = 
     )
 
 
+def ensure_composer_skills_columns(bind_or_conn: Any, *, auto_commit: bool = True) -> list[str]:
+    """E41：老库 composer_skills 自动补齐 biz_line 业务线列。"""
+    return _ensure_table_columns_generic(
+        bind_or_conn,
+        'composer_skills',
+        _E41_COMPOSER_SKILL_NEW_COLS,
+        auto_commit=auto_commit,
+    )
+
+
 @event.listens_for(Base.metadata, 'after_create')
 def _auto_migrate_bid_check_tasks_after_create(target, connection, **kwargs):
     """在 Base.metadata.create_all（含 init_db 启动时）完成后自动探测老库并补齐各阶段新列。"""
@@ -581,6 +596,7 @@ def _auto_migrate_bid_check_tasks_after_create(target, connection, **kwargs):
     ensure_company_certificates_e35_columns(connection, auto_commit=False)
     ensure_similarity_reports_columns(connection, auto_commit=False)
     ensure_bid_compose_drafts_columns(connection, auto_commit=False)
+    ensure_composer_skills_columns(connection, auto_commit=False)
 
 
 def apply_sqlite_pragmas(engine: Any) -> None:
@@ -620,10 +636,11 @@ def apply_sqlite_pragmas(engine: Any) -> None:
                 for col_name, _pg_t, sq_t in (_E25_CERT_NEW_COLS + _E35_CERT_NEW_COLS):
                     if col_name not in cc_cols:
                         cursor.execute(f"ALTER TABLE company_certificates ADD COLUMN {col_name} {sq_t}")
-            # E38：同步探测补齐 similarity_reports 与 bid_compose_drafts 异步/Skill列
+            # E38 / E41：同步探测补齐 similarity_reports、bid_compose_drafts 与 composer_skills 新列
             for tbl_name, col_specs in (
                 ('similarity_reports', _E38_SIMILARITY_NEW_COLS),
                 ('bid_compose_drafts', _E38_COMPOSER_DRAFT_NEW_COLS),
+                ('composer_skills', _E41_COMPOSER_SKILL_NEW_COLS),
             ):
                 cursor.execute(f"PRAGMA table_info({tbl_name})")
                 t_cols = {row[1] for row in cursor.fetchall()}

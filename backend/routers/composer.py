@@ -22,6 +22,7 @@ from backend.models import (
     ComposerSkill,
 )
 from backend.schemas import (
+    BizLineIndicatorOverviewOut,
     ComposerSkillListOut,
     ComposerSkillOut,
     ComposerSkillUpsertRequest,
@@ -39,13 +40,23 @@ from backend.worker import (
     resolve_effective_llm_client,
     resolve_project_path,
 )
-from core.bid_composer import compose_bid_blueprint, export_composed_bid_docx
+from core.bid_composer import (
+    LocalKnowledgeSnippetProvider,
+    compose_bid_blueprint,
+    export_composed_bid_docx,
+)
 from core.composer_skills import (
     BUILTIN_WRITING_SKILLS,
     SkillImportError,
     import_skill_from_git_url,
     normalize_layout_spec,
     parse_skill_markdown_or_json,
+)
+from core.indicator_library import (
+    CompositeKnowledgeSnippetProvider,
+    IndicatorLibraryProvider,
+    get_biz_line_indicator_overview,
+    normalize_skill_biz_line,
 )
 
 router = APIRouter(prefix='/api/composer', tags=['composer'])
@@ -89,46 +100,62 @@ def _validate_and_read_upload(upload: UploadFile, role_label: str) -> tuple[str,
 
 
 def ensure_builtin_composer_skills(db: Session, tenant_id: int) -> list[ComposerSkill]:
-    """为租户幂等初始化 3 套默认投标写作 Skills（零外网依赖、支持后续编辑或增删）。"""
+    """为租户幂等初始化/补种内置投标写作 Skills（支持存量老库自动补齐 E41 业务线新预设）。"""
     existing = (
         db.query(ComposerSkill)
         .filter_by(tenant_id=tenant_id)
         .order_by(ComposerSkill.is_default.desc(), ComposerSkill.id.asc())
         .all()
     )
-    if existing:
-        return existing
+    by_name = {str(r.name): r for r in existing}
+    has_any_default = any(bool(r.is_default) for r in existing)
+    dirty = False
 
-    created: list[ComposerSkill] = []
     for item in BUILTIN_WRITING_SKILLS:
+        item_name = str(item['name'])
+        item_biz = normalize_skill_biz_line(item.get('biz_line'))
+        existing_row = by_name.get(item_name)
+        if existing_row is not None:
+            if bool(existing_row.is_builtin) and normalize_skill_biz_line(getattr(existing_row, 'biz_line', 'general')) != item_biz:
+                existing_row.biz_line = item_biz
+                dirty = True
+            continue
         row = ComposerSkill(
             tenant_id=tenant_id,
             user_id=None,
-            name=item['name'],
+            name=item_name,
             description=item['description'],
+            biz_line=item_biz,
             source_type=item['source_type'],
             source_url=None,
             writing_instructions=item['writing_instructions'],
             layout_spec_json=normalize_layout_spec(item['layout_spec']),
             is_builtin=bool(item.get('is_builtin', True)),
-            is_default=bool(item.get('is_default', False)),
+            is_default=(bool(item.get('is_default', False)) and not has_any_default),
         )
         db.add(row)
-        created.append(row)
-    db.commit()
-    for row in created:
-        db.refresh(row)
-    return created
+        dirty = True
+
+    if dirty:
+        db.commit()
+    return (
+        db.query(ComposerSkill)
+        .filter_by(tenant_id=tenant_id)
+        .order_by(ComposerSkill.is_default.desc(), ComposerSkill.id.asc())
+        .all()
+    )
 
 
 def _skill_to_out(row: ComposerSkill) -> ComposerSkillOut:
     layout = normalize_layout_spec(row.layout_spec_json or {})
+    biz_line = normalize_skill_biz_line(getattr(row, 'biz_line', 'general'))
     return ComposerSkillOut(
         id=row.id,
         tenant_id=row.tenant_id,
         user_id=row.user_id,
         name=row.name,
         description=row.description or '',
+        biz_line=biz_line,  # type: ignore[arg-type]
         source_type=row.source_type or 'custom',
         source_url=row.source_url,
         writing_instructions=row.writing_instructions or '',
@@ -173,6 +200,8 @@ def _to_summary_out(row: BidComposeDraft) -> ComposeDraftSummaryOut:
         user_id=row.user_id,
         skill_id=row.skill_id,
         skill_name=str(stats.get('skill_name') or bp.get('skill_name') or ''),
+        biz_line=normalize_skill_biz_line(stats.get('biz_line') or 'general'),
+        use_indicator_library=bool(stats.get('use_indicator_library', False)),
         title=row.title,
         status=str(row.status or 'completed'),
         progress=int(row.progress if row.progress is not None else 100),
@@ -203,6 +232,16 @@ def _to_detail_out(row: BidComposeDraft) -> ComposeDraftDetailOut:
 
 # ── Skills 管理与 GitHub / Gitee / 本地导入端点 ─────────────────────────────
 
+@router.get('/indicators', response_model=BizLineIndicatorOverviewOut)
+def get_composer_indicators_overview(
+    biz_line: str = 'general',
+    _current_user: AuthUser = Depends(get_current_user),
+) -> BizLineIndicatorOverviewOut:
+    """E41：按业务线（general/security/maas）预览常见/专精指标标准应答与典型评分标准参考。"""
+    overview = get_biz_line_indicator_overview(biz_line)
+    return BizLineIndicatorOverviewOut(**overview)
+
+
 @router.get('/skills', response_model=ComposerSkillListOut)
 def list_composer_skills(
     current_user: AuthUser = Depends(get_current_user),
@@ -230,6 +269,7 @@ def create_composer_skill(
         user_id=current_user.get('id'),
         name=body.name.strip()[:120],
         description=(body.description or '').strip()[:500],
+        biz_line=normalize_skill_biz_line(body.biz_line),
         source_type='custom',
         writing_instructions=body.writing_instructions.strip()[:16_000],
         layout_spec_json=normalize_layout_spec(body.layout_spec),
@@ -245,7 +285,7 @@ def create_composer_skill(
         tenant_id=tenant_id,
         user_id=current_user.get('id'),
         target=f"skill:{row.id}",
-        detail_json={'name': row.name},
+        detail_json={'name': row.name, 'biz_line': row.biz_line},
     )
     return _skill_to_out(row)
 
@@ -263,6 +303,7 @@ def update_composer_skill(
         db.query(ComposerSkill).filter_by(tenant_id=tenant_id).update({'is_default': False})
     row.name = body.name.strip()[:120]
     row.description = (body.description or '').strip()[:500]
+    row.biz_line = normalize_skill_biz_line(body.biz_line)
     row.writing_instructions = body.writing_instructions.strip()[:16_000]
     row.layout_spec_json = normalize_layout_spec(body.layout_spec)
     row.is_default = bool(body.is_default)
@@ -275,7 +316,7 @@ def update_composer_skill(
         tenant_id=tenant_id,
         user_id=current_user.get('id'),
         target=f"skill:{row.id}",
-        detail_json={'name': row.name},
+        detail_json={'name': row.name, 'biz_line': row.biz_line},
     )
     return _skill_to_out(row)
 
@@ -331,6 +372,7 @@ def preview_skill_from_url(
     return SkillImportPreviewOut(
         name=parsed['name'],
         description=parsed['description'],
+        biz_line=normalize_skill_biz_line(parsed.get('biz_line')),  # type: ignore[arg-type]
         source_type=parsed['source_type'],
         source_url=parsed.get('source_url'),
         writing_instructions=parsed['writing_instructions'],
@@ -364,6 +406,7 @@ def import_skill_by_url(
         user_id=current_user.get('id'),
         name=parsed['name'],
         description=parsed['description'],
+        biz_line=normalize_skill_biz_line(parsed.get('biz_line')),
         source_type=parsed['source_type'],
         source_url=parsed.get('source_url'),
         writing_instructions=parsed['writing_instructions'],
@@ -426,6 +469,7 @@ def import_skill_from_file(
         user_id=current_user.get('id'),
         name=parsed['name'],
         description=parsed['description'],
+        biz_line=normalize_skill_biz_line(parsed.get('biz_line')),
         source_type='local_file',
         source_url=None,
         writing_instructions=parsed['writing_instructions'],
@@ -459,6 +503,7 @@ def generate_composed_draft(
     package_no: Optional[int] = Form(default=None),
     skill_id: Optional[int] = Form(default=None),
     use_ai: bool = Form(default=True),
+    use_indicator_library: bool = Form(default=False),
     async_run: bool = Form(default=False),
     current_user: AuthUser = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -488,13 +533,17 @@ def generate_composed_draft(
         selected_skill = next((s for s in skills if s.is_default), skills[0])
 
     skill_snapshot: Optional[dict[str, Any]] = None
+    skill_biz_line = 'general'
     if selected_skill is not None:
+        skill_biz_line = normalize_skill_biz_line(getattr(selected_skill, 'biz_line', 'general'))
         skill_snapshot = {
             'id': selected_skill.id,
             'name': selected_skill.name,
+            'biz_line': skill_biz_line,
             'writing_instructions': selected_skill.writing_instructions,
             'layout_spec': normalize_layout_spec(selected_skill.layout_spec_json or {}),
         }
+    should_use_indicator_lib = bool(use_indicator_library) or (skill_biz_line != 'general')
 
     source_task: Optional[BidCheckTask] = None
     if task_id is not None:
@@ -546,7 +595,11 @@ def generate_composed_draft(
         compose_mode=mode_clean,
         blueprint_json={},
         output_path='',
-        stats_json={'skill_name': selected_skill.name if selected_skill else ''},
+        stats_json={
+            'skill_name': selected_skill.name if selected_skill else '',
+            'biz_line': skill_biz_line,
+            'use_indicator_library': should_use_indicator_lib,
+        },
         started_at=_utc_now(),
     )
     db.add(draft)
@@ -647,6 +700,15 @@ def generate_composed_draft(
                 except Exception:
                     sess.rollback()
 
+            effective_provider: Any = None
+            if should_use_indicator_lib:
+                ind_provider = IndicatorLibraryProvider(biz_line=skill_biz_line)
+                if mode_clean == 'knowledge_draft_v2' and saved_k_paths:
+                    local_provider = LocalKnowledgeSnippetProvider(saved_k_paths, client=llm_client)
+                    effective_provider = CompositeKnowledgeSnippetProvider([ind_provider, local_provider])
+                else:
+                    effective_provider = ind_provider
+
             blueprint = compose_bid_blueprint(
                 tender_abs,
                 ledger_certs=certs,
@@ -655,6 +717,7 @@ def generate_composed_draft(
                 task_title=eff_title,
                 package_no=package_no,
                 compose_mode=mode_clean,
+                knowledge_provider=effective_provider,
                 knowledge_paths=saved_k_paths,
                 client=llm_client,
                 skill=skill_snapshot,
@@ -663,6 +726,9 @@ def generate_composed_draft(
                 cancel_check=lambda: worker.check_cancelled(job_key, cancel_ev),
             )
             bp_dict = blueprint.to_dict()
+            bp_stats = bp_dict.setdefault('stats', {})
+            bp_stats['biz_line'] = skill_biz_line
+            bp_stats['use_indicator_library'] = should_use_indicator_lib
 
             _COMPOSER_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
             out_docx_abs = (_COMPOSER_OUTPUT_ROOT / f"{tenant_id}_{draft_id}_投标文件初稿骨架.docx").resolve()

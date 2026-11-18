@@ -7,6 +7,8 @@ import { checksApi, composerApi, reportsApi, validateUploadFile } from '@/api'
 import type {
   BidFindingOut,
   BidTaskOut,
+  BizLineIndicatorOverviewOut,
+  BizLineType,
   CleanBidExportOut,
   ComposeBlueprintData,
   ComposeBlueprintSection,
@@ -35,12 +37,14 @@ const savingSkill = ref(false)
 const skillForm = reactive<{
   name: string
   description: string
+  biz_line: BizLineType
   writing_instructions: string
   is_default: boolean
   layout_spec: SkillLayoutSpec
 }>({
   name: '',
   description: '',
+  biz_line: 'general',
   writing_instructions: '',
   is_default: false,
   layout_spec: {
@@ -73,6 +77,10 @@ const composeTitle = ref('')
 const packageNo = ref<number | undefined>(undefined)
 const composeMode = ref<ComposeModeType>('skeleton_v1')
 const useAi = ref(true)
+const useIndicatorLibrary = ref(false)
+const indicatorOverview = ref<BizLineIndicatorOverviewOut | null>(null)
+const loadingIndicators = ref(false)
+const showIndicatorPreview = ref(false)
 const knowledgeFiles = ref<File[]>([])
 const generating = ref(false)
 const cancellingDraft = ref(false)
@@ -106,6 +114,27 @@ const selectedSkill = computed<ComposerSkillOut | null>(() => {
   if (!selectedSkillId.value) return null
   return skillList.value.find((s) => s.id === selectedSkillId.value) || null
 })
+
+function bizLineLabel(line?: string | null): string {
+  if (line === 'security') return '网络安全与数据安全'
+  if (line === 'maas') return '并行科技 MaaS 平台'
+  return '通用政采'
+}
+
+function bizLineTagType(line?: string | null): 'info' | 'danger' | 'primary' {
+  if (line === 'security') return 'danger'
+  if (line === 'maas') return 'primary'
+  return 'info'
+}
+
+async function loadIndicatorOverview(bizLine: BizLineType = 'general'): Promise<void> {
+  loadingIndicators.value = true
+  try {
+    indicatorOverview.value = await composerApi.listIndicators(bizLine)
+  } finally {
+    loadingIndicators.value = false
+  }
+}
 
 const activeBlueprint = computed<ComposeBlueprintData | null>(() => {
   if (!activeDraft.value || !activeDraft.value.blueprint) return null
@@ -197,6 +226,7 @@ function resetSkillForm(): void {
   editingSkillId.value = null
   skillForm.name = ''
   skillForm.description = ''
+  skillForm.biz_line = 'general'
   skillForm.writing_instructions = ''
   skillForm.is_default = false
   skillForm.layout_spec = {
@@ -218,6 +248,7 @@ function startEditSkill(sk: ComposerSkillOut): void {
   editingSkillId.value = sk.id
   skillForm.name = sk.name
   skillForm.description = sk.description
+  skillForm.biz_line = (sk.biz_line || 'general') as BizLineType
   skillForm.writing_instructions = sk.writing_instructions
   skillForm.is_default = sk.is_default
   skillForm.layout_spec = { ...sk.layout_spec }
@@ -234,6 +265,7 @@ async function handleSaveSkill(): Promise<void> {
     const payload = {
       name: skillForm.name.trim(),
       description: skillForm.description.trim(),
+      biz_line: skillForm.biz_line,
       writing_instructions: skillForm.writing_instructions.trim(),
       layout_spec: { ...skillForm.layout_spec },
       is_default: skillForm.is_default,
@@ -399,6 +431,7 @@ async function handleGenerateDraft(): Promise<void> {
       packageNo: packageNo.value || undefined,
       skillId: selectedSkillId.value,
       useAi: useAi.value,
+      useIndicatorLibrary: useIndicatorLibrary.value,
       asyncRun: true,
     })
     activeDraft.value = detail
@@ -542,6 +575,16 @@ watch(cleanTaskId, (nv) => {
   void loadAcceptedForClean(nv)
 })
 
+watch(
+  selectedSkill,
+  (sk) => {
+    const bLine = (sk?.biz_line || 'general') as BizLineType
+    useIndicatorLibrary.value = bLine !== 'general'
+    void loadIndicatorOverview(bLine)
+  },
+  { immediate: true },
+)
+
 onMounted(async () => {
   if (route.query.tab === 'clean') {
     mainTab.value = 'clean'
@@ -639,14 +682,106 @@ onUnmounted(() => {
                   <el-option
                     v-for="sk in skillList"
                     :key="sk.id"
-                    :label="`${sk.name}${sk.is_default ? '（默认）' : ''}`"
+                    :label="`${sk.name}（${bizLineLabel(sk.biz_line)}）${sk.is_default ? '· 默认' : ''}`"
                     :value="sk.id"
-                  />
+                  >
+                    <div class="skill-opt-row">
+                      <span>{{ sk.name }}{{ sk.is_default ? '（默认）' : '' }}</span>
+                      <el-tag size="small" :type="bizLineTagType(sk.biz_line)" effect="plain">
+                        {{ bizLineLabel(sk.biz_line) }}
+                      </el-tag>
+                    </div>
+                  </el-option>
                 </el-select>
                 <el-checkbox v-model="useAi">启用 AI 动态构章撰稿</el-checkbox>
               </div>
               <div v-if="selectedSkill" class="skill-summary-line">
+                <el-tag size="small" :type="bizLineTagType(selectedSkill.biz_line)" class="mr-6">
+                  {{ bizLineLabel(selectedSkill.biz_line) }}
+                </el-tag>
                 {{ selectedSkill.description }}（{{ selectedSkill.layout_spec.font_zh }} {{ selectedSkill.layout_spec.font_size_pt }}pt · 行距 {{ selectedSkill.layout_spec.line_spacing }} · 目标 {{ selectedSkill.layout_spec.target_section_words }} 字/节）
+              </div>
+
+              <div class="indicator-bar">
+                <div class="ind-switch-wrap">
+                  <el-switch v-model="useIndicatorLibrary" size="small" />
+                  <span>引用公司常见指标与业务线标准应答库</span>
+                </div>
+                <el-button
+                  size="small"
+                  link
+                  type="primary"
+                  :loading="loadingIndicators"
+                  @click="showIndicatorPreview = !showIndicatorPreview"
+                >
+                  {{
+                    showIndicatorPreview
+                      ? '收起核心指标与评分参考'
+                      : `预览核心指标与评分标准参考（${indicatorOverview?.total_indicators || 0} 项）`
+                  }}
+                </el-button>
+              </div>
+
+              <div v-if="showIndicatorPreview && indicatorOverview" class="indicator-preview-box">
+                <div class="ind-pv-head">
+                  <strong>{{ indicatorOverview.biz_line_label }} · 核心指标与评分参考</strong>
+                  <el-tag
+                    size="small"
+                    :type="indicatorOverview.review_status === 'reviewed' ? 'success' : 'warning'"
+                    effect="plain"
+                  >
+                    {{ indicatorOverview.review_status === 'reviewed' ? '已人工终审' : '待人工终审口径（缺项均留槽位）' }}
+                  </el-tag>
+                </div>
+
+                <div v-if="indicatorOverview.line_scoring_summary.length > 0" class="ind-score-summary">
+                  <div class="ind-sub-title">典型评分标准维度与权重参考</div>
+                  <div
+                    v-for="(sd, sdi) in indicatorOverview.line_scoring_summary"
+                    :key="sdi"
+                    class="ind-score-row"
+                  >
+                    <el-tag size="small" effect="plain">{{ sd.dimension }}</el-tag>
+                    <span class="ind-weight">{{ sd.typical_weight }}</span>
+                    <span class="ind-focus">{{ sd.key_focus }}</span>
+                  </div>
+                </div>
+
+                <div class="ind-sub-title mt-8">标准应答指标清单（含评分点与参数槽）</div>
+                <el-table :data="indicatorOverview.indicators" size="small" border max-height="230">
+                  <el-table-column prop="category" label="分类" width="88" />
+                  <el-table-column label="指标名称" min-width="160">
+                    <template #default="{ row }">
+                      <div>
+                        <strong>{{ (row as Record<string, unknown>).indicator_name }}</strong>
+                      </div>
+                      <el-tag
+                        size="small"
+                        :type="(row as Record<string, unknown>).line === 'common' ? 'info' : bizLineTagType(String((row as Record<string, unknown>).line))"
+                        effect="plain"
+                      >
+                        {{ (row as Record<string, unknown>).line === 'common' ? '通用底座' : bizLineLabel(String((row as Record<string, unknown>).line)) }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="常见评分标准与高分提示" min-width="210">
+                    <template #default="{ row }">
+                      <div class="ind-cell-text">
+                        <div>{{ ((row as Record<string, unknown>).scoring_ref as Record<string, unknown>)?.weight_hint || '—' }}</div>
+                        <div class="ind-tip-line">
+                          {{ ((row as Record<string, unknown>).scoring_ref as Record<string, unknown>)?.high_score_tips || '' }}
+                        </div>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="标准应答口径 / 待确认槽" min-width="230">
+                    <template #default="{ row }">
+                      <div class="ind-cell-text">
+                        {{ String((row as Record<string, unknown>).standard_response || '').slice(0, 110) }}…
+                      </div>
+                    </template>
+                  </el-table-column>
+                </el-table>
               </div>
 
               <el-radio-group v-model="composeMode" class="mode-radios">
@@ -796,6 +931,17 @@ onUnmounted(() => {
                   </div>
                   <div class="bp-sub-tags">
                     <el-tag size="small" type="info">Skill：{{ activeBlueprint.skill_name || activeDraft.skill_name }}</el-tag>
+                    <el-tag size="small" :type="bizLineTagType(activeDraft.biz_line)">
+                      业务线：{{ bizLineLabel(activeDraft.biz_line) }}
+                    </el-tag>
+                    <el-tag
+                      v-if="activeDraft.use_indicator_library || Boolean((activeBlueprint.stats as Record<string, unknown>)?.use_indicator_library)"
+                      size="small"
+                      type="success"
+                      effect="plain"
+                    >
+                      公司指标库已注入（命中 {{ (activeBlueprint.stats as Record<string, unknown>)?.indicator_matched_topics || 0 }} 节）
+                    </el-tag>
                     <el-tag size="small" :type="activeBlueprint.ai_status === 'done' ? 'success' : 'warning'">
                       {{
                         activeBlueprint.ai_status === 'done'
@@ -1187,8 +1333,15 @@ onUnmounted(() => {
           </div>
           <el-table :data="skillList" border size="small">
             <el-table-column prop="name" label="名称" min-width="150" />
-            <el-table-column prop="source_type" label="来源" width="90" />
-            <el-table-column label="版式特征" min-width="170">
+            <el-table-column label="所属业务线" width="145">
+              <template #default="{ row }">
+                <el-tag size="small" :type="bizLineTagType((row as ComposerSkillOut).biz_line)" effect="plain">
+                  {{ bizLineLabel((row as ComposerSkillOut).biz_line) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="source_type" label="来源" width="85" />
+            <el-table-column label="版式特征" min-width="155">
               <template #default="{ row }">
                 <span>
                   {{ (row as ComposerSkillOut).layout_spec.font_zh }} /
@@ -1210,6 +1363,13 @@ onUnmounted(() => {
           <el-form label-width="120px" size="small">
             <el-form-item label="Skill 名称" required>
               <el-input v-model="skillForm.name" placeholder="例如：政采医疗信息化高分模板" />
+            </el-form-item>
+            <el-form-item label="所属业务线">
+              <el-select v-model="skillForm.biz_line" style="width: 240px">
+                <el-option value="general" label="通用政采（仅挂载通用常见指标）" />
+                <el-option value="security" label="网络安全与数据安全（专精+通用）" />
+                <el-option value="maas" label="并行科技 MaaS 平台（专精+通用）" />
+              </el-select>
             </el-form-item>
             <el-form-item label="适用场景说明">
               <el-input v-model="skillForm.description" placeholder="一句话说明写作风格与版式特点" />
@@ -1383,6 +1543,99 @@ onUnmounted(() => {
   border-left: 3px solid #2563eb;
   padding: 6px 10px;
   border-radius: 4px;
+}
+
+.skill-opt-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.mr-6 {
+  margin-right: 6px;
+}
+
+.indicator-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.ind-switch-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: #1e293b;
+}
+
+.indicator-preview-box {
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.ind-pv-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.ind-score-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 8px;
+}
+
+.ind-sub-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 4px;
+}
+
+.ind-score-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #334155;
+}
+
+.ind-weight {
+  font-weight: 600;
+  color: #1d4ed8;
+}
+
+.ind-focus {
+  color: #475569;
+}
+
+.ind-cell-text {
+  font-size: 12px;
+  color: #334155;
+  line-height: 1.45;
+}
+
+.ind-tip-line {
+  margin-top: 3px;
+  color: #0f766e;
 }
 
 .upload-box,

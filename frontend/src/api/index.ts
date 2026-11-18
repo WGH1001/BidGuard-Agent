@@ -14,6 +14,8 @@ import type {
   BidTaskListOut,
   BidTaskOut,
   BidTaskRenamePayload,
+  BizLineIndicatorOverviewOut,
+  BizLineType,
   CertificateOut,
   CertificateParseOut,
   CertificateUpsertRequest,
@@ -629,6 +631,11 @@ export const similarityApi = {
 
 /** E37 + E38 标书编制输出、Skills 管理与无损修订中心 API (/api/composer) */
 export const composerApi = {
+  listIndicators(bizLine: BizLineType = 'general'): Promise<BizLineIndicatorOverviewOut> {
+    return get<BizLineIndicatorOverviewOut>('/composer/indicators', {
+      params: { biz_line: bizLine },
+    })
+  },
   listSkills(): Promise<ComposerSkillListOut> {
     return get<ComposerSkillListOut>('/composer/skills')
   },
@@ -669,6 +676,7 @@ export const composerApi = {
     packageNo?: number | null
     skillId?: number | null
     useAi?: boolean
+    useIndicatorLibrary?: boolean
     asyncRun?: boolean
   }): Promise<ComposeDraftDetailOut> {
     const fd = new FormData()
@@ -692,6 +700,7 @@ export const composerApi = {
       fd.append('skill_id', String(payload.skillId))
     }
     fd.append('use_ai', payload.useAi !== false ? 'true' : 'false')
+    fd.append('use_indicator_library', payload.useIndicatorLibrary ? 'true' : 'false')
     fd.append('async_run', payload.asyncRun ? 'true' : 'false')
     return post<ComposeDraftDetailOut>('/composer/generate', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
