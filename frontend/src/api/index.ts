@@ -21,6 +21,9 @@ import type {
   CleanBidExportOut,
   ComposeDraftDetailOut,
   ComposeDraftListOut,
+  ComposerSkillListOut,
+  ComposerSkillOut,
+  ComposerSkillUpsertPayload,
   DashboardStatsOut,
   DeliverIncludeKey,
   DeviationExportOut,
@@ -50,6 +53,7 @@ import type {
   RunTaskTriggerOut,
   SimilarityReportDetailOut,
   SimilarityReportListOut,
+  SkillImportPreviewOut,
   TenantCreateRequest,
   TenantOut,
   TenantUpdateRequest,
@@ -576,13 +580,15 @@ export const regulationsApi = {
   },
 }
 
-/** E36 多标书交叉比对 API (/api/similarity) */
+/** E36 + E38 多标书交叉比对 API (/api/similarity) */
 export const similarityApi = {
   compare(payload: {
     bidFiles: File[]
     labels?: string[]
     tenderFile?: File | null
     title?: string
+    enableAiReview?: boolean
+    asyncRun?: boolean
   }): Promise<SimilarityReportDetailOut> {
     const fd = new FormData()
     for (const f of payload.bidFiles) {
@@ -597,10 +603,15 @@ export const similarityApi = {
     if (payload.labels && payload.labels.length > 0) {
       fd.append('labels_json', JSON.stringify(payload.labels))
     }
+    fd.append('enable_ai_review', payload.enableAiReview ? 'true' : 'false')
+    fd.append('async_run', payload.asyncRun ? 'true' : 'false')
     return post<SimilarityReportDetailOut>('/similarity/compare', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 300000,
     })
+  },
+  cancel(reportId: number): Promise<OkResponse> {
+    return post<OkResponse>(`/similarity/${reportId}/cancel`)
   },
   list(): Promise<SimilarityReportListOut> {
     return get<SimilarityReportListOut>('/similarity')
@@ -616,8 +627,39 @@ export const similarityApi = {
   },
 }
 
-/** E37 标书编制输出与无损修订中心 API (/api/composer) */
+/** E37 + E38 标书编制输出、Skills 管理与无损修订中心 API (/api/composer) */
 export const composerApi = {
+  listSkills(): Promise<ComposerSkillListOut> {
+    return get<ComposerSkillListOut>('/composer/skills')
+  },
+  createSkill(payload: ComposerSkillUpsertPayload): Promise<ComposerSkillOut> {
+    return post<ComposerSkillOut>('/composer/skills', payload)
+  },
+  updateSkill(skillId: number, payload: ComposerSkillUpsertPayload): Promise<ComposerSkillOut> {
+    return put<ComposerSkillOut>(`/composer/skills/${skillId}`, payload)
+  },
+  deleteSkill(skillId: number): Promise<OkResponse> {
+    return del<OkResponse>(`/composer/skills/${skillId}`)
+  },
+  previewSkillUrl(urlOrRepo: string, allowGiteeFallback = true): Promise<SkillImportPreviewOut> {
+    return post<SkillImportPreviewOut>('/composer/skills/preview-url', {
+      url_or_repo: urlOrRepo,
+      allow_gitee_fallback: allowGiteeFallback,
+    })
+  },
+  importSkillUrl(urlOrRepo: string, allowGiteeFallback = true): Promise<ComposerSkillOut> {
+    return post<ComposerSkillOut>('/composer/skills/import-url', {
+      url_or_repo: urlOrRepo,
+      allow_gitee_fallback: allowGiteeFallback,
+    })
+  },
+  importSkillFile(file: File): Promise<ComposerSkillOut> {
+    const fd = new FormData()
+    fd.append('file', file, file.name)
+    return post<ComposerSkillOut>('/composer/skills/import-file', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
   generate(payload: {
     tenderFile?: File | null
     taskId?: number | null
@@ -625,6 +667,9 @@ export const composerApi = {
     composeMode?: 'skeleton_v1' | 'knowledge_draft_v2'
     title?: string
     packageNo?: number | null
+    skillId?: number | null
+    useAi?: boolean
+    asyncRun?: boolean
   }): Promise<ComposeDraftDetailOut> {
     const fd = new FormData()
     if (payload.tenderFile) {
@@ -643,10 +688,18 @@ export const composerApi = {
     if (typeof payload.packageNo === 'number' && payload.packageNo > 0) {
       fd.append('package_no', String(payload.packageNo))
     }
+    if (typeof payload.skillId === 'number' && payload.skillId > 0) {
+      fd.append('skill_id', String(payload.skillId))
+    }
+    fd.append('use_ai', payload.useAi !== false ? 'true' : 'false')
+    fd.append('async_run', payload.asyncRun ? 'true' : 'false')
     return post<ComposeDraftDetailOut>('/composer/generate', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 300000,
     })
+  },
+  cancelDraft(draftId: number): Promise<OkResponse> {
+    return post<OkResponse>(`/composer/drafts/${draftId}/cancel`)
   },
   listDrafts(): Promise<ComposeDraftListOut> {
     return get<ComposeDraftListOut>('/composer/drafts')
@@ -654,7 +707,7 @@ export const composerApi = {
   getDraft(draftId: number): Promise<ComposeDraftDetailOut> {
     return get<ComposeDraftDetailOut>(`/composer/drafts/${draftId}`)
   },
-  downloadDraft(draftId: number, fallbackName = `${draftId}_投标文件初稿骨架.docx`): Promise<string> {
+  downloadDraft(draftId: number, fallbackName = `${draftId}_投标文件初稿.docx`): Promise<string> {
     return downloadFromApi(`/composer/drafts/${draftId}/download`, fallbackName)
   },
   deleteDraft(draftId: number): Promise<OkResponse> {

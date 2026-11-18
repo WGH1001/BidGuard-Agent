@@ -851,11 +851,32 @@ export interface SimilarityFindingOut {
   detail: Record<string, unknown>
 }
 
+export interface SimilarityAiReviewMatchOut {
+  a_label: string
+  b_label: string
+  similarity_type: string
+  reason: string
+  a_quote: string
+  b_quote: string
+  quote_verified: boolean
+}
+
+export interface SimilarityAiReviewOut {
+  status: string
+  summary: string
+  semantic_matches: SimilarityAiReviewMatchOut[]
+  false_positive_notes: string[]
+}
+
 export interface SimilarityReportSummaryOut {
   id: number
   tenant_id: number
   user_id?: number | null
   title: string
+  status?: string
+  progress?: number
+  stage_detail?: string
+  error_msg?: string | null
   tender_filename?: string | null
   bidder_count: number
   max_similarity_pct: number
@@ -868,6 +889,7 @@ export interface SimilarityReportDetailOut extends SimilarityReportSummaryOut {
   bidders: SimilarityBidderOut[]
   pair_matrix: SimilarityPairOut[]
   findings: SimilarityFindingOut[]
+  ai_review?: SimilarityAiReviewOut | null
   export_url: string
 }
 
@@ -877,6 +899,59 @@ export interface SimilarityReportListOut {
 }
 
 export type ComposeModeType = 'skeleton_v1' | 'knowledge_draft_v2'
+
+export interface SkillLayoutSpec {
+  cover_style: 'gov_clean' | 'navy_business' | 'tech_modern'
+  font_zh: string
+  heading_font_zh: string
+  font_size_pt: number
+  line_spacing: number
+  accent_color_hex: string
+  table_header_bg: string
+  include_toc: boolean
+  append_checklist_at_end: boolean
+  target_section_words: number
+  tone: 'formal_gov' | 'technical_deep' | 'concise_direct'
+}
+
+export interface ComposerSkillOut {
+  id: number
+  tenant_id: number
+  user_id?: number | null
+  name: string
+  description: string
+  source_type: string
+  source_url?: string | null
+  writing_instructions: string
+  layout_spec: SkillLayoutSpec
+  is_builtin: boolean
+  is_default: boolean
+  created_at?: string | null
+}
+
+export interface ComposerSkillListOut {
+  total: number
+  items: ComposerSkillOut[]
+}
+
+export interface ComposerSkillUpsertPayload {
+  name: string
+  description: string
+  writing_instructions: string
+  layout_spec: Partial<SkillLayoutSpec>
+  is_default?: boolean
+}
+
+export interface SkillImportPreviewOut {
+  name: string
+  description: string
+  source_type: string
+  source_url?: string | null
+  writing_instructions: string
+  layout_spec: SkillLayoutSpec
+  fetched_from_provider: string
+  used_fallback: boolean
+}
 
 export interface ComposeManualItem {
   section_id: string
@@ -906,6 +981,11 @@ export interface ComposeBlueprintData {
   package_no?: number | null
   compose_mode: ComposeModeType
   tender_filename: string
+  skill_id?: number | null
+  skill_name?: string
+  skill_layout?: SkillLayoutSpec
+  ai_status?: string
+  planned_chapters?: Array<Record<string, unknown>>
   sections: ComposeBlueprintSection[]
   manual_checklist: ComposeManualItem[]
   cert_match_summary: Record<string, unknown>
@@ -916,7 +996,13 @@ export interface ComposeDraftSummaryOut {
   id: number
   tenant_id: number
   user_id?: number | null
+  skill_id?: number | null
+  skill_name?: string
   title: string
+  status?: string
+  progress?: number
+  stage_detail?: string
+  error_msg?: string | null
   tender_filename: string
   compose_mode: ComposeModeType
   project_name: string
@@ -925,6 +1011,7 @@ export interface ComposeDraftSummaryOut {
   price_cap?: string | null
   manual_item_count: number
   scoring_fill_mode: string
+  ai_status?: string
   stats: Record<string, unknown>
   download_url: string
   created_at?: string | null

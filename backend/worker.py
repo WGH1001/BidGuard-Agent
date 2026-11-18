@@ -25,7 +25,7 @@ import queue
 import re
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from sqlalchemy.orm import Session
 
@@ -448,23 +448,27 @@ class BidTaskWorker:
         self.broadcaster = SSEBroadcaster()
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='bidguard_worker')
         self._lock = threading.Condition(threading.Lock())
-        self._in_flight: set[int] = set()
-        self._cancel_flags: dict[int, threading.Event] = {}
+        self._in_flight: set[int | str] = set()
+        self._cancel_flags: dict[int | str, threading.Event] = {}
         self._f1_heartbeat_interval_sec: float = _DEFAULT_F1_HEARTBEAT_SEC
         self._shutdown = False
 
-    def register_task_execution(self, task_id: int) -> threading.Event:
-        """为指定任务注册本次运行的取消信号并标记在途。"""
-        tid = int(task_id)
+    @staticmethod
+    def _norm_job_key(task_id: int | str) -> int | str:
+        return task_id if isinstance(task_id, str) else int(task_id)
+
+    def register_task_execution(self, task_id: int | str) -> threading.Event:
+        """为指定任务（整数 task_id 或字符串 job_key 如 composer:1）注册取消信号并标记在途。"""
+        tid = self._norm_job_key(task_id)
         with self._lock:
             ev = threading.Event()
             self._cancel_flags[tid] = ev
             self._in_flight.add(tid)
             return ev
 
-    def unregister_task_execution(self, task_id: int, ev: Optional[threading.Event] = None) -> None:
+    def unregister_task_execution(self, task_id: int | str, ev: Optional[threading.Event] = None) -> None:
         """任务退出时清理本次运行态（比对 Event 实例防旧线程误删新一轮重跑令牌）。"""
-        tid = int(task_id)
+        tid = self._norm_job_key(task_id)
         with self._lock:
             cur_ev = self._cancel_flags.get(tid)
             if ev is None or cur_ev is ev or cur_ev is None:
@@ -472,9 +476,9 @@ class BidTaskWorker:
                 self._in_flight.discard(tid)
                 self._lock.notify_all()
 
-    def request_cancel(self, task_id: int) -> bool:
+    def request_cancel(self, task_id: int | str) -> bool:
         """向在途任务发出协作式中断请求，返回是否命中活跃或注册中任务。"""
-        tid = int(task_id)
+        tid = self._norm_job_key(task_id)
         with self._lock:
             ev = self._cancel_flags.get(tid)
             if ev is not None:
@@ -487,18 +491,43 @@ class BidTaskWorker:
                 return True
             return False
 
-    def is_cancel_requested(self, task_id: int) -> bool:
-        tid = int(task_id)
+    def is_cancel_requested(self, task_id: int | str) -> bool:
+        tid = self._norm_job_key(task_id)
         with self._lock:
             ev = self._cancel_flags.get(tid)
             return bool(ev is not None and ev.is_set())
 
-    def check_cancelled(self, task_id: int, ev: Optional[threading.Event] = None) -> None:
+    def check_cancelled(self, task_id: int | str, ev: Optional[threading.Event] = None) -> None:
         """协作式取消检查点：命中即抛出 _PipelineCancelled(BaseException)。"""
         if ev is not None and ev.is_set():
             raise _PipelineCancelled('用户中断')
         if self.is_cancel_requested(task_id):
             raise _PipelineCancelled('用户中断')
+
+    def submit_background_job(
+        self,
+        job_key: str,
+        fn: Callable[[threading.Event], None],
+        *,
+        sync: bool = False,
+    ) -> None:
+        """提交通用后台任务（供 E38 标书编制与多标书比对异步执行、取消与优雅关闭回收）。"""
+        cancel_ev = self.register_task_execution(job_key)
+
+        def _runner() -> None:
+            try:
+                fn(cancel_ev)
+            finally:
+                self.unregister_task_execution(job_key, cancel_ev)
+
+        if sync:
+            _runner()
+            return
+        with self._lock:
+            if self._shutdown:
+                self.unregister_task_execution(job_key, cancel_ev)
+                raise RuntimeError('Worker 已关闭')
+        self._executor.submit(_runner)
 
     def _reset_task_for_rerun(self, task_id: int) -> None:
         """E3R 实锤 B + E11 + E25 + E30：启动/重跑前清 SSE 终态缓存、清旧偏离表、置空旧 stats_json 并置 extracting(progress=0)。"""

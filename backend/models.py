@@ -59,6 +59,7 @@ class Tenant(Base):
     certificates = relationship('CompanyCertificate', back_populates='tenant', cascade='all, delete-orphan')
     similarity_reports = relationship('SimilarityReport', back_populates='tenant', cascade='all, delete-orphan')
     compose_drafts = relationship('BidComposeDraft', back_populates='tenant', cascade='all, delete-orphan')
+    composer_skills = relationship('ComposerSkill', back_populates='tenant', cascade='all, delete-orphan')
 
 
 # ── 2. users（用户与角色鉴权表）──────────────────────────────────────────
@@ -340,7 +341,7 @@ class RegulationArticle(Base):
     law = relationship('RegulationLaw', back_populates='articles')
 
 
-# ── 12. similarity_reports（E36 多标书交叉比对与相似度分析报告表）──────────
+# ── 12. similarity_reports（E36 + E38 多标书交叉比对与 AI 深层研判报告表）──
 class SimilarityReport(Base):
     __tablename__ = 'similarity_reports'
 
@@ -348,37 +349,72 @@ class SimilarityReport(Base):
     tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
     title = Column(String(256), nullable=False)
+    status = Column(String(24), nullable=False, default='completed')  # 'queued' | 'running' | 'completed' | 'failed'
+    progress = Column(Integer, nullable=False, default=100)
+    stage_detail = Column(String(256), nullable=False, default='')
+    error_msg = Column(Text, nullable=True)
     tender_filename = Column(String(256), nullable=True)
     tender_path = Column(String(512), nullable=True)
     bidders_json = Column(JSON, nullable=False, default=list)
     pair_matrix_json = Column(JSON, nullable=False, default=list)
     findings_json = Column(JSON, nullable=False, default=list)
+    ai_review_json = Column(JSON, nullable=True)
     max_similarity_pct = Column(Numeric(5, 2), nullable=False, default=Decimal('0.00'))
     risk_level = Column(String(16), nullable=False, default='low')  # 'low' | 'medium' | 'high'
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_utc_now)
     updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
 
     tenant = relationship('Tenant', back_populates='similarity_reports')
 
 
-# ── 13. bid_compose_drafts（E37 标书编制输出与蓝图草稿表）───────────────────
+# ── 13. bid_compose_drafts（E37 + E38 标书编制输出与 AI 异步草稿表）─────────
 class BidComposeDraft(Base):
     __tablename__ = 'bid_compose_drafts'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    skill_id = Column(Integer, nullable=True, index=True)
     title = Column(String(256), nullable=False)
+    status = Column(String(24), nullable=False, default='completed')  # 'queued' | 'running' | 'completed' | 'failed'
+    progress = Column(Integer, nullable=False, default=100)
+    stage_detail = Column(String(256), nullable=False, default='')
+    error_msg = Column(Text, nullable=True)
     tender_filename = Column(String(256), nullable=False)
     tender_path = Column(String(512), nullable=False)
     compose_mode = Column(String(32), nullable=False, default='skeleton_v1')  # 'skeleton_v1' | 'knowledge_draft_v2'
     blueprint_json = Column(JSON, nullable=False, default=dict)
     output_path = Column(String(512), nullable=False, default='')
     stats_json = Column(JSON, nullable=False, default=dict)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_utc_now)
     updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
 
     tenant = relationship('Tenant', back_populates='compose_drafts')
+
+
+# ── 14. composer_skills（E38 F8 写作规范与排版约束 Skills 表）────────────────
+class ComposerSkill(Base):
+    __tablename__ = 'composer_skills'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    name = Column(String(128), nullable=False)
+    description = Column(String(512), nullable=False, default='')
+    source_type = Column(String(32), nullable=False, default='custom')  # 'builtin' | 'custom' | 'github' | 'gitee' | 'local_file'
+    source_url = Column(String(512), nullable=True)
+    writing_instructions = Column(Text, nullable=False, default='')
+    layout_spec_json = Column(JSON, nullable=False, default=dict)
+    is_builtin = Column(Boolean, nullable=False, default=False)
+    is_default = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
+    updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
+
+    tenant = relationship('Tenant', back_populates='composer_skills')
 
 
 # ── E11 老库平滑加列守卫（无 Alembic 环境下自动探测缺列并执行 ALTER TABLE）────
@@ -494,14 +530,57 @@ def ensure_company_certificates_e35_columns(bind_or_conn: Any, *, auto_commit: b
     )
 
 
+_E38_SIMILARITY_NEW_COLS = (
+    ('status', "VARCHAR(24) NOT NULL DEFAULT 'completed'", "VARCHAR(24) NOT NULL DEFAULT 'completed'"),
+    ('progress', 'INTEGER NOT NULL DEFAULT 100', 'INTEGER NOT NULL DEFAULT 100'),
+    ('stage_detail', "VARCHAR(256) NOT NULL DEFAULT ''", "VARCHAR(256) NOT NULL DEFAULT ''"),
+    ('error_msg', 'TEXT', 'TEXT'),
+    ('ai_review_json', 'JSON', 'JSON'),
+    ('started_at', 'TIMESTAMP', 'DATETIME'),
+    ('finished_at', 'TIMESTAMP', 'DATETIME'),
+)
+
+_E38_COMPOSER_DRAFT_NEW_COLS = (
+    ('skill_id', 'INTEGER', 'INTEGER'),
+    ('status', "VARCHAR(24) NOT NULL DEFAULT 'completed'", "VARCHAR(24) NOT NULL DEFAULT 'completed'"),
+    ('progress', 'INTEGER NOT NULL DEFAULT 100', 'INTEGER NOT NULL DEFAULT 100'),
+    ('stage_detail', "VARCHAR(256) NOT NULL DEFAULT ''", "VARCHAR(256) NOT NULL DEFAULT ''"),
+    ('error_msg', 'TEXT', 'TEXT'),
+    ('started_at', 'TIMESTAMP', 'DATETIME'),
+    ('finished_at', 'TIMESTAMP', 'DATETIME'),
+)
+
+
+def ensure_similarity_reports_columns(bind_or_conn: Any, *, auto_commit: bool = True) -> list[str]:
+    """E38：老库 similarity_reports 自动补齐异步进度与 AI 深层研判列。"""
+    return _ensure_table_columns_generic(
+        bind_or_conn,
+        'similarity_reports',
+        _E38_SIMILARITY_NEW_COLS,
+        auto_commit=auto_commit,
+    )
+
+
+def ensure_bid_compose_drafts_columns(bind_or_conn: Any, *, auto_commit: bool = True) -> list[str]:
+    """E38：老库 bid_compose_drafts 自动补齐 skill_id 与异步进度列。"""
+    return _ensure_table_columns_generic(
+        bind_or_conn,
+        'bid_compose_drafts',
+        _E38_COMPOSER_DRAFT_NEW_COLS,
+        auto_commit=auto_commit,
+    )
+
+
 @event.listens_for(Base.metadata, 'after_create')
 def _auto_migrate_bid_check_tasks_after_create(target, connection, **kwargs):
-    """在 Base.metadata.create_all（含 init_db 启动时）完成后自动探测老库并补齐 E11 / E24 / E25 / E35 新列。"""
+    """在 Base.metadata.create_all（含 init_db 启动时）完成后自动探测老库并补齐各阶段新列。"""
     ensure_bid_check_tasks_columns(connection, auto_commit=False)
     ensure_qa_sessions_columns(connection, auto_commit=False)
     ensure_user_model_configs_columns(connection, auto_commit=False)
     ensure_company_certificates_columns(connection, auto_commit=False)
     ensure_company_certificates_e35_columns(connection, auto_commit=False)
+    ensure_similarity_reports_columns(connection, auto_commit=False)
+    ensure_bid_compose_drafts_columns(connection, auto_commit=False)
 
 
 def apply_sqlite_pragmas(engine: Any) -> None:
@@ -541,6 +620,17 @@ def apply_sqlite_pragmas(engine: Any) -> None:
                 for col_name, _pg_t, sq_t in (_E25_CERT_NEW_COLS + _E35_CERT_NEW_COLS):
                     if col_name not in cc_cols:
                         cursor.execute(f"ALTER TABLE company_certificates ADD COLUMN {col_name} {sq_t}")
+            # E38：同步探测补齐 similarity_reports 与 bid_compose_drafts 异步/Skill列
+            for tbl_name, col_specs in (
+                ('similarity_reports', _E38_SIMILARITY_NEW_COLS),
+                ('bid_compose_drafts', _E38_COMPOSER_DRAFT_NEW_COLS),
+            ):
+                cursor.execute(f"PRAGMA table_info({tbl_name})")
+                t_cols = {row[1] for row in cursor.fetchall()}
+                if t_cols:
+                    for col_name, _pg_t, sq_t in col_specs:
+                        if col_name not in t_cols:
+                            cursor.execute(f"ALTER TABLE {tbl_name} ADD COLUMN {col_name} {sq_t}")
         except Exception:
             pass
         cursor.close()

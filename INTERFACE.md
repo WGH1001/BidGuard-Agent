@@ -279,22 +279,43 @@ import_regulation_file(session, file_path: str | Path, law_name_hint: Optional[s
 crawl_all_configured_sources(session, yaml_path: Optional[str | Path] = None) -> dict
 ```
 
-### 1.11 E36 多标书交叉比对与相似度分析（`SimilarityCheckView` / `/api/similarity`）
+### 1.11 E36/E38 多标书交叉比对与相似度分析（`SimilarityCheckView` / `/api/similarity`）
 
 ```python
-# core/bid_similarity.py —— 0 Token 确定性五维比对引擎（禁洗稿改写/禁伪造元数据）
+# core/bid_similarity.py —— 0 Token 确定性五维比对 + 可选 AI 语义深层复核引擎（禁洗稿改写/禁伪造元数据）
 extract_file_fingerprint(file_path: str | Path) -> dict[str, Any]
-analyze_bid_similarity(bid_files: list[dict[str, Any]], *,
-                       tender_path: Optional[str | Path] = None) -> dict[str, Any]
-# 接收 2~6 份投标书（含 label/path）+ 可选 tender_path 剥离公共条款，返回 bidders / pair_matrix / findings / max_similarity_pct / risk_level
+analyze_bid_similarity(
+    bid_files: list[dict[str, Any]],
+    *,
+    tender_path: Optional[str | Path] = None,
+    enable_ai_review: bool = False,
+    client: Any = None,
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+    cancel_check: Optional[Callable[[], None]] = None,
+) -> dict[str, Any]
+# 接收 >=2 份投标书（E38 解除 6 份上限，含 label/path）+ 可选 tender_path 剥离公共条款，
+# 返回 bidders / pair_matrix / findings / max_similarity_pct / risk_level / ai_review
 # 隐私红线：手机号/18 位身份证号仅保留 hash 键与前 3 后 4 位脱敏文本，quotes 同步强制脱敏
+
+run_similarity_ai_review(
+    parsed_bids: list[dict[str, Any]],
+    pair_matrix: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+    client: Any,
+    *,
+    cancel_check: Optional[Callable[[], None]] = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]
+# 仅在 enable_ai_review=True 且 client != None 时触发；双侧原文必须通过 verify_quote 核验，
+# 严禁输出规避清标/洗稿/伪造指纹文案；产出 'ai_review'（status='done'|'skipped'|'failed'）与 'SEMANTIC_ISOMORPHISM' findings
+
 export_similarity_report_docx(report: dict[str, Any], output_path: str | Path) -> Path
+# ai_review.status == 'done' 时追加「五、AI 语义深层复核与误报排查综述」章节
 ```
 
-### 1.12 E37 标书编制输出与无损修订交付（`BidComposerView` / `/api/composer` & `/api/reports/{task_id}/clean-bid`）
+### 1.12 E37/E38 标书编制输出与无损修订交付（`BidComposerView` / `/api/composer` & `/api/reports/{task_id}/clean-bid`）
 
 ```python
-# core/bid_composer.py —— F8 标书正向骨架装配引擎（V1 零幻觉 + V2 可插拔方案库）
+# core/bid_composer.py —— F8 标书正向动态编排引擎（Skill 约束 + AI 动态构章撰稿 + V1/V2 蓝图与排版输出）
 class KnowledgeSnippetProvider(Protocol):
     @property
     def has_documents(self) -> bool: ...
@@ -317,10 +338,17 @@ compose_bid_blueprint(
     knowledge_paths: Optional[list[str | Path]] = None,
     client: Any = None,
     checklist: Optional[dict[str, Any]] = None,
+    skill: Any = None,
+    use_ai: bool = True,
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+    cancel_check: Optional[Callable[[], None]] = None,
 ) -> BidBlueprint
-# 铁律：报价栏强制填充 `[待人工填报金额...]` 占位符，限价核算纯 Decimal；V2 无参考文件时优雅回退 'outline_stub'
+# E38 三条防废标硬锁：① 报价栏强制 `[待人工填报金额...]`；② _UNGROUNDED_MONEY_RE / _UNGROUNDED_CONTRACT_RE 防金额/合同幻觉；
+# ③ _plan_chapters_with_llm 覆盖率兜底守卫（所有 ★/▲ 与评分主题必覆盖）+ 剥离 eval_rule/评分细则串行污染
 
 export_composed_bid_docx(blueprint: BidBlueprint | dict[str, Any], output_path: str | Path) -> Path
+# 按 skill_layout 动态渲染独立居中封面（gov_clean/navy_business/tech_modern）、原生 Heading 1/2/3 与可选 TOC 域、
+# XML 表格列宽与单元格边距，并依据 append_checklist_at_end 控制是否将内部待核对清单附于文末
 
 # core/redline.py —— 原位无损修订 Clean 定稿导出
 export_clean_revised_docx(
@@ -334,9 +362,32 @@ export_clean_revised_docx(
 # 保留封面/页眉页脚/表格与 Run 样式，全量清除 w:commentRangeStart/End/Reference 与 comments*.xml；大段漏应答诚实归入 manual_pending_items
 ```
 
+### 1.13 E38 写作 Skill 规范解析与 GitHub/Gitee 安全导入（`core/composer_skills.py`）
+
+```python
+BUILTIN_WRITING_SKILLS: list[dict[str, Any]]  # 3 套预设：政采严谨全响应版 / 技术架构深度攻坚版 / 简洁高效商务精编版
+DEFAULT_LAYOUT_SPEC: dict[str, Any]
+
+class SkillImportError(RuntimeError):
+    code: str     # 'UNSAFE_SKILL_URL' | 'EXTERNAL_SKILL_UNREACHABLE' | 'SKILL_FILE_NOT_FOUND' | 'INVALID_SKILL_FORMAT'
+    message: str
+    detail: dict[str, Any]
+
+normalize_layout_spec(raw: Any) -> dict[str, Any]
+parse_skill_markdown_or_json(raw_text: str, *, source_name: str = '',
+                               default_source_type: str = 'custom',
+                               source_url: Optional[str] = None) -> dict[str, Any]
+# 纯文本规则解析（yaml.safe_load + 正文 / JSON）；安全钳位字号 9..16pt、行距 1.0..2.5、6 位 HEX 色号、target_section_words 150..3000
+
+import_skill_from_git_url(url_or_repo: str, *, allow_gitee_fallback: bool = True,
+                          timeout: float = 12.0) -> dict[str, Any]
+# 严格 SSRF 白名单（仅 https 且域名 ∈ {'github.com','raw.githubusercontent.com','api.github.com','gitee.com'}）；
+# 自动复用系统代理/TUN；GitHub 超时/不可达时降级检查 Gitee 并拒收 HTML 登录页，外网彻底不可用时抛 EXTERNAL_SKILL_UNREACHABLE 引导本地导入
+```
+
 ---
 
-## 2. 数据库 13 张表规格（backend/models.py）
+## 2. 数据库 14 张表规格（backend/models.py）
 
 > SQLAlchemy 2.0 风格；PostgreSQL 16 主库，`DATABASE_URL` 为 sqlite 时无缝回退（开发/单测）。
 > 所有表含 `id`（自增主键）、`created_at`；更新型表另含 `updated_at`。时间一律 UTC。
@@ -354,8 +405,9 @@ export_clean_revised_docx(
 | 9 | `user_model_configs` | 用户级自定义模型配置 | `user_id`(唯一 FK)、`base_url`、`api_key_encrypted`、`model_flash`、`model_flagship`、`supports_reasoning_effort`(bool)、`supports_vision`(bool) |
 | 10 | `regulation_laws` | E4 招投标法规主表 | `name`（唯一《...》全称）、`issuing_body`、`effective_date`、`source_url`、`article_count`、`content_hash`、`fetched_at`、`is_seed`(bool) |
 | 11 | `regulation_articles` | E4 法规条文表 | `law_id` FK(级联删除)、`article_no`("第X条")、`article_title`(可空)、`content`(Text)、`content_hash`、`UNIQUE(law_id, article_no)` |
-| 12 | `similarity_reports` | E36 多标书交叉比对报告 | `tenant_id`、`user_id`、`title`、`tender_filename`、`tender_path`、`bidders_json`、`pair_matrix_json`、`findings_json`、`max_similarity_pct`(Numeric 5,2)、`risk_level`(low/medium/high) |
-| 13 | `bid_compose_drafts` | E37 标书编制草稿与蓝图 | `tenant_id`、`user_id`、`title`、`tender_filename`、`tender_path`、`compose_mode`(skeleton_v1/knowledge_draft_v2)、`blueprint_json`、`output_path`、`stats_json` |
+| 12 | `similarity_reports` | E36/E38 多标书交叉比对报告 | `tenant_id`、`user_id`、`title`、`status`、`progress`、`stage_detail`、`error_msg`、`tender_filename`、`tender_path`、`bidders_json`、`pair_matrix_json`、`findings_json`、`ai_review_json`、`max_similarity_pct`(Numeric 5,2)、`risk_level`(low/medium/high)、`started_at`、`finished_at` |
+| 13 | `bid_compose_drafts` | E37/E38 标书编制草稿与蓝图 | `tenant_id`、`user_id`、`skill_id`(可空)、`title`、`status`、`progress`、`stage_detail`、`error_msg`、`tender_filename`、`tender_path`、`compose_mode`(skeleton_v1/knowledge_draft_v2)、`blueprint_json`、`output_path`、`stats_json`、`started_at`、`finished_at` |
+| 14 | `composer_skills` | E38 F8 标书写作 Skill 规范库 | `tenant_id`、`user_id`、`name`、`description`、`source_type`(builtin/custom/github/gitee/file)、`source_url`、`writing_instructions`(Text)、`layout_spec_json`、`is_builtin`、`is_default` |
 
 ---
 
@@ -369,8 +421,9 @@ export_clean_revised_docx(
 - E33 QA 检索深度上限放宽：`QaAskRequest.max_rounds` 由 `default=7, ge=1, le=8` 放宽为 `Optional[int] = Field(default=None, ge=1, le=12)`（默认 `None` 时按 `reasoning_effort` 自动匹配 `7 / 8 / 12` 思考回合上限，无挡位默认 `7`）；
 - E34 快速通道响应透传：`QaAskResponseOut` 新增 `grounded: bool = True`、`fast_path: bool = False`、`route: Optional[str] = None`；`/api/qa/sessions/{id}/ask`、`/ask/stream` `done` 帧及 `_persist_qa_turn_locked` 写入 `messages_json` 同步透传（不改数据库表结构）；
 - E35 管理增强与部署诚实化：`init_db` 拆为 `ensure_bootstrap_admin()`（无条件幂等保底，生产 `SEED_DEMO_DATA=0` 仅创建 `DEFAULT_TENANT_NAME` 默认 `'默认机构'` + `admin` + 中性空规则）与 `seed_demo_data()`；`get_current_user` 在 `db` 为 `Session` 且查无用户时强制抛 `401 USER_NOT_FOUND`；新增 `PATCH /api/auth/tenants/{tenant_id}`（`TenantUpdateRequest`、`rename_tenant` 审计）并扩展 `AdminUserUpdateRequest.username`（改名 `old_username`/`new_username` 审计）；`/api/rules/certificates/parse-file`（`CertificateParseOut`）新增 `cert_name_source`（`'ocr' | 'filename_fallback' | None`）与 `is_long_term_hint`；`CertificateUpsertRequest`/`CertificateOut`/`MatchedLedgerCertOut` 支持 `is_long_term`（落库哨兵 `9999-12-31`，接口与审计返回 `valid_until=None`、`days_remaining=None`）及老库 `ensure_company_certificates_e35_columns` 平滑加列；
-- E36 多标书交叉比对：`backend/models.py` 新增第 12 表 `similarity_reports`（`SimilarityReport` 独立建表，零污染 `BidCheckTask`/`dashboard`）；新增第 12 组路由 `backend/routers/similarity.py`（`POST /api/similarity/compare` 校验 `2..6` 份文件与可选招标底稿、`GET /api/similarity`、`GET /api/similarity/{id}`、`GET /api/similarity/{id}/export`、`DELETE /api/similarity/{id}` 级联删盘）；
+- E36 多标书交叉比对：`backend/models.py` 新增第 12 表 `similarity_reports`（`SimilarityReport` 独立建表，零污染 `BidCheckTask`/`dashboard`）；新增第 12 组路由 `backend/routers/similarity.py`（`POST /api/similarity/compare`、`GET /api/similarity`、`GET /api/similarity/{id}`、`GET /api/similarity/{id}/export`、`DELETE /api/similarity/{id}` 级联删盘）；
 - E37 标书编制输出与无损修订交付：`backend/models.py` 新增第 13 表 `bid_compose_drafts`（`BidComposeDraft`）；新增第 13 组路由 `backend/routers/composer.py`（`POST /api/composer/generate`、`GET /api/composer/drafts`、`GET /api/composer/drafts/{id}`、`GET /api/composer/drafts/{id}/download`、`DELETE /api/composer/drafts/{id}`）；`backend/routers/reports.py` 新增 `POST /api/reports/{task_id}/clean-bid`（`.pdf` 诚实拒收 `422 PDF_CLEAN_EXPORT_UNSUPPORTED`）与 `GET /api/reports/{task_id}/clean-bid/download`；
+- E38 F8 写作 Skills、AI 动态编排与 E36 异步深层研判：`backend/models.py` 新增第 14 表 `composer_skills`（`ComposerSkill`）及 `ensure_similarity_reports_columns`/`ensure_bid_compose_drafts_columns` 老库幂等加列；`backend/worker.py` 新增 `BidTaskWorker.submit_background_job(job_key: str, fn, *, sync=False)` 支持字符串键（`'composer:{id}'`/`'similarity:{id}'`）异步队列与取消；`backend/main.py::recover_stale_tasks` 扩展重启复位 `BidComposeDraft` 与 `SimilarityReport`；`composer.py` 新增 `/skills` CRUD（`409 LAST_SKILL_PROTECTED`）、`/skills/preview-url`、`/skills/import-url`、`/skills/import-file` 与 `/drafts/{id}/cancel`（`/generate` 增 `skill_id`/`use_ai`/`async_run=False`）；`similarity.py` 移除 6 份上限仅校验 `>=2` 份并新增 `enable_ai_review`/`async_run=False`/`POST /{id}/cancel`；
 - 其余鉴权、多租户隔离、SSE 进度流、文件存储布局与统一错误格式约定保持不变。
 
 ---
@@ -407,3 +460,4 @@ export_clean_revised_docx(
 | 2026-11-17 | E35 管理增强与部署诚实化卡：`backend/database.py` 将 `init_db` 拆为无条件幂等 `ensure_bootstrap_admin()`（`SEED_DEMO_DATA=0` 仅创建 `DEFAULT_TENANT_NAME` 默认 `'默认机构'` + `admin` + 中性空规则，清理 L337 错位门禁）与 `seed_demo_data()`；`backend/auth.py` 修复 `get_current_user` 在 `db` 为 `Session` 且 `user_obj is None` 时不再跌落 `id=None` 兜底而直接抛 `401 USER_NOT_FOUND`；`backend/routers/auth.py` + `schemas.py` 新增 `PATCH /api/auth/tenants/{tenant_id}`（`TenantUpdateRequest`、`rename_tenant` 审计）并扩展 `AdminUserUpdateRequest.username`（`409 USERNAME_EXISTS`/`422 INVALID_USERNAME`/`old_username`/`new_username` 审计）；`backend/models.py` `CompanyCertificate` 新增 `is_long_term`、`ensure_company_certificates_e35_columns` 与 `_ensure_table_columns_generic(..., auto_commit=False)` 修正在 `after_create` 连续加列触发事务提前关闭缺陷；`backend/routers/rules.py`（`CertificateParseOut` 增 `cert_name_source` / `is_long_term_hint`、`CertificateUpsertRequest`/`CertificateOut`/`MatchedLedgerCertOut` 支持 `is_long_term` 落 `9999-12-31` 哨兵且对外/审计恒返 `valid_until=None`/`days_remaining=None`）与 `dashboard.py` 适配长期证照；`core/qualification_scanner.py` `match_required_certificates_with_ledger` 适配 `is_long_term=True` 恒判 `valid` 且排在有限日期前；前端 `UsersManageView.vue`（部门重命名/账号 `username` 重命名提醒及改自身登出/默认隐藏已禁用账号）、`RulesAndCertsView.vue`（清空硬编码假日期+文件名兜底警示+长期有效开关）与 `ExtractView.vue`（长期有效展示）全链路同步 | 实现 + 验收 |
 | 2026-11-17 | E36 多标书交叉比对与相似度分析卡：新增 `core/bid_similarity.py` 五维 0-Token 引擎（底层元数据/内嵌图片 SHA256、剥离可选招标底稿与套话的净正文 8-gram Jaccard 与 ≥25 字连续句溯源、非标外部实体/乱码碰撞、关键主体碰撞与手机号/18 位身份证号强制前 3 后 4 脱敏、`Decimal` 规律报价检测及 `.docx` 报告导出）；`backend/models.py` 新增第 12 表 `similarity_reports`；新增 `backend/routers/similarity.py`（`/api/similarity` 对比/列表/详情/导出/级联删盘）；前端新增 `/similarity`（`SimilarityCheckView.vue`「多标书交叉比对」） | 实现 + 验收 |
 | 2026-11-17 | E37 标书编制输出与无损修订交付卡：新增 `core/bid_composer.py` 统一蓝图 IR（V1 零幻觉骨架/长期证照台账/Decimal限价占位锁/★▲偏离预置 + V2 可插拔 `KnowledgeSnippetProvider`/`LocalKnowledgeSnippetProvider` 与优雅回退）；`core/redline.py` 提取共享 `_locate_and_split_quote_runs` 并新增 `export_clean_revised_docx`（Run 级保留样式原位替换、彻底剥离 `w:comment*`/`comments*.xml`、漏应答诚实计入 `manual_pending_items`）；`backend/models.py` 新增第 13 表 `bid_compose_drafts`；新增 `backend/routers/composer.py`（`/api/composer`）及 `/api/reports/{task_id}/clean-bid`（`.pdf` 返回 `422 PDF_CLEAN_EXPORT_UNSUPPORTED`）；前端新增 `/composer`（`BidComposerView.vue`）及详情/交付快捷按钮 | 实现 + 验收 |
+| 2026-11-18 | E38 F8 写作 Skills 与 AI 动态编排及 E36 异步深层研判卡：新增 `core/composer_skills.py`（3 套内置 Skill、YAML/MD 与 JSON 解析钳位、SSRF 白名单、GitHub→Gitee 优雅降级导入与离线 `EXTERNAL_SKILL_UNREACHABLE`）；`core/bid_composer.py` 修复 `eval_rule`/评分细则 Part 4 串行污染、打通 LLM 动态构章（`_plan_chapters_with_llm` + 覆盖率兜底守卫）与并发分节撰稿（`_draft_chapter_with_llm` / `_draft_deviation_with_llm` + `_UNGROUNDED_MONEY_RE` 防金额/合同幻觉）及独立居中封面/原生 Heading/TOC 域动态排版（`append_checklist_at_end` 内外分离）；`core/bid_similarity.py` 解除 6 份上限并新增 `run_similarity_ai_review`（双侧 `verify_quote` 严审与禁洗稿合规锁）；`backend/models.py` 新增第 14 表 `composer_skills` 及 `ensure_*` 老库平滑加列；`backend/worker.py` 新增 `submit_background_job` 与 `recover_stale_tasks` 扩展；`composer.py`/`similarity.py` 全链路打通异步队列/中断取消；前端 `App.vue` `<keep-alive>` 纳入双视图、`BidComposerView.vue`（Skill 弹窗与分组抽屉）与 `SimilarityCheckView.vue`（不限份数与 AI 复核）同步收尾 | 实现 + 验收 |

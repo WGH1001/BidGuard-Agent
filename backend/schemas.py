@@ -571,11 +571,32 @@ class SimilarityFindingOut(BaseModel):
     detail: dict[str, Any] = Field(default_factory=dict)
 
 
+class SimilarityAiReviewMatchOut(BaseModel):
+    a_label: str = ''
+    b_label: str = ''
+    similarity_type: str = 'semantic_isomorphism'
+    reason: str = ''
+    a_quote: str = ''
+    b_quote: str = ''
+    quote_verified: bool = True
+
+
+class SimilarityAiReviewOut(BaseModel):
+    status: str = 'skipped'
+    summary: str = ''
+    semantic_matches: list[SimilarityAiReviewMatchOut] = Field(default_factory=list)
+    false_positive_notes: list[str] = Field(default_factory=list)
+
+
 class SimilarityReportSummaryOut(BaseModel):
     id: int
     tenant_id: int
     user_id: Optional[int] = None
     title: str
+    status: str = 'completed'
+    progress: int = 100
+    stage_detail: str = ''
+    error_msg: Optional[str] = None
     tender_filename: Optional[str] = None
     bidder_count: int = 0
     max_similarity_pct: float = 0.0
@@ -588,6 +609,7 @@ class SimilarityReportDetailOut(SimilarityReportSummaryOut):
     bidders: list[SimilarityBidderOut] = Field(default_factory=list)
     pair_matrix: list[SimilarityPairOut] = Field(default_factory=list)
     findings: list[SimilarityFindingOut] = Field(default_factory=list)
+    ai_review: Optional[SimilarityAiReviewOut] = None
     export_url: str = ''
 
 
@@ -596,12 +618,76 @@ class SimilarityReportListOut(BaseModel):
     items: list[SimilarityReportSummaryOut] = Field(default_factory=list)
 
 
-# ── 12. /api/composer 与 /clean-bid 契约（E37 标书编制与无损修订交付）─────
+# ── 12. /api/composer 与 /clean-bid 契约（E37 + E38）─────────────────────
+class SkillLayoutSpecSchema(BaseModel):
+    cover_style: Literal['gov_clean', 'navy_business', 'tech_modern'] = 'gov_clean'
+    font_zh: str = '仿宋'
+    heading_font_zh: str = '黑体'
+    font_size_pt: float = 11.5
+    line_spacing: float = 1.35
+    accent_color_hex: str = '0F172A'
+    table_header_bg: str = 'F1F5F9'
+    include_toc: bool = True
+    append_checklist_at_end: bool = False
+    target_section_words: int = 500
+    tone: Literal['formal_gov', 'technical_deep', 'concise_direct'] = 'formal_gov'
+
+
+class ComposerSkillOut(BaseModel):
+    id: int
+    tenant_id: int
+    user_id: Optional[int] = None
+    name: str
+    description: str = ''
+    source_type: str = 'custom'
+    source_url: Optional[str] = None
+    writing_instructions: str = ''
+    layout_spec: SkillLayoutSpecSchema = Field(default_factory=SkillLayoutSpecSchema)
+    is_builtin: bool = False
+    is_default: bool = False
+    created_at: Optional[str] = None
+
+
+class ComposerSkillListOut(BaseModel):
+    total: int = 0
+    items: list[ComposerSkillOut] = Field(default_factory=list)
+
+
+class ComposerSkillUpsertRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    description: str = ''
+    writing_instructions: str = Field(..., min_length=1)
+    layout_spec: dict[str, Any] = Field(default_factory=dict)
+    is_default: bool = False
+
+
+class SkillImportUrlRequest(BaseModel):
+    url_or_repo: str = Field(..., min_length=3, max_length=512)
+    allow_gitee_fallback: bool = True
+
+
+class SkillImportPreviewOut(BaseModel):
+    name: str
+    description: str = ''
+    source_type: str = 'github'
+    source_url: Optional[str] = None
+    writing_instructions: str = ''
+    layout_spec: SkillLayoutSpecSchema = Field(default_factory=SkillLayoutSpecSchema)
+    fetched_from_provider: str = ''
+    used_fallback: bool = False
+
+
 class ComposeDraftSummaryOut(BaseModel):
     id: int
     tenant_id: int
     user_id: Optional[int] = None
+    skill_id: Optional[int] = None
+    skill_name: str = ''
     title: str
+    status: str = 'completed'
+    progress: int = 100
+    stage_detail: str = ''
+    error_msg: Optional[str] = None
     tender_filename: str
     compose_mode: Literal['skeleton_v1', 'knowledge_draft_v2'] = 'skeleton_v1'
     project_name: str = ''
@@ -610,6 +696,7 @@ class ComposeDraftSummaryOut(BaseModel):
     price_cap: Optional[str] = None
     manual_item_count: int = 0
     scoring_fill_mode: str = 'outline_stub'
+    ai_status: str = 'skipped'
     stats: dict[str, Any] = Field(default_factory=dict)
     download_url: str = ''
     created_at: Optional[str] = None

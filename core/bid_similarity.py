@@ -18,9 +18,10 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import itertools
+import json
 from pathlib import Path
 import re
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 import zipfile
 
 from docx import Document
@@ -30,7 +31,7 @@ import pymupdf
 
 from core.parser import parse_document
 from core.price_extractor import extract_price_data
-from core.quote_verifier import normalize_zh
+from core.quote_verifier import normalize_zh, verify_quote
 from core.response_checker import build_unified_page_context, resolve_unified_page
 
 __all__ = [
@@ -674,15 +675,207 @@ def _check_metadata_pair_collisions(
     return findings
 
 
+def _extract_net_sample_excerpt(raw_text: str, net_norm: str, net_map: list[int], max_chars: int = 1600) -> str:
+    """从净自编文本对应的原文窗口抽取可读样本段落（屏蔽个人手机与身份证号），供 AI 深层同构对比。"""
+    if not raw_text:
+        return ''
+    if net_map:
+        start_idx = net_map[0]
+        end_idx = min(len(raw_text), net_map[min(len(net_map) - 1, max_chars)] + 1)
+        sample = raw_text[start_idx:end_idx]
+    else:
+        sample = raw_text[:max_chars]
+    # 若前段偏短，适当向后抽样中间部分
+    if len(sample.strip()) < 200 and len(raw_text) > 400:
+        mid = len(raw_text) // 3
+        sample = raw_text[mid:mid + max_chars]
+    return _mask_sensitive_text(sample[:max_chars])
+
+
+def _parse_similarity_llm_json(raw: str) -> Optional[dict[str, Any]]:
+    text = (raw or '').strip()
+    if not text:
+        return None
+    fence = re.search(r'```(?:json)?\s*([\s\S]*?)```', text, flags=re.IGNORECASE)
+    if fence:
+        text = fence.group(1).strip()
+    for lo, hi in ((0, len(text)), (text.find('{'), text.rfind('}') + 1)):
+        if lo < 0 or hi <= lo:
+            continue
+        try:
+            obj = json.loads(text[lo:hi])
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            continue
+    return None
+
+
+def run_similarity_ai_review(
+    parsed_bids: list[dict[str, Any]],
+    pair_matrix: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+    client: Any,
+    *,
+    cancel_check: Optional[Callable[[], None]] = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """E38：可选 AI 语义同构深层核查与误报排查综述（严格客观审查，严禁输出洗稿或规避建议）。"""
+    if client is None or len(parsed_bids) < 2 or not pair_matrix:
+        return {
+            'status': 'skipped',
+            'summary': '未配置模型网关或未启用 AI 语义复核，本次报告仅基于五维确定性引擎结果生成。',
+            'semantic_matches': [],
+            'false_positive_notes': [],
+        }, []
+
+    if cancel_check is not None:
+        cancel_check()
+
+    bid_by_idx = {b['index']: b for b in parsed_bids}
+    # 选取净相似度最高及已有告警的前 3 组做局部窗口语义研判
+    pair_scores: list[tuple[float, dict[str, Any]]] = []
+    for pr in pair_matrix:
+        finding_bonus = sum(
+            10.0 for f in findings
+            if {f.get('a_label'), f.get('b_label')} == {pr['a_label'], pr['b_label']}
+        )
+        pair_scores.append((float(pr.get('net_similarity_pct') or 0.0) + finding_bonus, pr))
+    pair_scores.sort(key=lambda x: x[0], reverse=True)
+    top_pairs = [pr for _, pr in pair_scores[:3]]
+
+    pair_blocks: list[str] = []
+    for pr in top_pairs:
+        ba = bid_by_idx.get(pr['a_index'])
+        bb = bid_by_idx.get(pr['b_index'])
+        if not ba or not bb:
+            continue
+        sa = _extract_net_sample_excerpt(ba['raw_text'], ba['net_norm'], ba['net_map'], max_chars=1200)
+        sb = _extract_net_sample_excerpt(bb['raw_text'], bb['net_norm'], bb['net_map'], max_chars=1200)
+        pair_blocks.append(
+            f"### 比对组：{pr['a_label']} vs {pr['b_label']}（净相似度 {pr['net_similarity_pct']}%）\n"
+            f"[{pr['a_label']} 样本]：\n{sa}\n"
+            f"[{pr['b_label']} 样本]：\n{sb}"
+        )
+
+    finding_digest = '\n'.join(
+        f"- [{f.get('severity')}] {f.get('code')} ({f.get('a_label')}↔{f.get('b_label')}): {_mask_sensitive_text(str(f.get('message') or '')[:120])}"
+        for f in findings[:15]
+    ) or '（确定性引擎未命中明显高危碰撞）'
+
+    prompt = (
+        "你是招投标合规审查辅助专家。请基于下方【多标书比对统计与文本窗口】执行严格客观的语义复核与误报排查：\n"
+        "【严守红线】：仅给出客观交叉排查结论与误报澄清说明；**严禁提供任何洗稿改写文本、消重方法或规避清标审查的建议**。\n"
+        f"【规则初筛命中摘要】：\n{finding_digest}\n\n"
+        f"【待复核局部文本样本】：\n" + '\n\n'.join(pair_blocks) + "\n\n"
+        "请返回纯 JSON：\n"
+        '{"overall_summary": "180字内客观核查综述与人工复核优先级建议", '
+        '"semantic_matches": [{"a_label": "单位A", "b_label": "单位B", "similarity_type": "semantic_isomorphism|industry_boilerplate", "reason": "判定理由", "a_quote": "来自A原文连续子串", "b_quote": "来自B原文连续子串"}], '
+        '"false_positive_notes": ["若发现明显行业公文/国标导致的误报说明"]}'
+    )
+
+    try:
+        resp = client.chat([{'role': 'user', 'content': prompt}], model_tier='flash')
+        parsed = _parse_similarity_llm_json(str(getattr(resp, 'content', '') or ''))
+        if not parsed:
+            raise ValueError('AI 语义复核返回格式非有效 JSON')
+    except Exception as exc:
+        return {
+            'status': 'unavailable',
+            'summary': f'AI 语义深层复核未能完成（{type(exc).__name__}），保留五维确定性结果供人工研判。',
+            'semantic_matches': [],
+            'false_positive_notes': [],
+        }, []
+
+    bid_by_label = {b['label']: b for b in parsed_bids}
+    verified_matches: list[dict[str, Any]] = []
+    ai_findings: list[dict[str, Any]] = []
+
+    for item in (parsed.get('semantic_matches') or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        al = str(item.get('a_label') or '').strip()
+        bl = str(item.get('b_label') or '').strip()
+        ba = bid_by_label.get(al)
+        bb = bid_by_label.get(bl)
+        if not ba or not bb or al == bl:
+            continue
+        aq = str(item.get('a_quote') or '').strip()
+        bq = str(item.get('b_quote') or '').strip()
+        # 双侧原文强制 verify_quote 溯源校验，杜绝编造引用
+        if not aq or not bq or not verify_quote(aq, ba['raw_text']) or not verify_quote(bq, bb['raw_text']):
+            continue
+
+        sim_type = str(item.get('similarity_type') or 'semantic_isomorphism').strip()
+        if sim_type not in ('semantic_isomorphism', 'industry_boilerplate'):
+            sim_type = 'semantic_isomorphism'
+        reason = _mask_sensitive_text(str(item.get('reason') or '').strip())
+        if re.search(r'(?:规避(?:清标|查重|检测|监管)|洗稿(?:技巧|改写|指南)|伪造(?:作者|元数据|指纹))', reason):
+            continue
+        aq_safe = _mask_sensitive_text(aq)
+        bq_safe = _mask_sensitive_text(bq)
+
+        verified_matches.append({
+            'a_label': al,
+            'b_label': bl,
+            'similarity_type': sim_type,
+            'reason': reason,
+            'a_quote': aq_safe,
+            'b_quote': bq_safe,
+            'quote_verified': True,
+        })
+
+        if sim_type == 'semantic_isomorphism':
+            ai_findings.append({
+                'code': 'SEMANTIC_ISOMORPHISM',
+                'severity': 'warning',
+                'dimension': 'ai_semantic_review',
+                'a_label': al,
+                'b_label': bl,
+                'message': f"「{al}」与「{bl}」AI 语义同构复核疑似同源逻辑：{reason}",
+                'detail': {
+                    'a_quote': aq_safe[:220],
+                    'b_quote': bq_safe[:220],
+                    'quote_verified': True,
+                },
+            })
+
+    summary_txt = _mask_sensitive_text(str(parsed.get('overall_summary') or '').strip())
+    if re.search(r'(?:规避(?:清标|查重|检测|监管)|洗稿(?:技巧|改写|指南)|伪造(?:作者|元数据|指纹))', summary_txt):
+        summary_txt = 'AI 语义深层复核完成，请结合五维确定性证据明细与双栏摘录独立人工核查。'
+    fp_notes = [
+        _mask_sensitive_text(str(x or '').strip())
+        for x in (parsed.get('false_positive_notes') or [])[:6]
+        if str(x or '').strip()
+        and not re.search(r'(?:规避(?:清标|查重|检测|监管)|洗稿(?:技巧|改写|指南)|伪造(?:作者|元数据|指纹))', str(x or ''))
+    ]
+    return {
+        'status': 'done',
+        'summary': summary_txt or 'AI 语义深层复核完成，请结合上方证据明细与双栏摘录复核。',
+        'semantic_matches': verified_matches,
+        'false_positive_notes': fp_notes,
+    }, ai_findings
+
+
 def analyze_bid_similarity(
     bid_files: list[dict[str, Any]],
     *,
     tender_path: Optional[str | Path] = None,
+    enable_ai_review: bool = False,
+    client: Any = None,
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+    cancel_check: Optional[Callable[[], None]] = None,
 ) -> dict[str, Any]:
-    """对 2~6 份参选投标文件执行五维 0-Token 交叉比对与相似度分析。"""
-    if not isinstance(bid_files, list) or not (2 <= len(bid_files) <= 6):
-        raise ValueError("bid_files 必须包含 2 到 6 份投标文件")
+    """对 >=2 份参选投标文件执行五维 0-Token 交叉比对与可选 AI 深层语义复核。"""
+    if not isinstance(bid_files, list) or len(bid_files) < 2:
+        raise ValueError("bid_files 至少需要包含 2 份投标文件")
 
+    def _emit(pct: int, stage: str) -> None:
+        if cancel_check is not None:
+            cancel_check()
+        if progress_cb is not None:
+            progress_cb(pct, stage)
+
+    _emit(8, '阶段 1/4：解析招标公共底稿与构建过滤词片')
     tender_text = ''
     tender_norm = ''
     tender_shingles: set[str] = set()
@@ -693,7 +886,12 @@ def analyze_bid_similarity(
         tender_shingles = _build_shingle_set(tender_norm, 12)
 
     parsed_bids: list[dict[str, Any]] = []
+    total_files = len(bid_files)
     for idx, spec in enumerate(bid_files):
+        _emit(
+            12 + int((idx / max(1, total_files)) * 38),
+            f"阶段 2/4：解析投标书元数据与净正文（{idx + 1}/{total_files}）",
+        )
         fpath = Path(spec['path'])
         label = str(spec.get('label') or fpath.stem).strip() or f"标书#{idx + 1}"
         filename = str(spec.get('filename') or fpath.name)
@@ -744,7 +942,13 @@ def analyze_bid_similarity(
     all_findings: list[dict[str, Any]] = []
     max_net_sim = Decimal('0.00')
 
-    for i, j in itertools.combinations(range(len(parsed_bids)), 2):
+    combos = list(itertools.combinations(range(len(parsed_bids)), 2))
+    total_pairs = max(1, len(combos))
+    for p_idx, (i, j) in enumerate(combos):
+        _emit(
+            52 + int((p_idx / total_pairs) * 28),
+            f"阶段 3/4：五维交叉碰撞计算（{p_idx + 1}/{total_pairs} 组）",
+        )
         bi = parsed_bids[i]
         bj = parsed_bids[j]
         la, lb = bi['label'], bj['label']
@@ -944,12 +1148,34 @@ def analyze_bid_similarity(
         for b in parsed_bids
     ]
 
+    ai_review: dict[str, Any] = {
+        'status': 'skipped',
+        'summary': '',
+        'semantic_matches': [],
+        'false_positive_notes': [],
+    }
+    if enable_ai_review:
+        _emit(84, '阶段 4/4：AI 语义同构深层复核与误报排雷')
+        ai_review, ai_findings = run_similarity_ai_review(
+            parsed_bids,
+            pair_matrix,
+            all_findings,
+            client,
+            cancel_check=cancel_check,
+        )
+        if ai_findings:
+            all_findings.extend(ai_findings)
+            if overall_risk == 'low':
+                overall_risk = 'medium'
+
+    _emit(95, '整理比对矩阵与脱敏证据报告')
     return {
         'bidders': bidders_summary,
         'pair_matrix': pair_matrix,
         'findings': all_findings,
         'max_similarity_pct': str(max_net_sim),
         'risk_level': overall_risk,
+        'ai_review': ai_review,
     }
 
 
@@ -1057,6 +1283,20 @@ def export_similarity_report_docx(
             row[2].text = str(ps.get('b_quote') or '')
     if not has_passages:
         doc.add_paragraph('各组对比剔除公共条款后未发现连续 ≥25 字一致的自编句段。')
+
+    ai_rev = report.get('ai_review') or {}
+    if isinstance(ai_rev, dict) and ai_rev.get('status') == 'done':
+        doc.add_heading('五、AI 语义深层复核与误报排查综述', level=1)
+        if ai_rev.get('summary'):
+            doc.add_paragraph(str(ai_rev['summary']))
+        for idx, sm in enumerate(ai_rev.get('semantic_matches') or [], 1):
+            p_sm = doc.add_paragraph()
+            p_sm.add_run(
+                f"[{idx}] {sm.get('a_label')} ↔ {sm.get('b_label')}（{sm.get('similarity_type')}）："
+            ).bold = True
+            p_sm.add_run(str(sm.get('reason') or ''))
+        for note in ai_rev.get('false_positive_notes') or []:
+            doc.add_paragraph(f"误报排查参考：{note}")
 
     doc.add_paragraph('')
     note_p = doc.add_paragraph()

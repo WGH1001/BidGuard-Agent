@@ -77,7 +77,7 @@ def test_nine_tables_created_and_schema_matches_interface(db_session):
     eng, session = db_session
     inspector = inspect(eng)
     actual_tables = set(inspector.get_table_names())
-    # E4 起扩容为 11 张表，E36 扩容为 12 张表（similarity_reports），E37 扩容为 13 张表（bid_compose_drafts）
+    # E4 扩容 11 表，E36 扩容 12 表，E37 扩容 13 表，E38 扩容为 14 张表（新增 composer_skills）
     expected_tables = {
         'tenants',
         'users',
@@ -92,9 +92,10 @@ def test_nine_tables_created_and_schema_matches_interface(db_session):
         'regulation_articles',
         'similarity_reports',
         'bid_compose_drafts',
+        'composer_skills',
     }
     assert actual_tables == expected_tables
-    assert len(actual_tables) == 13
+    assert len(actual_tables) == 14
 
     # 逐表核对 INTERFACE.md §2 关键字段
     expected_cols = {
@@ -138,14 +139,22 @@ def test_nine_tables_created_and_schema_matches_interface(db_session):
             'model_flagship', 'supports_reasoning_effort', 'created_at', 'updated_at',
         },
         'similarity_reports': {
-            'id', 'tenant_id', 'user_id', 'title', 'tender_filename', 'tender_path',
-            'bidders_json', 'pair_matrix_json', 'findings_json', 'max_similarity_pct',
-            'risk_level', 'created_at', 'updated_at',
+            'id', 'tenant_id', 'user_id', 'title', 'status', 'progress',
+            'stage_detail', 'error_msg', 'tender_filename', 'tender_path',
+            'bidders_json', 'pair_matrix_json', 'findings_json', 'ai_review_json',
+            'max_similarity_pct', 'risk_level', 'started_at', 'finished_at',
+            'created_at', 'updated_at',
         },
         'bid_compose_drafts': {
-            'id', 'tenant_id', 'user_id', 'title', 'tender_filename', 'tender_path',
-            'compose_mode', 'blueprint_json', 'output_path', 'stats_json',
-            'created_at', 'updated_at',
+            'id', 'tenant_id', 'user_id', 'skill_id', 'title', 'status',
+            'progress', 'stage_detail', 'error_msg', 'tender_filename',
+            'tender_path', 'compose_mode', 'blueprint_json', 'output_path',
+            'stats_json', 'started_at', 'finished_at', 'created_at', 'updated_at',
+        },
+        'composer_skills': {
+            'id', 'tenant_id', 'user_id', 'name', 'description', 'source_type',
+            'source_url', 'writing_instructions', 'layout_spec_json',
+            'is_builtin', 'is_default', 'created_at', 'updated_at',
         },
     }
     for tbl_name, req_cols in expected_cols.items():

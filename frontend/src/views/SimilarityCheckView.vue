@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { similarityApi, validateUploadFile } from '@/api'
@@ -23,7 +23,9 @@ interface PendingBidItem {
 const titleInput = ref('')
 const tenderFile = ref<File | null>(null)
 const pendingBids = ref<PendingBidItem[]>([])
+const enableAiReview = ref(true)
 const comparing = ref(false)
+const cancelling = ref(false)
 const exporting = ref(false)
 
 const loadingHistory = ref(false)
@@ -34,12 +36,15 @@ const activeTab = ref<'findings' | 'passages' | 'bidders'>('findings')
 const dimFilter = ref<string>('ALL')
 const selectedPairKey = ref<string>('ALL')
 
+let pollTimer: number | null = null
+
 const DIMENSION_LABELS: Record<string, string> = {
   metadata_fingerprint: '元数据与内嵌图片',
   net_text_similarity: '净正文相似度',
   fingerprint_error: '异常指纹与外部串名',
   entity_collision: '主体与脱敏隐私号碰撞',
   price_regularity: '报价规律性关联',
+  ai_semantic_review: 'AI 语义深层复核',
 }
 
 function riskLabel(level: SimilarityRiskLevel | string): string {
@@ -81,6 +86,38 @@ function onTenderSelect(ev: Event): void {
   tenderFile.value = f
 }
 
+function stopPolling(): void {
+  if (pollTimer !== null) {
+    window.clearTimeout(pollTimer)
+    pollTimer = null
+  }
+}
+
+function isRunningStatus(status?: string | null): boolean {
+  return status === 'queued' || status === 'running'
+}
+
+function schedulePoll(reportId: number): void {
+  stopPolling()
+  pollTimer = window.setTimeout(async () => {
+    try {
+      const detail = await similarityApi.detail(reportId)
+      if (activeReport.value?.id === reportId || !activeReport.value) {
+        activeReport.value = detail
+      }
+      const listRes = await similarityApi.list()
+      historyList.value = listRes.items || []
+      if (isRunningStatus(detail.status)) {
+        schedulePoll(reportId)
+      } else if (detail.status === 'completed') {
+        ElMessage.success(`多标书交叉比对完成：${detail.title}`)
+      }
+    } catch {
+      stopPolling()
+    }
+  }, 1500)
+}
+
 function onBidsSelect(ev: Event): void {
   const input = ev.target as HTMLInputElement
   const files = Array.from(input.files || [])
@@ -88,10 +125,6 @@ function onBidsSelect(ev: Event): void {
   if (files.length === 0) return
 
   for (const f of files) {
-    if (pendingBids.value.length >= 6) {
-      ElMessage.warning('单次最多支持比对 6 份投标文件')
-      break
-    }
     const chk = validateUploadFile(f)
     if (!chk.valid) {
       ElMessage.warning(chk.message)
@@ -115,8 +148,11 @@ async function fetchHistory(): Promise<void> {
   try {
     const res = await similarityApi.list()
     historyList.value = res.items || []
+    const runningItem = historyList.value.find((it) => isRunningStatus(it.status))
     if (!activeReport.value && historyList.value.length > 0) {
       await loadReportDetail(historyList.value[0].id)
+    } else if (runningItem) {
+      schedulePoll(runningItem.id)
     }
   } finally {
     loadingHistory.value = false
@@ -128,11 +164,14 @@ async function loadReportDetail(reportId: number): Promise<void> {
   activeReport.value = detail
   dimFilter.value = 'ALL'
   selectedPairKey.value = 'ALL'
+  if (isRunningStatus(detail.status)) {
+    schedulePoll(detail.id)
+  }
 }
 
 async function handleRunCompare(): Promise<void> {
-  if (pendingBids.value.length < 2 || pendingBids.value.length > 6) {
-    ElMessage.warning('请上传 2 至 6 份参选投标文件进行交叉比对')
+  if (pendingBids.value.length < 2) {
+    ElMessage.warning('请至少上传 2 份参选投标文件进行交叉比对')
     return
   }
   comparing.value = true
@@ -142,15 +181,38 @@ async function handleRunCompare(): Promise<void> {
       labels: pendingBids.value.map((x) => x.label.trim() || x.file.name),
       tenderFile: tenderFile.value,
       title: titleInput.value.trim() || undefined,
+      enableAiReview: enableAiReview.value,
+      asyncRun: true,
     })
     activeReport.value = detail
     dimFilter.value = 'ALL'
     selectedPairKey.value = 'ALL'
     activeTab.value = 'findings'
-    ElMessage.success('多标书交叉比对分析完成')
-    await fetchHistory()
+    const listRes = await similarityApi.list()
+    historyList.value = listRes.items || []
+    if (isRunningStatus(detail.status)) {
+      ElMessage.info('交叉比对任务已在后台启动，切换页面不会中断执行')
+      schedulePoll(detail.id)
+    } else {
+      ElMessage.success('多标书交叉比对分析完成')
+    }
   } finally {
     comparing.value = false
+  }
+}
+
+async function handleCancelActive(): Promise<void> {
+  if (!activeReport.value || cancelling.value) return
+  cancelling.value = true
+  try {
+    await similarityApi.cancel(activeReport.value.id)
+    stopPolling()
+    await loadReportDetail(activeReport.value.id)
+    const listRes = await similarityApi.list()
+    historyList.value = listRes.items || []
+    ElMessage.warning('已中断当前交叉比对任务')
+  } finally {
+    cancelling.value = false
   }
 }
 
@@ -232,6 +294,10 @@ const filteredPairs = computed(() => {
 onMounted(() => {
   void fetchHistory()
 })
+
+onUnmounted(() => {
+  stopPolling()
+})
 </script>
 
 <template>
@@ -242,14 +308,15 @@ onMounted(() => {
         <div>
           <h2>多标书交叉比对与相似度分析</h2>
           <p>
-            上传 2~6 份参选投标文件（.docx / .pdf / .txt），建议同时传入《招标文件》以自动剥离公共条款消除误报；全程 0-Token 本地计算，隐私字段严格脱敏。
+            上传至少 2 份参选投标文件（不限数量，.docx / .pdf / .txt），建议附带《招标文件》以剥离公共条款消除误报；支持后台异步跑批与可选 AI 语义同构深层复核。
           </p>
         </div>
         <div class="sim-hd-actions">
+          <el-checkbox v-model="enableAiReview">启用 AI 语义深层复核</el-checkbox>
           <el-input
             v-model="titleInput"
             placeholder="可选：输入本次比对任务名称"
-            style="width: 240px"
+            style="width: 220px"
             clearable
           />
           <el-button
@@ -258,7 +325,7 @@ onMounted(() => {
             :disabled="pendingBids.length < 2"
             @click="handleRunCompare"
           >
-            {{ comparing ? '正在执行五维比对…' : `开始交叉比对 (${pendingBids.length}/6)` }}
+            {{ comparing ? '正在提交后台队列…' : `开始交叉比对 (${pendingBids.length} 份)` }}
           </el-button>
         </div>
       </div>
@@ -286,7 +353,7 @@ onMounted(() => {
         <!-- 右：2~6 份参选投标书 -->
         <div class="sim-drop-box bids-box">
           <div class="box-title">
-            <span>② 参选投标文件列表（必填 2~6 份）</span>
+            <span>② 参选投标文件列表（至少 2 份，不限上限）</span>
             <label class="pick-btn primary">
               <span>+ 添加投标书（可多选）</span>
               <input
@@ -300,7 +367,7 @@ onMounted(() => {
           </div>
 
           <div v-if="pendingBids.length === 0" class="empty-bids-hint">
-            尚未选择投标书，请点击右上角选择 2 至 6 份参选文件（支持自定义每份文件简称）。
+            尚未选择投标书，请点击右上角选择至少 2 份参选文件（支持任意数量与自定义简称）。
           </div>
           <div v-else class="pending-bid-list">
             <div v-for="(item, idx) in pendingBids" :key="item.id" class="pending-bid-row">
@@ -359,8 +426,32 @@ onMounted(() => {
       <main class="bg-panel sim-detail-pane">
         <el-empty
           v-if="!activeReport"
-          description="请上传 2~6 份投标文件发起比对，或从左侧选择历史记录查看分析结果"
+          description="请上传至少 2 份投标文件发起比对，或从左侧选择历史记录查看分析结果"
         />
+
+        <template v-else-if="isRunningStatus(activeReport.status)">
+          <div class="async-status-card">
+            <div class="async-top">
+              <div>
+                <h3>{{ activeReport.title }}</h3>
+                <p class="async-sub">{{ activeReport.stage_detail || '后台比对队列运行中，切换到其他页面不会中断…' }}</p>
+              </div>
+              <el-button type="danger" plain size="small" :loading="cancelling" @click="handleCancelActive">
+                中断比对
+              </el-button>
+            </div>
+            <el-progress :percentage="activeReport.progress || 10" :stroke-width="10" striped striped-flow />
+          </div>
+        </template>
+
+        <template v-else-if="activeReport.status === 'failed'">
+          <el-alert
+            type="error"
+            :closable="false"
+            show-icon
+            :title="`比对任务未完成：${activeReport.error_msg || '已取消或解析异常'}`"
+          />
+        </template>
 
         <template v-else>
           <div class="report-hd">
@@ -381,6 +472,19 @@ onMounted(() => {
             <el-button type="primary" :loading="exporting" @click="handleExportDocx">
               导出比对分析报告 (.docx)
             </el-button>
+          </div>
+
+          <div
+            v-if="activeReport.ai_review && activeReport.ai_review.status === 'done'"
+            class="ai-review-banner"
+          >
+            <div class="ai-rv-title">AI 语义深层复核与误报排查综述</div>
+            <div class="ai-rv-summary">{{ activeReport.ai_review.summary }}</div>
+            <div v-if="activeReport.ai_review.false_positive_notes.length > 0" class="ai-rv-notes">
+              <span v-for="(nt, ni) in activeReport.ai_review.false_positive_notes" :key="ni" class="ai-note-pill">
+                {{ nt }}
+              </span>
+            </div>
           </div>
 
           <!-- 两两 N x N 净相似度矩阵热力表 -->
@@ -1007,5 +1111,69 @@ onMounted(() => {
   color: #0f172a;
   line-height: 1.5;
   word-break: break-word;
+}
+
+.async-status-card {
+  padding: 20px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  border-radius: 8px;
+}
+
+.async-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.async-top h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  color: #0f172a;
+}
+
+.async-sub {
+  margin: 0;
+  font-size: 13px;
+  color: #1e40af;
+}
+
+.ai-review-banner {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-left: 4px solid #2563eb;
+  border-radius: 6px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+
+.ai-rv-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1e3a8a;
+  margin-bottom: 4px;
+}
+
+.ai-rv-summary {
+  font-size: 13px;
+  color: #1e293b;
+  line-height: 1.55;
+}
+
+.ai-rv-notes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ai-note-pill {
+  font-size: 12px;
+  color: #334155;
+  background: #e2e8f0;
+  padding: 2px 8px;
+  border-radius: 4px;
 }
 </style>

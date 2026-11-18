@@ -17,7 +17,14 @@ from sqlalchemy.orm import Session
 from backend.auth import AuthUser, get_current_user, record_audit, resolve_show_demo_login
 import backend.database as db_mod
 from backend.database import PROJECT_ROOT, get_db, init_db
-from backend.models import BidCheckTask, ensure_bid_check_tasks_columns
+from backend.models import (
+    BidCheckTask,
+    BidComposeDraft,
+    SimilarityReport,
+    ensure_bid_check_tasks_columns,
+    ensure_bid_compose_drafts_columns,
+    ensure_similarity_reports_columns,
+)
 from backend.routers import (
     auth as auth_router_mod,
     checks as checks_router_mod,
@@ -40,20 +47,34 @@ DIST_DIR = PROJECT_ROOT / 'frontend' / 'dist'
 
 
 def recover_stale_tasks(session_factory=None) -> int:
-    """E30：服务重启后将遗留处于 extracting/checking/grading 的非终态任务（含 radar）统一置 failed('服务重启中断')。"""
+    """E30 + E38：服务重启后将遗留处于运行中/排队中的体检、编制与交叉比对任务统一置 failed('服务重启中断')。"""
     sf = session_factory or db_mod.SessionLocal
     if sf is None:
         return 0
     sess: Session = sf()
     recovered_count = 0
     try:
-        ensure_bid_check_tasks_columns(sess.get_bind())
+        bind = sess.get_bind()
+        ensure_bid_check_tasks_columns(bind)
+        ensure_bid_compose_drafts_columns(bind)
+        ensure_similarity_reports_columns(bind)
+
         stale_rows = (
             sess.query(BidCheckTask)
             .filter(BidCheckTask.status.in_(('extracting', 'checking', 'grading')))
             .all()
         )
-        if not stale_rows:
+        stale_drafts = (
+            sess.query(BidComposeDraft)
+            .filter(BidComposeDraft.status.in_(('queued', 'running')))
+            .all()
+        )
+        stale_reports = (
+            sess.query(SimilarityReport)
+            .filter(SimilarityReport.status.in_(('queued', 'running')))
+            .all()
+        )
+        if not stale_rows and not stale_drafts and not stale_reports:
             return 0
         worker = get_worker()
         now_utc = _utc_now()
@@ -66,8 +87,20 @@ def recover_stale_tasks(session_factory=None) -> int:
             row.updated_at = now_utc
             worker.broadcaster.clear(row.id)
             audit_items.append((row.id, int(row.tenant_id), row.user_id))
+        for d in stale_drafts:
+            d.status = 'failed'
+            d.stage_detail = '服务重启中断'
+            d.error_msg = '服务重启中断'
+            d.finished_at = now_utc
+            d.updated_at = now_utc
+        for sr in stale_reports:
+            sr.status = 'failed'
+            sr.stage_detail = '服务重启中断'
+            sr.error_msg = '服务重启中断'
+            sr.finished_at = now_utc
+            sr.updated_at = now_utc
         sess.commit()
-        recovered_count = len(audit_items)
+        recovered_count = len(audit_items) + len(stale_drafts) + len(stale_reports)
         for tid, tenant_id, uid in audit_items:
             try:
                 record_audit(

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
@@ -12,14 +12,58 @@ import type {
   ComposeBlueprintSection,
   ComposeDraftDetailOut,
   ComposeDraftSummaryOut,
+  ComposeManualItem,
   ComposeModeType,
+  ComposerSkillOut,
+  SkillImportPreviewOut,
+  SkillLayoutSpec,
 } from '@/api/types'
 
 defineOptions({ name: 'BidComposerView' })
 
 const route = useRoute()
-
 const mainTab = ref<'compose' | 'clean'>('compose')
+
+// ── Skills 状态与 GitHub/Gitee/本地导入弹窗 ───────────────────────────────
+const skillList = ref<ComposerSkillOut[]>([])
+const selectedSkillId = ref<number | undefined>(undefined)
+const skillModalVisible = ref(false)
+const skillModalTab = ref<'list' | 'edit' | 'import'>('list')
+const editingSkillId = ref<number | null>(null)
+const savingSkill = ref(false)
+
+const skillForm = reactive<{
+  name: string
+  description: string
+  writing_instructions: string
+  is_default: boolean
+  layout_spec: SkillLayoutSpec
+}>({
+  name: '',
+  description: '',
+  writing_instructions: '',
+  is_default: false,
+  layout_spec: {
+    cover_style: 'gov_clean',
+    font_zh: '仿宋',
+    heading_font_zh: '黑体',
+    font_size_pt: 11.5,
+    line_spacing: 1.35,
+    accent_color_hex: '0F172A',
+    table_header_bg: 'F1F5F9',
+    include_toc: true,
+    append_checklist_at_end: false,
+    target_section_words: 500,
+    tone: 'formal_gov',
+  },
+})
+
+const gitUrlInput = ref('')
+const allowGiteeFallback = ref(true)
+const previewingUrl = ref(false)
+const importingUrl = ref(false)
+const urlPreview = ref<SkillImportPreviewOut | null>(null)
+const urlImportError = ref('')
 
 // ── Tab 1: 正向智能编制初稿状态 ───────────────────────────────────────────
 const tenderSourceType = ref<'upload' | 'task'>('upload')
@@ -28,12 +72,15 @@ const selectedSourceTaskId = ref<number | undefined>(undefined)
 const composeTitle = ref('')
 const packageNo = ref<number | undefined>(undefined)
 const composeMode = ref<ComposeModeType>('skeleton_v1')
+const useAi = ref(true)
 const knowledgeFiles = ref<File[]>([])
 const generating = ref(false)
+const cancellingDraft = ref(false)
 
 const loadingDrafts = ref(false)
 const draftList = ref<ComposeDraftSummaryOut[]>([])
 const activeDraft = ref<ComposeDraftDetailOut | null>(null)
+const showManualDrawer = ref(false)
 const expandedSections = ref<string[]>([
   'sec_cover',
   'sec_qual',
@@ -42,6 +89,8 @@ const expandedSections = ref<string[]>([
   'sec_scoring',
 ])
 const highlightedSectionId = ref<string>('')
+
+let draftPollTimer: number | null = null
 
 // ── Tab 2: 采纳整改导定稿状态 ─────────────────────────────────────────────
 const loadingTasks = ref(false)
@@ -53,9 +102,33 @@ const replacementDrafts = reactive<Record<number, string>>({})
 const exportingClean = ref(false)
 const cleanResult = ref<CleanBidExportOut | null>(null)
 
+const selectedSkill = computed<ComposerSkillOut | null>(() => {
+  if (!selectedSkillId.value) return null
+  return skillList.value.find((s) => s.id === selectedSkillId.value) || null
+})
+
 const activeBlueprint = computed<ComposeBlueprintData | null>(() => {
   if (!activeDraft.value || !activeDraft.value.blueprint) return null
-  return activeDraft.value.blueprint as ComposeBlueprintData
+  const bp = activeDraft.value.blueprint as ComposeBlueprintData
+  if (!bp || !Array.isArray(bp.sections)) return null
+  return bp
+})
+
+const manualGroupStats = computed(() => {
+  const items: ComposeManualItem[] = activeBlueprint.value?.manual_checklist || []
+  let qual = 0
+  let price = 0
+  let deviation = 0
+  let scoring = 0
+  let cover = 0
+  for (const m of items) {
+    if (m.section_id === 'sec_qual') qual += 1
+    else if (m.section_id === 'sec_price') price += 1
+    else if (m.section_id === 'sec_deviation') deviation += 1
+    else if (m.section_id === 'sec_scoring') scoring += 1
+    else cover += 1
+  }
+  return { total: items.length, cover, qual, price, deviation, scoring }
 })
 
 const cleanSelectedTask = computed<BidTaskOut | null>(() => {
@@ -68,12 +141,196 @@ const cleanIsPdfTask = computed<boolean>(() => {
   return fn.endsWith('.pdf')
 })
 
+function isRunningStatus(st?: string | null): boolean {
+  return st === 'queued' || st === 'running'
+}
+
+function stopDraftPoll(): void {
+  if (draftPollTimer !== null) {
+    window.clearTimeout(draftPollTimer)
+    draftPollTimer = null
+  }
+}
+
+function scheduleDraftPoll(draftId: number): void {
+  stopDraftPoll()
+  draftPollTimer = window.setTimeout(async () => {
+    try {
+      const detail = await composerApi.getDraft(draftId)
+      if (activeDraft.value?.id === draftId || !activeDraft.value) {
+        activeDraft.value = detail
+      }
+      const listRes = await composerApi.listDrafts()
+      draftList.value = listRes.items || []
+      if (isRunningStatus(detail.status)) {
+        scheduleDraftPoll(draftId)
+      } else if (detail.status === 'completed') {
+        ElMessage.success(`标书初稿生成完成：${detail.title}`)
+      }
+    } catch {
+      stopDraftPoll()
+    }
+  }, 1500)
+}
+
+async function loadSkills(): Promise<void> {
+  const res = await composerApi.listSkills()
+  skillList.value = res.items || []
+  if (
+    !selectedSkillId.value ||
+    !skillList.value.some((s) => s.id === selectedSkillId.value)
+  ) {
+    const def = skillList.value.find((s) => s.is_default) || skillList.value[0]
+    selectedSkillId.value = def?.id
+  }
+}
+
+function openSkillModal(tab: 'list' | 'edit' | 'import' = 'list'): void {
+  skillModalTab.value = tab
+  if (tab === 'edit' && editingSkillId.value === null) {
+    resetSkillForm()
+  }
+  skillModalVisible.value = true
+}
+
+function resetSkillForm(): void {
+  editingSkillId.value = null
+  skillForm.name = ''
+  skillForm.description = ''
+  skillForm.writing_instructions = ''
+  skillForm.is_default = false
+  skillForm.layout_spec = {
+    cover_style: 'gov_clean',
+    font_zh: '仿宋',
+    heading_font_zh: '黑体',
+    font_size_pt: 11.5,
+    line_spacing: 1.35,
+    accent_color_hex: '0F172A',
+    table_header_bg: 'F1F5F9',
+    include_toc: true,
+    append_checklist_at_end: false,
+    target_section_words: 500,
+    tone: 'formal_gov',
+  }
+}
+
+function startEditSkill(sk: ComposerSkillOut): void {
+  editingSkillId.value = sk.id
+  skillForm.name = sk.name
+  skillForm.description = sk.description
+  skillForm.writing_instructions = sk.writing_instructions
+  skillForm.is_default = sk.is_default
+  skillForm.layout_spec = { ...sk.layout_spec }
+  skillModalTab.value = 'edit'
+}
+
+async function handleSaveSkill(): Promise<void> {
+  if (!skillForm.name.trim() || !skillForm.writing_instructions.trim()) {
+    ElMessage.warning('请填写 Skill 名称和写作约束指令')
+    return
+  }
+  savingSkill.value = true
+  try {
+    const payload = {
+      name: skillForm.name.trim(),
+      description: skillForm.description.trim(),
+      writing_instructions: skillForm.writing_instructions.trim(),
+      layout_spec: { ...skillForm.layout_spec },
+      is_default: skillForm.is_default,
+    }
+    const saved = editingSkillId.value
+      ? await composerApi.updateSkill(editingSkillId.value, payload)
+      : await composerApi.createSkill(payload)
+    ElMessage.success(`Skill「${saved.name}」已保存`)
+    await loadSkills()
+    selectedSkillId.value = saved.id
+    resetSkillForm()
+    skillModalTab.value = 'list'
+  } finally {
+    savingSkill.value = false
+  }
+}
+
+async function handleDeleteSkill(sk: ComposerSkillOut): Promise<void> {
+  try {
+    await ElMessageBox.confirm(`确认删除写作 Skill「${sk.name}」吗？`, '删除 Skill', {
+      type: 'warning',
+      confirmButtonText: '确认删除',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  await composerApi.deleteSkill(sk.id)
+  ElMessage.success('已删除 Skill')
+  await loadSkills()
+}
+
+async function handlePreviewSkillUrl(): Promise<void> {
+  if (!gitUrlInput.value.trim() || previewingUrl.value) return
+  previewingUrl.value = true
+  urlImportError.value = ''
+  urlPreview.value = null
+  try {
+    urlPreview.value = await composerApi.previewSkillUrl(
+      gitUrlInput.value.trim(),
+      allowGiteeFallback.value,
+    )
+    if (urlPreview.value.used_fallback) {
+      ElMessage.info('GitHub 未直接命中，已自动降级从 Gitee 拉取预览')
+    }
+  } catch (err: unknown) {
+    const msg =
+      (err as { response?: { data?: { detail?: { message?: string } } } })?.response?.data?.detail
+        ?.message || '外部托管拉取失败，请改用本地 .md/.json 文件导入或手动新建'
+    urlImportError.value = msg
+  } finally {
+    previewingUrl.value = false
+  }
+}
+
+async function handleConfirmImportUrl(): Promise<void> {
+  if (!gitUrlInput.value.trim() || importingUrl.value) return
+  importingUrl.value = true
+  try {
+    const created = await composerApi.importSkillUrl(
+      gitUrlInput.value.trim(),
+      allowGiteeFallback.value,
+    )
+    ElMessage.success(`已导入 Skill：${created.name}`)
+    gitUrlInput.value = ''
+    urlPreview.value = null
+    urlImportError.value = ''
+    await loadSkills()
+    selectedSkillId.value = created.id
+    skillModalTab.value = 'list'
+  } finally {
+    importingUrl.value = false
+  }
+}
+
+async function handleLocalSkillFileChange(ev: Event): Promise<void> {
+  const input = ev.target as HTMLInputElement
+  const f = input.files?.[0]
+  input.value = ''
+  if (!f) return
+  const created = await composerApi.importSkillFile(f)
+  ElMessage.success(`已从本地文件导入 Skill：${created.name}`)
+  await loadSkills()
+  selectedSkillId.value = created.id
+  skillModalTab.value = 'list'
+}
+
 function handleTenderFileChange(ev: Event): void {
   const input = ev.target as HTMLInputElement
   const f = input.files?.[0]
   input.value = ''
   if (!f) return
-  if (!validateUploadFile(f)) return
+  const chk = validateUploadFile(f)
+  if (!chk.valid) {
+    ElMessage.warning(chk.message)
+    return
+  }
   tenderFile.value = f
 }
 
@@ -82,7 +339,11 @@ function handleKnowledgeFilesChange(ev: Event): void {
   const files = Array.from(input.files || [])
   input.value = ''
   for (const f of files) {
-    if (!validateUploadFile(f)) continue
+    const chk = validateUploadFile(f)
+    if (!chk.valid) {
+      ElMessage.warning(chk.message)
+      continue
+    }
     if (knowledgeFiles.value.some((k) => k.name === f.name && k.size === f.size)) continue
     knowledgeFiles.value.push(f)
   }
@@ -96,9 +357,12 @@ async function loadDrafts(): Promise<void> {
   loadingDrafts.value = true
   try {
     const res = await composerApi.listDrafts()
-    draftList.value = res.items
-    if (!activeDraft.value && res.items.length > 0) {
-      await openDraftDetail(res.items[0].id)
+    draftList.value = res.items || []
+    const runningItem = draftList.value.find((d) => isRunningStatus(d.status))
+    if (!activeDraft.value && draftList.value.length > 0) {
+      await openDraftDetail(draftList.value[0].id)
+    } else if (runningItem) {
+      scheduleDraftPoll(runningItem.id)
     }
   } finally {
     loadingDrafts.value = false
@@ -106,8 +370,12 @@ async function loadDrafts(): Promise<void> {
 }
 
 async function openDraftDetail(draftId: number): Promise<void> {
-  activeDraft.value = await composerApi.getDraft(draftId)
+  const d = await composerApi.getDraft(draftId)
+  activeDraft.value = d
   highlightedSectionId.value = ''
+  if (isRunningStatus(d.status)) {
+    scheduleDraftPoll(d.id)
+  }
 }
 
 async function handleGenerateDraft(): Promise<void> {
@@ -129,18 +397,42 @@ async function handleGenerateDraft(): Promise<void> {
       composeMode: composeMode.value,
       title: composeTitle.value.trim() || undefined,
       packageNo: packageNo.value || undefined,
+      skillId: selectedSkillId.value,
+      useAi: useAi.value,
+      asyncRun: true,
     })
     activeDraft.value = detail
-    ElMessage.success('标书初稿骨架蓝图与 Word 初稿生成完成')
-    await loadDrafts()
+    const listRes = await composerApi.listDrafts()
+    draftList.value = listRes.items || []
+    if (isRunningStatus(detail.status)) {
+      ElMessage.info('标书编制任务已在后台启动，切换其他页面不会中断')
+      scheduleDraftPoll(detail.id)
+    } else {
+      ElMessage.success('标书初稿生成完成')
+    }
   } finally {
     generating.value = false
   }
 }
 
+async function handleCancelDraft(): Promise<void> {
+  if (!activeDraft.value || cancellingDraft.value) return
+  cancellingDraft.value = true
+  try {
+    await composerApi.cancelDraft(activeDraft.value.id)
+    stopDraftPoll()
+    await openDraftDetail(activeDraft.value.id)
+    const listRes = await composerApi.listDrafts()
+    draftList.value = listRes.items || []
+    ElMessage.warning('已中断标书编制任务')
+  } finally {
+    cancellingDraft.value = false
+  }
+}
+
 async function handleDownloadDraft(item: { id: number; title: string }): Promise<void> {
-  await composerApi.downloadDraft(item.id, `${item.title}_投标文件初稿骨架.docx`)
-  ElMessage.success('已下载《投标文件初稿骨架.docx》')
+  await composerApi.downloadDraft(item.id, `${item.title}_投标文件初稿.docx`)
+  ElMessage.success('已下载《投标文件初稿.docx》')
 }
 
 async function handleDeleteDraft(item: ComposeDraftSummaryOut): Promise<void> {
@@ -259,10 +551,14 @@ onMounted(async () => {
     cleanTaskId.value = qTaskId
     selectedSourceTaskId.value = qTaskId
   }
-  await Promise.all([loadDrafts(), loadTasks()])
+  await Promise.all([loadSkills(), loadDrafts(), loadTasks()])
   if (cleanTaskId.value) {
     await loadAcceptedForClean(cleanTaskId.value)
   }
+})
+
+onUnmounted(() => {
+  stopDraftPoll()
 })
 </script>
 
@@ -272,14 +568,14 @@ onMounted(async () => {
       <div>
         <h2>标书编制输出与无损修订中心（F8）</h2>
         <p class="sub-desc">
-          正向按招标文件与企业证照台账装配《投标文件初稿骨架.docx》（报价栏强制人工填报占位，V2 可接参考方案库）；后期支持将体检已采纳整改项原位无损导出 Clean 干净定稿版。
+          由「写作 Skill 规范 + AI 动态构章撰稿 + 报价/证照/覆盖三锁」驱动生成独立封面、目录与投标初稿（.docx），支持从 GitHub/Gitee 或本地导入 Skills；后期支持将已采纳整改无损导出 Clean 定稿。
         </p>
       </div>
     </div>
 
     <el-tabs v-model="mainTab" class="composer-tabs">
       <!-- ── Tab 1: 正向智能编制初稿 ───────────────────────────────────── -->
-      <el-tab-pane label="智能编制初稿（V1 骨架+填表 / V2 方案库）" name="compose">
+      <el-tab-pane label="AI + Skill 智能编制初稿" name="compose">
         <el-card shadow="never" class="setup-card">
           <div class="setup-grid">
             <div class="setup-col">
@@ -317,27 +613,48 @@ onMounted(async () => {
               <div class="row-inputs">
                 <el-input
                   v-model="composeTitle"
-                  placeholder="初稿标题（可选，默认自动带出招标项目名）"
+                  placeholder="初稿标题（可选，默认带出招标项目名）"
                   clearable
                 />
                 <el-input-number
                   v-model="packageNo"
                   :min="1"
                   :max="99"
-                  placeholder="分包号(可选)"
+                  placeholder="分包"
                   controls-position="right"
                 />
               </div>
             </div>
 
             <div class="setup-col">
-              <div class="field-label">2. 编制模式与方案库参考（V1 / V2）</div>
+              <div class="skill-row-head">
+                <span class="field-label">2. 写作风格与版式 Skill + AI 选项</span>
+                <el-button size="small" type="primary" link @click="openSkillModal('list')">
+                  管理 / GitHub·Gitee·本地导入 Skills
+                </el-button>
+              </div>
+
+              <div class="skill-picker-bar">
+                <el-select v-model="selectedSkillId" placeholder="选择写作 Skill" style="flex: 1">
+                  <el-option
+                    v-for="sk in skillList"
+                    :key="sk.id"
+                    :label="`${sk.name}${sk.is_default ? '（默认）' : ''}`"
+                    :value="sk.id"
+                  />
+                </el-select>
+                <el-checkbox v-model="useAi">启用 AI 动态构章撰稿</el-checkbox>
+              </div>
+              <div v-if="selectedSkill" class="skill-summary-line">
+                {{ selectedSkill.description }}（{{ selectedSkill.layout_spec.font_zh }} {{ selectedSkill.layout_spec.font_size_pt }}pt · 行距 {{ selectedSkill.layout_spec.line_spacing }} · 目标 {{ selectedSkill.layout_spec.target_section_words }} 字/节）
+              </div>
+
               <el-radio-group v-model="composeMode" class="mode-radios">
                 <el-radio value="skeleton_v1">
-                  V1 正向骨架初稿（0 幻觉确定性装配，缺项标黄占位，报价严禁 AI 填报）
+                  标准依据招标文件编制（按 Skill 与招标评分结构规划正文，报价/缺证严格锁定）
                 </el-radio>
                 <el-radio value="knowledge_draft_v2">
-                  V2 附企业参考方案库片段（按评分细则局部检索历史方案，无参考文件自动回退大纲）
+                  结合企业参考方案库编制（检索参考片段赋能 AI 撰写，无参考库安全回退）
                 </el-radio>
               </el-radio-group>
 
@@ -361,7 +678,6 @@ onMounted(async () => {
                     {{ kf.name }}
                   </el-tag>
                 </div>
-                <div v-else class="file-hint">未上传参考文件时将安全回退至 V1 评分大纲，绝不编造参数</div>
               </div>
 
               <div class="action-bar">
@@ -370,7 +686,7 @@ onMounted(async () => {
                   :loading="generating"
                   @click="handleGenerateDraft"
                 >
-                  生成《投标文件初稿骨架.docx》
+                  {{ useAi ? '发起 AI + Skill 标书编排与生成 (.docx)' : '生成确定性结构初稿 (.docx)' }}
                 </el-button>
               </div>
             </div>
@@ -397,64 +713,145 @@ onMounted(async () => {
               >
                 <div class="draft-title">{{ item.title }}</div>
                 <div class="draft-meta">
-                  <el-tag size="small" :type="item.scoring_fill_mode === 'rag_knowledge' ? 'success' : 'info'">
-                    {{ item.scoring_fill_mode === 'rag_knowledge' ? 'V2 方案参考' : 'V1 骨架' }}
+                  <el-tag
+                    size="small"
+                    :type="isRunningStatus(item.status) ? 'warning' : (item.status === 'failed' ? 'danger' : 'success')"
+                  >
+                    {{
+                      isRunningStatus(item.status)
+                        ? `运行中 ${item.progress || 0}%`
+                        : item.status === 'failed'
+                          ? '已中断/失败'
+                          : item.ai_status === 'done'
+                            ? 'AI 已撰稿'
+                            : '结构初稿'
+                    }}
                   </el-tag>
-                  <span>待填 {{ item.manual_item_count }} 项</span>
+                  <span>{{ item.skill_name || '标准版' }}</span>
                 </div>
                 <div class="draft-actions" @click.stop>
-                  <el-button size="small" type="primary" link @click="handleDownloadDraft(item)">下载 Word</el-button>
-                  <el-button size="small" type="danger" link @click="handleDeleteDraft(item)">删除</el-button>
+                  <el-button
+                    v-if="!isRunningStatus(item.status) && item.status !== 'failed'"
+                    size="small"
+                    type="primary"
+                    link
+                    @click="handleDownloadDraft(item)"
+                  >
+                    下载 Word
+                  </el-button>
+                  <el-button
+                    v-if="!isRunningStatus(item.status)"
+                    size="small"
+                    type="danger"
+                    link
+                    @click="handleDeleteDraft(item)"
+                  >
+                    删除
+                  </el-button>
                 </div>
               </div>
             </div>
           </el-card>
 
-          <!-- 右侧蓝图详情与待人工填报高亮区 -->
+          <!-- 右侧蓝图详情 / 异步进度 / 折叠待办核对抽屉 -->
           <el-card shadow="never" class="detail-pane">
-            <el-empty v-if="!activeBlueprint" description="请选择左侧草稿或生成新的标书初稿骨架" />
-            <template v-else>
+            <el-empty v-if="!activeDraft" description="请选择左侧草稿或生成新的标书初稿" />
+
+            <template v-else-if="isRunningStatus(activeDraft.status)">
+              <div class="async-status-card">
+                <div class="async-top">
+                  <div>
+                    <h3>{{ activeDraft.title }}</h3>
+                    <p class="async-sub">{{ activeDraft.stage_detail || '后台线程池编排生成中，切至其他页面不会中断…' }}</p>
+                  </div>
+                  <el-button
+                    type="danger"
+                    plain
+                    size="small"
+                    :loading="cancellingDraft"
+                    @click="handleCancelDraft"
+                  >
+                    中断生成
+                  </el-button>
+                </div>
+                <el-progress :percentage="activeDraft.progress || 10" :stroke-width="10" striped striped-flow />
+              </div>
+            </template>
+
+            <template v-else-if="activeDraft.status === 'failed'">
+              <el-alert
+                type="error"
+                :closable="false"
+                show-icon
+                :title="`生成任务未完成：${activeDraft.error_msg || '已中断或异常'}`"
+              />
+            </template>
+
+            <template v-else-if="activeBlueprint">
               <div class="bp-header">
                 <div>
                   <h3>{{ activeBlueprint.project_name }}</h3>
                   <div class="bp-sub">
                     编号：{{ activeBlueprint.project_code }} ｜ 开标日：{{ activeBlueprint.open_date || '待人工核对' }} ｜ 参考限价：{{ activeBlueprint.price_cap ? `${activeBlueprint.price_cap} 元` : '未识别/待核对' }}
                   </div>
+                  <div class="bp-sub-tags">
+                    <el-tag size="small" type="info">Skill：{{ activeBlueprint.skill_name || activeDraft.skill_name }}</el-tag>
+                    <el-tag size="small" :type="activeBlueprint.ai_status === 'done' ? 'success' : 'warning'">
+                      {{
+                        activeBlueprint.ai_status === 'done'
+                          ? 'AI 动态规划章节与正文已生成'
+                          : activeBlueprint.ai_status === 'partial'
+                            ? 'AI 部分章节已生成'
+                            : '0-Token 骨架模式（未启用或未配模型）'
+                      }}
+                    </el-tag>
+                  </div>
                 </div>
                 <el-button
-                  v-if="activeDraft"
                   type="success"
                   @click="handleDownloadDraft(activeDraft)"
                 >
-                  下载初稿骨架 (.docx)
+                  下载排版初稿 (.docx)
                 </el-button>
               </div>
 
-              <!-- 人工待填报清单高亮摘要 -->
-              <el-alert
-                type="warning"
-                :closable="false"
-                show-icon
-                class="manual-alert"
-                :title="`共 ${activeBlueprint.manual_checklist.length} 项待人工填报与终核确认（点击定位对应章节）`"
-              >
-                <div class="manual-tags">
-                  <el-tag
-                    v-for="(mi, idx) in activeBlueprint.manual_checklist"
-                    :key="idx"
-                    type="danger"
-                    effect="plain"
-                    class="manual-tag"
-                    @click="jumpToSection(mi.section_id)"
-                  >
-                    {{ mi.field }}
-                  </el-tag>
+              <!-- 紧凑分组人工待核对条（取代原 40 标签墙，点击展开明细抽屉） -->
+              <div class="manual-compact-bar">
+                <div class="mc-summary">
+                  <strong>人工终核提醒（共 {{ manualGroupStats.total }} 项）</strong>
+                  <el-tag size="small" type="danger" effect="plain">资格证照 {{ manualGroupStats.qual }}</el-tag>
+                  <el-tag size="small" type="warning" effect="plain">报价锁定 {{ manualGroupStats.price }}</el-tag>
+                  <el-tag size="small" type="info" effect="plain">偏离核对 {{ manualGroupStats.deviation }}</el-tag>
+                  <el-tag size="small" type="success" effect="plain">方案审校 {{ manualGroupStats.scoring }}</el-tag>
                 </div>
-              </el-alert>
+                <el-button size="small" link type="primary" @click="showManualDrawer = !showManualDrawer">
+                  {{ showManualDrawer ? '收起待核对明细' : '展开待核对明细' }}
+                </el-button>
+              </div>
+
+              <div v-if="showManualDrawer" class="manual-drawer-panel">
+                <el-table :data="activeBlueprint.manual_checklist" size="small" max-height="260" border>
+                  <el-table-column prop="field" label="待处理项" min-width="180" />
+                  <el-table-column prop="reason" label="原因说明" min-width="200" />
+                  <el-table-column prop="hint" label="建议动作" min-width="200" />
+                  <el-table-column label="定位" width="80" align="center">
+                    <template #default="{ row }">
+                      <el-button
+                        link
+                        type="primary"
+                        size="small"
+                        @click="jumpToSection(String((row as ComposeManualItem).section_id))"
+                      >
+                        跳转
+                      </el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
 
               <el-collapse v-model="expandedSections" class="bp-sections">
                 <el-collapse-item
-                  v-for="sec in activeBlueprint.sections"
+                  v-for="sec in activeBlueprint.sections.filter((s) => s.slot_type !== 'cert_ledger_appendix')"
                   :key="sec.section_id"
                   :name="sec.section_id"
                   :id="`composer-sec-${sec.section_id}`"
@@ -463,9 +860,7 @@ onMounted(async () => {
                   <template #title>
                     <div class="sec-title-row">
                       <span>{{ sec.title }}</span>
-                      <el-tag size="small" effect="plain">
-                        {{ sec.fill_mode === 'rag_knowledge' ? 'V2 方案片段已吸附' : sec.fill_mode }}
-                      </el-tag>
+                      <el-tag size="small" effect="plain">{{ sec.fill_mode }}</el-tag>
                     </div>
                   </template>
 
@@ -479,8 +874,8 @@ onMounted(async () => {
                       <el-table-column prop="label" label="字段" width="210" />
                       <el-table-column label="装配值 / 占位提示">
                         <template #default="{ row }">
-                          <span :class="{ 'highlight-manual-text': Boolean(row.highlight) }">
-                            {{ row.value }}
+                          <span :class="{ 'highlight-manual-text': Boolean((row as Record<string, unknown>).highlight) }">
+                            {{ (row as Record<string, unknown>).value }}
                           </span>
                         </template>
                       </el-table-column>
@@ -503,8 +898,8 @@ onMounted(async () => {
                       <el-table-column prop="valid_until" label="台账有效期" width="120" />
                       <el-table-column label="对账结果" min-width="240">
                         <template #default="{ row }">
-                          <span :class="{ 'highlight-manual-text': row.ledger_status !== 'valid' }">
-                            {{ row.display_status }}
+                          <span :class="{ 'highlight-manual-text': (row as Record<string, unknown>).ledger_status !== 'valid' }">
+                            {{ (row as Record<string, unknown>).display_status }}
                           </span>
                         </template>
                       </el-table-column>
@@ -516,16 +911,75 @@ onMounted(async () => {
                     <el-table :data="sectionBlocks(sec, 'deviation_row')" size="small" border>
                       <el-table-column prop="clause_no" label="条款号" width="110" />
                       <el-table-column prop="tender_requirement" label="招标实质要求" min-width="220" />
-                      <el-table-column prop="bid_response" label="我方响应占位 / 核验参考" min-width="220" />
-                      <el-table-column prop="deviation" label="状态" width="130" />
+                      <el-table-column prop="bid_response" label="我方响应（初稿）" min-width="220" />
+                      <el-table-column prop="deviation" label="状态" width="140" />
                     </el-table>
                   </template>
 
-                  <!-- Scoring Outline & V2 RAG -->
+                  <!-- Dynamic AI Chapters OR Fallback Scoring Topics -->
                   <template v-else-if="sec.slot_type === 'scoring_response_outline'">
+                    <!-- AI 动态规划并撰写正本章节 -->
+                    <div
+                      v-for="(ch, cidx) in sectionBlocks(sec, 'ai_chapter')"
+                      :key="`ai-${cidx}`"
+                      class="ai-chapter-card"
+                    >
+                      <div class="topic-head">
+                        <strong>{{ ch.chapter_no }} {{ ch.title }}</strong>
+                        <el-tag size="small" :type="ch.ai_generated ? 'success' : 'warning'">
+                          {{ ch.ai_generated ? 'AI 草稿·待人工审定' : '结构兜底' }}
+                        </el-tag>
+                      </div>
+                      <div v-if="(ch.covered_topics as string[])?.length" class="topic-quote">
+                        覆盖评分要点：{{ (ch.covered_topics as string[]).join('；') }}
+                      </div>
+                      <p
+                        v-for="(para, pi) in ((ch.paragraphs as string[]) || [])"
+                        :key="pi"
+                        class="ai-para"
+                      >
+                        {{ para }}
+                      </p>
+                      <div
+                        v-if="ch.table && (ch.table as Record<string, unknown>).headers"
+                        class="ai-table-wrap"
+                      >
+                        <div class="ai-table-title">{{ (ch.table as Record<string, unknown>).title }}</div>
+                        <table class="mini-grid-tbl">
+                          <thead>
+                            <tr>
+                              <th
+                                v-for="(h, hi) in ((ch.table as Record<string, unknown>).headers as string[])"
+                                :key="hi"
+                              >
+                                {{ h }}
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr
+                              v-for="(rvals, ri) in ((ch.table as Record<string, unknown>).rows as string[][])"
+                              :key="ri"
+                            >
+                              <td v-for="(cv, ci) in rvals" :key="ci">{{ cv }}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                      <div
+                        v-for="(sn, sidx) in ((ch.reference_snippets as Array<Record<string, unknown>>) || [])"
+                        :key="sidx"
+                        class="rag-snippet-box"
+                      >
+                        <div class="rag-notice">{{ sn.notice }}</div>
+                        <div class="rag-body">{{ sn.snippet }}</div>
+                      </div>
+                    </div>
+
+                    <!-- 0-LLM 兜底评分大纲 -->
                     <div
                       v-for="(tp, tidx) in sectionBlocks(sec, 'scoring_topic')"
-                      :key="tidx"
+                      :key="`tp-${tidx}`"
                       class="topic-card"
                     >
                       <div class="topic-head">
@@ -545,16 +999,6 @@ onMounted(async () => {
                         <div class="rag-body">{{ sn.snippet }}</div>
                       </div>
                     </div>
-                  </template>
-
-                  <!-- Appendix -->
-                  <template v-else>
-                    <el-table :data="sectionBlocks(sec, 'ledger_appendix_row')" size="small" border>
-                      <el-table-column prop="cert_name" label="台账证照名称" min-width="180" />
-                      <el-table-column prop="cert_no" label="证号" width="150" />
-                      <el-table-column prop="valid_until" label="效期" width="120" />
-                      <el-table-column prop="attachment_name" label="原件附件" min-width="160" />
-                    </el-table>
                   </template>
                 </el-collapse-item>
               </el-collapse>
@@ -606,7 +1050,7 @@ onMounted(async () => {
             type="info"
             :closable="false"
             show-icon
-            title="仅对在体检详情点击过「采纳整改」的发现执行安全原位替换，自动清除全文 w:comment 批注标记；大段漏应答若未填替换正文将诚实列入待人工补写清单，绝不编造篡改原排版。"
+            title="仅对在体检详情点击过「采纳整改」的发现执行安全原位替换，自动清除全文 w:comment 批注标记；大段漏应答若未填替换正文将诚实列入待人工补写清单。"
             class="mt-12"
           />
         </el-card>
@@ -630,15 +1074,15 @@ onMounted(async () => {
             <el-table-column prop="clause_no" label="条款" width="110" />
             <el-table-column label="待替换原文靶标" min-width="220">
               <template #default="{ row }">
-                <div class="quote-preview">{{ findOldTargetForFinding(row) || '（无明确原文定位，需人工补页）' }}</div>
+                <div class="quote-preview">{{ findOldTargetForFinding(row as BidFindingOut) || '（无明确原文定位，需人工补页）' }}</div>
               </template>
             </el-table-column>
             <el-table-column label="安全替换目标文本（留空则安全计入待人工清单）" min-width="260">
               <template #default="{ row }">
                 <el-input
-                  v-model="replacementDrafts[row.id]"
+                  v-model="replacementDrafts[(row as BidFindingOut).id]"
                   :placeholder="
-                    row.code === 'MISSING_RESPONSE'
+                    (row as BidFindingOut).code === 'MISSING_RESPONSE'
                       ? '大段漏应答建议线下补写（可留空安全跳过）'
                       : '输入替换后的准确文本（例如本项目正式名称）'
                   "
@@ -690,6 +1134,156 @@ onMounted(async () => {
         </el-card>
       </el-tab-pane>
     </el-tabs>
+
+    <!-- ── AI 写作 Skills 管理与 GitHub / Gitee / 本地导入弹窗 ──────────── -->
+    <el-dialog
+      v-model="skillModalVisible"
+      title="AI 标书写作 Skills 管理中心（支持 GitHub / Gitee / 本地导入）"
+      width="780px"
+    >
+      <el-tabs v-model="skillModalTab">
+        <el-tab-pane label="已有 Skills 列表" name="list">
+          <div class="skill-modal-bar">
+            <el-button type="primary" size="small" @click="resetSkillForm(); skillModalTab = 'edit'">
+              + 新建自定义 Skill
+            </el-button>
+            <el-button size="small" @click="skillModalTab = 'import'">
+              从 GitHub / Gitee / 本地文件导入
+            </el-button>
+          </div>
+          <el-table :data="skillList" border size="small">
+            <el-table-column prop="name" label="名称" min-width="150" />
+            <el-table-column prop="source_type" label="来源" width="90" />
+            <el-table-column label="版式特征" min-width="170">
+              <template #default="{ row }">
+                <span>
+                  {{ (row as ComposerSkillOut).layout_spec.font_zh }} /
+                  {{ (row as ComposerSkillOut).layout_spec.cover_style }} /
+                  {{ (row as ComposerSkillOut).layout_spec.target_section_words }}字
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="150" align="center">
+              <template #default="{ row }">
+                <el-button link type="primary" size="small" @click="startEditSkill(row as ComposerSkillOut)">编辑</el-button>
+                <el-button link type="danger" size="small" @click="handleDeleteSkill(row as ComposerSkillOut)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+
+        <el-tab-pane label="新建 / 编辑 Skill" name="edit">
+          <el-form label-width="120px" size="small">
+            <el-form-item label="Skill 名称" required>
+              <el-input v-model="skillForm.name" placeholder="例如：政采医疗信息化高分模板" />
+            </el-form-item>
+            <el-form-item label="适用场景说明">
+              <el-input v-model="skillForm.description" placeholder="一句话说明写作风格与版式特点" />
+            </el-form-item>
+            <el-form-item label="AI 写作规范指令" required>
+              <el-input
+                v-model="skillForm.writing_instructions"
+                type="textarea"
+                :rows="5"
+                placeholder="定义 AI 写作视角、应答格式、技术侧重与禁止事项…"
+              />
+            </el-form-item>
+            <el-form-item label="封面与色调">
+              <div class="skill-inline-grid">
+                <el-select v-model="skillForm.layout_spec.cover_style" style="width: 150px">
+                  <el-option value="gov_clean" label="政务公文风 (gov_clean)" />
+                  <el-option value="navy_business" label="商务深青风 (navy_business)" />
+                  <el-option value="tech_modern" label="现代科技风 (tech_modern)" />
+                </el-select>
+                <el-select v-model="skillForm.layout_spec.font_zh" style="width: 120px">
+                  <el-option value="仿宋" label="仿宋" />
+                  <el-option value="宋体" label="宋体" />
+                  <el-option value="微软雅黑" label="微软雅黑" />
+                  <el-option value="黑体" label="黑体" />
+                </el-select>
+                <el-select v-model="skillForm.layout_spec.tone" style="width: 140px">
+                  <el-option value="formal_gov" label="严谨政采风" />
+                  <el-option value="technical_deep" label="深度技术架构风" />
+                  <el-option value="concise_direct" label="简洁条文风" />
+                </el-select>
+              </div>
+            </el-form-item>
+            <el-form-item label="字号 / 行距 / 字数">
+              <div class="skill-inline-grid">
+                <el-input-number v-model="skillForm.layout_spec.font_size_pt" :min="9" :max="16" :step="0.5" />
+                <el-input-number v-model="skillForm.layout_spec.line_spacing" :min="1" :max="2.2" :step="0.1" />
+                <el-input-number v-model="skillForm.layout_spec.target_section_words" :min="150" :max="2000" :step="50" />
+              </div>
+            </el-form-item>
+            <el-form-item label="版式开关">
+              <div class="skill-inline-grid">
+                <el-checkbox v-model="skillForm.layout_spec.include_toc">生成 Word 自动目录</el-checkbox>
+                <el-checkbox v-model="skillForm.layout_spec.append_checklist_at_end">文末附内部核对附录</el-checkbox>
+                <el-checkbox v-model="skillForm.is_default">设为默认 Skill</el-checkbox>
+              </div>
+            </el-form-item>
+          </el-form>
+          <div class="action-bar">
+            <el-button @click="resetSkillForm">重置</el-button>
+            <el-button type="primary" :loading="savingSkill" @click="handleSaveSkill">保存 Skill</el-button>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane label="GitHub / Gitee / 本地导入" name="import">
+          <el-alert
+            type="info"
+            :closable="false"
+            show-icon
+            title="仅解析纯文本 SKILL.md / JSON 规则（严禁执行任何仓库脚本）。如客户处于无外网内网或未开代理，可直接下方上传本地文件导入。"
+            class="mb-12"
+          />
+          <div class="import-url-row">
+            <el-input
+              v-model="gitUrlInput"
+              placeholder="输入 GitHub / Gitee 链接或 owner/repo（如 owner/repo 或 .../blob/main/SKILL.md）"
+              clearable
+            />
+            <el-button type="primary" :loading="previewingUrl" @click="handlePreviewSkillUrl">
+              拉取预览
+            </el-button>
+          </div>
+          <div class="mt-8">
+            <el-checkbox v-model="allowGiteeFallback">
+              GitHub 不可达或超时时自动优雅降级尝试 Gitee 同路径
+            </el-checkbox>
+          </div>
+
+          <el-alert
+            v-if="urlImportError"
+            type="warning"
+            :closable="false"
+            show-icon
+            :title="urlImportError"
+            class="mt-12"
+          />
+
+          <div v-if="urlPreview" class="preview-box mt-12">
+            <div class="pv-head">
+              <strong>{{ urlPreview.name }}</strong>
+              <el-tag size="small" type="success">来源：{{ urlPreview.fetched_from_provider || urlPreview.source_type }}</el-tag>
+            </div>
+            <p class="pv-desc">{{ urlPreview.description }}</p>
+            <pre class="pv-body">{{ urlPreview.writing_instructions.slice(0, 600) }}</pre>
+            <div class="action-bar">
+              <el-button type="success" :loading="importingUrl" @click="handleConfirmImportUrl">
+                确认导入此 Skill 到工作台
+              </el-button>
+            </div>
+          </div>
+
+          <el-divider>或直接上传本地 Skill 文件（内网离线兜底）</el-divider>
+          <div class="local-skill-upload">
+            <span>选择本地 <code>SKILL.md</code> / <code>.md</code> / <code>.json</code> 文件一键导入：</span>
+            <input type="file" accept=".md,.markdown,.txt,.json" @change="handleLocalSkillFileChange" />
+          </div>
+        </el-tab-pane>
+      </el-tabs>
+    </el-dialog>
   </div>
 </template>
 
@@ -733,6 +1327,28 @@ onMounted(async () => {
   font-size: 13px;
   font-weight: 600;
   color: #1e293b;
+}
+
+.skill-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.skill-picker-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.skill-summary-line {
+  font-size: 12px;
+  color: #475569;
+  background: #f8fafc;
+  border-left: 3px solid #2563eb;
+  padding: 6px 10px;
+  border-radius: 4px;
 }
 
 .upload-box,
@@ -787,6 +1403,7 @@ onMounted(async () => {
 .action-bar {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
   margin-top: auto;
 }
 
@@ -854,6 +1471,33 @@ onMounted(async () => {
   gap: 10px;
 }
 
+.async-status-card {
+  padding: 20px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  border-radius: 8px;
+}
+
+.async-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.async-top h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  color: #0f172a;
+}
+
+.async-sub {
+  margin: 0;
+  font-size: 13px;
+  color: #1e40af;
+}
+
 .bp-header {
   display: flex;
   justify-content: space-between;
@@ -873,19 +1517,36 @@ onMounted(async () => {
   color: #475569;
 }
 
-.manual-alert {
-  margin-bottom: 12px;
-}
-
-.manual-tags {
+.bp-sub-tags {
   display: flex;
-  flex-wrap: wrap;
   gap: 6px;
   margin-top: 6px;
 }
 
-.manual-tag {
-  cursor: pointer;
+.manual-compact-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+  border-radius: 6px;
+  margin-bottom: 10px;
+}
+
+.mc-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12.5px;
+  color: #92400e;
+}
+
+.manual-drawer-panel {
+  margin-bottom: 12px;
 }
 
 .sec-title-row {
@@ -914,11 +1575,13 @@ onMounted(async () => {
   line-height: 1.6;
 }
 
+.ai-chapter-card,
 .topic-card {
-  padding: 10px 12px;
+  padding: 12px 14px;
   border: 1px solid #e2e8f0;
   border-radius: 6px;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
+  background: #ffffff;
 }
 
 .topic-head {
@@ -931,7 +1594,44 @@ onMounted(async () => {
 .topic-quote {
   font-size: 12px;
   color: #475569;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
+}
+
+.ai-para {
+  margin: 6px 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #0f172a;
+  text-indent: 2em;
+}
+
+.ai-table-wrap {
+  margin: 10px 0;
+}
+
+.ai-table-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #1e293b;
+  margin-bottom: 4px;
+}
+
+.mini-grid-tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.mini-grid-tbl th,
+.mini-grid-tbl td {
+  border: 1px solid #cbd5e1;
+  padding: 5px 8px;
+  text-align: left;
+}
+
+.mini-grid-tbl th {
+  background: #f1f5f9;
+  font-weight: 600;
 }
 
 .topic-outline {
@@ -980,12 +1680,74 @@ onMounted(async () => {
   white-space: pre-wrap;
 }
 
+.skill-modal-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.skill-inline-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.import-url-row {
+  display: flex;
+  gap: 8px;
+}
+
+.preview-box {
+  padding: 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.pv-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.pv-desc {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  color: #475569;
+}
+
+.pv-body {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: #0f172a;
+  white-space: pre-wrap;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  padding: 8px;
+  border-radius: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.local-skill-upload {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
 .mb-8 {
   margin-bottom: 8px;
 }
 
 .mb-12 {
   margin-bottom: 12px;
+}
+
+.mt-8 {
+  margin-top: 8px;
 }
 
 .mt-12 {

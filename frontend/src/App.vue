@@ -173,7 +173,7 @@ function handleLogout(): void {
 
       <main class="bg-content-canvas">
         <router-view v-slot="{ Component }">
-          <keep-alive :include="['ExtractView', 'RadarView', 'DeviationView', 'QaChatView']">
+          <keep-alive :include="['ExtractView', 'RadarView', 'DeviationView', 'QaChatView', 'BidComposerView', 'SimilarityCheckView']">
             <component :is="Component" />
           </keep-alive>
         </router-view>
