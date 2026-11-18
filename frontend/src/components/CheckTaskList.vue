@@ -252,7 +252,12 @@ async function handleCreateSubmit(): Promise<void> {
       autoRun: false,
     })
     dialogVisible.value = false
-    ElMessage.success(`防废标体检任务 #${created.id} 创建成功`)
+    const pStats = created.privacy_stats
+    const privacyHint =
+      pStats && (pStats.id_masked > 0 || pStats.bank_masked > 0)
+        ? `（已识别并保护 ${pStats.id_masked} 处身份证号、${pStats.bank_masked} 处银行账号）`
+        : ''
+    ElMessage.success(`防废标体检任务 #${created.id} 创建成功${privacyHint}`)
     emit('created', created, form.autoRun)
   } finally {
     creating.value = false

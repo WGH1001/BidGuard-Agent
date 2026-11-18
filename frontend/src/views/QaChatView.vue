@@ -682,7 +682,12 @@ async function handleUploadAttachment(file: File): Promise<void> {
         ? `OCR 识别 ${uploaded.ocr_chars} 字`
         : '纯图片（无文字）'
       : '文档解析就绪'
-    ElMessage.success(`已上传附件「${uploaded.filename}」（${desc}）`)
+    const pStats = uploaded.privacy_stats
+    const privacyHint =
+      pStats && (pStats.id_masked > 0 || pStats.bank_masked > 0)
+        ? `；已识别并保护 ${pStats.id_masked} 处身份证号、${pStats.bank_masked} 处银行账号`
+        : ''
+    ElMessage.success(`已上传附件「${uploaded.filename}」（${desc}${privacyHint}）`)
   } finally {
     const finalRt = runtimes.value[sid]
     if (finalRt) finalRt.uploadingAttachment = false

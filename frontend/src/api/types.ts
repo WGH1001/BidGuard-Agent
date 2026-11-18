@@ -166,6 +166,11 @@ export interface TaskDurationRecord {
   total_ms?: number | null
 }
 
+export interface PrivacyStatsOut {
+  id_masked: number
+  bank_masked: number
+}
+
 export interface BidTaskOut {
   id: number
   tenant_id: number
@@ -188,6 +193,7 @@ export interface BidTaskOut {
     [key: string]: unknown
   } | null
   llm_usage_json?: Record<string, unknown> | null
+  privacy_stats?: PrivacyStatsOut | null
   duration_json?: TaskDurationRecord | null
   started_at?: string | null
   finished_at?: string | null
@@ -409,6 +415,7 @@ export interface ExtractChecklistOut {
   llm_structured: MarkedClauseItem[]
   required_certificates?: RequiredCertItemOut[]
   cert_ledger_summary?: CertLedgerSummaryOut | null
+  privacy_stats?: PrivacyStatsOut | null
 }
 
 // ── 5. F5 偏离表导出 (/api/deviation) ────────────────────────────────────
@@ -483,6 +490,7 @@ export interface QaAttachmentOut {
   is_image: boolean
   ocr_chars: number
   has_text: boolean
+  privacy_stats?: PrivacyStatsOut | null
   uploaded_at?: string | null
 }
 

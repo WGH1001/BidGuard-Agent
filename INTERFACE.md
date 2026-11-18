@@ -241,11 +241,11 @@ inject_pdf_highlights(src_pdf_path: str, findings: list,
                       out_pdf_path: str = None, author: str = 'AI法务初审员') -> bytes
 ```
 
-### 1.9 模型网关（含用户级自定义 Key）
+### 1.9 模型网关（含用户级自定义 Key & E40 三出口脱敏 / 内网锁）
 
 ```python
 # core/llm_gateway.py
-get_llm_client(env: Optional[str] = None) -> LLMClient      # 读 config/models.yaml
+get_llm_client(env: Optional[str] = None) -> LLMClient      # 读 config/models.yaml（strict 开启时强制钉 prod 禁 demo）
 build_client_from_user_config(base_url: str, api_key: str, model_flash: str,
                               model_flagship: Optional[str] = None,
                               supports_reasoning_effort: bool = False,
@@ -253,7 +253,10 @@ build_client_from_user_config(base_url: str, api_key: str, model_flash: str,
                               supports_vision: bool = False) -> LLMClient
 encode_image_for_vlm(file_path: str | Path, max_edge: int = 2048,
                      target_bytes: int = 2 * 1024 * 1024) -> dict[str, Any]
-# LLMClient E22/E24 新增方法与防御机制：
+is_privacy_sanitize_enabled() -> bool                       # 读取 PRIVACY_SANITIZE_ENABLED（默认 '1'）
+is_strict_inner_model_only() -> bool                        # 读取 STRICT_INNER_MODEL_ONLY（默认 '0'）
+is_inner_model_url_allowed(raw_url: str) -> bool            # RFC1918 私网 IP / models.yaml envs.prod 主机 / INNER_MODEL_EXTRA_HOSTS
+# LLMClient E22/E24/E40 新增方法与防御机制：
 #   client.translate_reasoning_effort(value: str) -> Optional[str]  # 读 chat_options.reasoning_effort_map，未配置返 None
 #   单实例内存熔断：chat() / chat_stream() 遇思考参数 400 拒绝时自动剥参重试并置 supports_reasoning_effort=False；
 #                   遇上游拒绝视觉 image_url 输入时自动剥图重试并置 supports_vision=False（_mark_vision_unsupported）；
@@ -261,6 +264,9 @@ encode_image_for_vlm(file_path: str | Path, max_edge: int = 2048,
 #   _estimate_messages_prompt_chars() 对 image_url 按固定 512 字符估算，严禁 Base64 长度 // 2 虚高 token
 #   E27：LLMClient 读取 env_config['timeout']（默认 60.0s）并设 OpenAI max_retries=0 快速失败；
 #        私有 IP 网关异常自动附带 TUN/代理路由排查提示（_format_gateway_error_hint）
+#   E40：chat() / chat_stream() / embed() 三个总出口统一挂载 privacy_sanitizer（仅脱敏 text/system/tool_calls 文本，
+#        image_url 结构原样保全；total_usage() 累计 privacy_id_masked / privacy_bank_masked；
+#        STRICT_INNER_MODEL_ONLY 开启时拒绝公网 base_url 并禁止回退 demo 云端环境）
 ```
 
 ### 1.10 E4 招投标法规库与法条三态真伪核验（RulesAndCertsView / `/api/regulations`）
@@ -388,6 +394,27 @@ import_skill_from_git_url(url_or_repo: str, *, allow_gitee_fallback: bool = True
 # 自动复用系统代理/TUN；GitHub 超时/不可达时降级检查 Gitee 并拒收 HTML 登录页，外网彻底不可用时抛 EXTERNAL_SKILL_UNREACHABLE 引导本地导入
 ```
 
+### 1.14 E40 全局隐私合规脱敏引擎（`core/privacy_sanitizer.py`）
+
+```python
+# core/privacy_sanitizer.py —— 0 Token 确定性等长掩码引擎（原物理文件永不落地改写）
+is_valid_cn_id_card(raw: str) -> bool
+# 按 GB 11643-1999 验证 18 位身份证省份编码、有效公历出生日期与末位校验码
+
+sanitize_text(text: str) -> tuple[str, dict[str, int]]
+# 仅脱敏 18 位合规身份证号（保留前 3 后 4，中间 11 位 `*`）与语境命中且排除项目编号/标准号/金额/无关联标签的
+# 12~25 位银行卡/对公账号（支持 3~6 位空格或短横线分组，保留前 4 后 4 与原分隔符）；严格等长、严格幂等；
+# 返回 (sanitized_text, {'id_masked': int, 'bank_masked': int})
+
+scan_document_text(text: str) -> dict[str, int]
+scan_document_file(file_path: str | Path) -> dict[str, int]
+# 轻量化只读计数；scan_document_file 强制传 ocr_images=False（严禁上传阶段同步触发 OCR 阻塞接口）
+
+merge_privacy_stats(*stats_list: dict[str, int] | None) -> dict[str, int]
+sanitize_chat_messages(messages: list[Any]) -> tuple[list[Any], dict[str, int]]
+# 深拷贝 OpenAI messages 列表（仅脱敏 text/tool_calls 文本，完整保留 E24 image_url 多模态结构）
+```
+
 ---
 
 ## 2. 数据库 14 张表规格（backend/models.py）
@@ -428,6 +455,7 @@ import_skill_from_git_url(url_or_repo: str, *, allow_gitee_fallback: bool = True
 - E37 标书编制输出与无损修订交付：`backend/models.py` 新增第 13 表 `bid_compose_drafts`（`BidComposeDraft`）；新增第 13 组路由 `backend/routers/composer.py`（`POST /api/composer/generate`、`GET /api/composer/drafts`、`GET /api/composer/drafts/{id}`、`GET /api/composer/drafts/{id}/download`、`DELETE /api/composer/drafts/{id}`）；`backend/routers/reports.py` 新增 `POST /api/reports/{task_id}/clean-bid`（`.pdf` 诚实拒收 `422 PDF_CLEAN_EXPORT_UNSUPPORTED`）与 `GET /api/reports/{task_id}/clean-bid/download`；
 - E38 F8 写作 Skills、AI 动态编排与 E36 异步深层研判：`backend/models.py` 新增第 14 表 `composer_skills`（`ComposerSkill`）及 `ensure_similarity_reports_columns`/`ensure_bid_compose_drafts_columns` 老库幂等加列；`backend/worker.py` 新增 `BidTaskWorker.submit_background_job(job_key: str, fn, *, sync=False)` 支持字符串键（`'composer:{id}'`/`'similarity:{id}'`）异步队列与取消；`backend/main.py::recover_stale_tasks` 扩展重启复位 `BidComposeDraft` 与 `SimilarityReport`；`composer.py` 新增 `/skills` CRUD（`409 LAST_SKILL_PROTECTED`）、`/skills/preview-url`、`/skills/import-url`、`/skills/import-file` 与 `/drafts/{id}/cancel`（`/generate` 增 `skill_id`/`use_ai`/`async_run=False`）；`similarity.py` 移除 6 份上限仅校验 `>=2` 份并新增 `enable_ai_review`/`async_run=False`/`POST /{id}/cancel`；
 - E39 F8 初稿质量精修与资格逐项附页：`backend/routers/composer.py` 在 `export_composed_bid_docx` 完成台账原件扫描图嵌入后、持久化 `blueprint_json` 前清洗剔除 `cert_row.attachment_path` 物理路径（保留 `matched_cert_id`/`has_embedded_image`/`role_label`），确保宿主机路径永不外泄；
+- E40 合规底座双锁（网关三出口脱敏 + 内网模型锁 + 上传零 OCR 统计）：`backend/schemas.py` 新增 `PrivacyStatsOut` 并扩展 `BidTaskOut`/`ExtractChecklistOut`/`QaAttachmentOut` 可选 `privacy_stats`；`POST /api/checks`、`POST /api/extract` 与 `POST /api/qa/sessions/{id}/attachments` 返回 `privacy_stats` 且原盘文件保持逐字节不变；`backend/routers/model_config.py` 在 `STRICT_INNER_MODEL_ONLY=1` 时放行私网网段、`models.yaml` `envs.prod` 主机及 `INNER_MODEL_EXTRA_HOSTS` 白名单，拦截公网地址并返回 `HTTP 422 MODEL_HOST_FORBIDDEN`；`backend/worker.py::resolve_effective_llm_client` 在 strict 下忽略并告警存量公网 `UserModelConfig`、强制钉死 `prod` 内网网关；
 - 其余鉴权、多租户隔离、SSE 进度流、文件存储布局与统一错误格式约定保持不变。
 
 ---
@@ -466,3 +494,4 @@ import_skill_from_git_url(url_or_repo: str, *, allow_gitee_fallback: bool = True
 | 2026-11-17 | E37 标书编制输出与无损修订交付卡：新增 `core/bid_composer.py` 统一蓝图 IR（V1 零幻觉骨架/长期证照台账/Decimal限价占位锁/★▲偏离预置 + V2 可插拔 `KnowledgeSnippetProvider`/`LocalKnowledgeSnippetProvider` 与优雅回退）；`core/redline.py` 提取共享 `_locate_and_split_quote_runs` 并新增 `export_clean_revised_docx`（Run 级保留样式原位替换、彻底剥离 `w:comment*`/`comments*.xml`、漏应答诚实计入 `manual_pending_items`）；`backend/models.py` 新增第 13 表 `bid_compose_drafts`；新增 `backend/routers/composer.py`（`/api/composer`）及 `/api/reports/{task_id}/clean-bid`（`.pdf` 返回 `422 PDF_CLEAN_EXPORT_UNSUPPORTED`）；前端新增 `/composer`（`BidComposerView.vue`）及详情/交付快捷按钮 | 实现 + 验收 |
 | 2026-11-18 | E38 F8 写作 Skills 与 AI 动态编排及 E36 异步深层研判卡：新增 `core/composer_skills.py`（3 套内置 Skill、YAML/MD 与 JSON 解析钳位、SSRF 白名单、GitHub→Gitee 优雅降级导入与离线 `EXTERNAL_SKILL_UNREACHABLE`）；`core/bid_composer.py` 修复 `eval_rule`/评分细则 Part 4 串行污染、打通 LLM 动态构章（`_plan_chapters_with_llm` + 覆盖率兜底守卫）与并发分节撰稿（`_draft_chapter_with_llm` / `_draft_deviation_with_llm` + `_UNGROUNDED_MONEY_RE` 防金额/合同幻觉）及独立居中封面/原生 Heading/TOC 域动态排版（`append_checklist_at_end` 内外分离）；`core/bid_similarity.py` 解除 6 份上限并新增 `run_similarity_ai_review`（双侧 `verify_quote` 严审与禁洗稿合规锁）；`backend/models.py` 新增第 14 表 `composer_skills` 及 `ensure_*` 老库平滑加列；`backend/worker.py` 新增 `submit_background_job` 与 `recover_stale_tasks` 扩展；`composer.py`/`similarity.py` 全链路打通异步队列/中断取消；前端 `App.vue` `<keep-alive>` 纳入双视图、`BidComposerView.vue`（Skill 弹窗与分组抽屉）与 `SimilarityCheckView.vue`（不限份数与 AI 复核）同步收尾 | 实现 + 验收 |
 | 2026-11-18 | E39 F8 初稿质量精修与资格证明逐项附页增强卡：`core/bid_composer.py` 新增 `_draft_chapter_with_llm` 单章瞬时失败最多 2 次自动重试（`PipelineCancelled` 直通穿透）、`_strip_duplicate_leading_title` 剥离重复章标题首行、`_is_procedural_topic` / `_extract_pdf_scoring_items` 清除目录与投标须知/澄清/计分方法噪音并精准提取 PDF 评分细则、解除 L483/L486/L603/L645 四处截断（偏离表分批 ≤12 条全量覆写），以及第二部分同名证照按角色合并去重（`必交资格 / 加分参考`）与「2.0 总览索引表 + 2.1~2.N 逐项独立附页（自动居中嵌入 PNG/JPG 原件扫描图，PDF 示装订框，缺省示 A4 全幅粘贴框）」；`backend/routers/composer.py` 在持久化 `blueprint_json` 前剥离宿主机 `attachment_path`；`BidComposerView.vue` 第二部分增加角色级别与附页形态预览列 | 实现 + 验收 |
+| 2026-11-18 | E40 合规底座双锁卡：新增 `core/privacy_sanitizer.py`（18 位 GB 11643 身份证校验 + 语境银行卡/对公账号等长幂等掩码、`scan_document_file` 强制 `ocr_images=False`）；`core/llm_gateway.py` 于 `chat()`/`chat_stream()`/`embed()` 三个总出口统一挂载脱敏（保全 `image_url` 多模态结构、`PRIVACY_SANITIZE_ENABLED` 开关、`total_usage()` 记录 `privacy_id_masked`/`privacy_bank_masked`）并新增 `STRICT_INNER_MODEL_ONLY` + `INNER_MODEL_EXTRA_HOSTS` 内网防外泄锁定（放行私网/prod/白名单、禁 `demo` 回退、拒接公网 `UserModelConfig`）；`backend/routers/model_config.py` 新增公网拦截 `422 MODEL_HOST_FORBIDDEN`；`backend/worker.py::resolve_effective_llm_client` 忽略存量公网配置告警回退 `prod`；`backend/schemas.py`、`checks.py`、`extract.py`、`qa.py` 新增只读 `privacy_stats` 回显且原盘文件字节零改动；前端 `types.ts`、`CheckTaskList.vue`、`ExtractView.vue`、`QaChatView.vue` 同步提示已保护数量 | 实现 + 验收 |

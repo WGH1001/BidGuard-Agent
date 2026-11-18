@@ -11,15 +11,18 @@
     LLMClient.total_usage() -> dict   # 累计用量
 """
 import base64
+import ipaddress
 import os
 from pathlib import Path
 import re
 import threading
 import time
 from typing import Any, Iterator, Optional
+from urllib.parse import urlparse
 import yaml
 
 from core.interfaces import LLMResponse
+from core.privacy_sanitizer import sanitize_chat_messages, sanitize_text
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config' / 'models.yaml'
 
@@ -158,17 +161,83 @@ def encode_image_for_vlm(
         }
 
 
+def is_privacy_sanitize_enabled() -> bool:
+    """E40：是否开启大模型网关统一脱敏（PRIVACY_SANITIZE_ENABLED 默认开启 '1'）。"""
+    return os.environ.get('PRIVACY_SANITIZE_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+
+
+def is_strict_inner_model_only() -> bool:
+    """E40：是否开启严格内网模型防外泄锁（STRICT_INNER_MODEL_ONLY 默认关闭 '0'）。"""
+    return os.environ.get('STRICT_INNER_MODEL_ONLY', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _get_prod_gateway_hosts() -> set[str]:
+    hosts: set[str] = set()
+    try:
+        with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+            cfg = yaml.safe_load(f) or {}
+        prod_url = str(((cfg.get('envs') or {}).get('prod') or {}).get('base_url') or '').strip()
+        if prod_url:
+            h = (urlparse(prod_url).hostname or '').strip().lower()
+            if h:
+                hosts.add(h)
+    except Exception:
+        pass
+    return hosts
+
+
+def is_inner_model_url_allowed(raw_url: str) -> bool:
+    """判定 base_url 是否属于合法的内网网关地址（RFC1918 私网 IP / prod 网关主机 / INNER_MODEL_EXTRA_HOSTS）。"""
+    cleaned = (raw_url or '').strip()
+    if not cleaned:
+        return False
+    parsed = urlparse(cleaned)
+    if (parsed.scheme or '').lower() not in ('http', 'https') or not parsed.hostname:
+        return False
+    host = parsed.hostname.lower()
+    if host in ('localhost', '0.0.0.0', '::1') or host.startswith('127.') or host.startswith('169.254.'):
+        return False
+
+    try:
+        ip_obj = ipaddress.ip_address(host)
+        return bool(ip_obj.is_private and not ip_obj.is_loopback and not ip_obj.is_link_local and not ip_obj.is_unspecified)
+    except ValueError:
+        pass
+
+    allowed_hosts = _get_prod_gateway_hosts()
+    extra_raw = os.environ.get('INNER_MODEL_EXTRA_HOSTS', '')
+    for token in extra_raw.split(','):
+        tok = token.strip().lower()
+        if tok:
+            allowed_hosts.add(tok)
+
+    for entry in allowed_hosts:
+        if entry.startswith('.'):
+            if host.endswith(entry) or host == entry.lstrip('.'):
+                return True
+        elif host == entry:
+            return True
+    return False
+
+
 def get_llm_client(env=None) -> 'LLMClient':
-    """按环境名构造客户端；env=None 时取 default_env。"""
+    """按环境名构造客户端；env=None 时取 default_env（E40 strict 模式强制钉 prod 禁云端回退）。"""
     with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
+    strict_inner = is_strict_inner_model_only()
     if env is None:
-        env = config.get('default_env')
+        env = 'prod' if strict_inner else config.get('default_env')
 
     env_config = config.get('envs', {}).get(env)
     if not env_config:
         raise ValueError(f"环境中未找到配置: {env}")
+
+    if strict_inner:
+        provider = str(env_config.get('provider') or '').strip().lower()
+        base_u = str(env_config.get('base_url') or '').strip()
+        if env == 'demo' or provider == 'cloud' or not is_inner_model_url_allowed(base_u):
+            raise RuntimeError('已开启 STRICT_INNER_MODEL_ONLY，严禁连接或回退至外网/云端大模型环境')
 
     api_key_env = env_config.get('api_key_env')
     api_key = os.environ.get(api_key_env)
@@ -202,6 +271,8 @@ def build_client_from_user_config(
     """
     if not base_url or not str(base_url).strip():
         raise ValueError("base_url 不能为空")
+    if is_strict_inner_model_only() and not is_inner_model_url_allowed(str(base_url)):
+        raise ValueError("已锁定公司 inner 模型，禁止连接外网自定义模型地址")
     if not api_key or not str(api_key).strip():
         raise ValueError("api_key 不能为空")
     if not model_flash or not str(model_flash).strip():
@@ -402,7 +473,9 @@ class LLMClient:
             'prompt_tokens': 0,
             'completion_tokens': 0,
             'cost': 0.0,
-            'calls': 0
+            'calls': 0,
+            'privacy_id_masked': 0,
+            'privacy_bank_masked': 0,
         }
 
         try:
@@ -502,6 +575,23 @@ class LLMClient:
 
         return cost
 
+    def _record_privacy_stats(self, stats: dict[str, int]) -> None:
+        """E40：线程安全记录网关出口脱敏屏蔽数量（不写日志明细、不打印号码）。"""
+        id_cnt = int((stats or {}).get('id_masked') or 0)
+        bank_cnt = int((stats or {}).get('bank_masked') or 0)
+        if id_cnt <= 0 and bank_cnt <= 0:
+            return
+        with self._lock:
+            self._usage['privacy_id_masked'] = int(self._usage.get('privacy_id_masked') or 0) + id_cnt
+            self._usage['privacy_bank_masked'] = int(self._usage.get('privacy_bank_masked') or 0) + bank_cnt
+
+    def _apply_outgoing_privacy(self, messages: list) -> list:
+        if not is_privacy_sanitize_enabled():
+            return messages
+        cleaned, stats = sanitize_chat_messages(messages)
+        self._record_privacy_stats(stats)
+        return cleaned
+
     def chat(self, messages: list, model_tier: str = 'flagship', max_tokens: Optional[int] = None,
              reasoning_effort: Optional[str] = None) -> LLMResponse:
         """调用模型并返回 LLMResponse（含 token 与成本计量）。
@@ -520,6 +610,7 @@ class LLMClient:
         active_messages = list(messages or [])
         if _messages_have_image_blocks(active_messages) and not getattr(self, 'supports_vision', False):
             active_messages = _strip_image_blocks(active_messages)
+        active_messages = self._apply_outgoing_privacy(active_messages)
 
         extra_body = self._build_extra_body()
         if reasoning_effort and getattr(self, 'supports_reasoning_effort', True):
@@ -612,6 +703,7 @@ class LLMClient:
         active_messages = list(messages or [])
         if _messages_have_image_blocks(active_messages) and not getattr(self, 'supports_vision', False):
             active_messages = _strip_image_blocks(active_messages)
+        active_messages = self._apply_outgoing_privacy(active_messages)
 
         extra_body = self._build_extra_body()
         if reasoning_effort and getattr(self, 'supports_reasoning_effort', True):
@@ -730,6 +822,18 @@ class LLMClient:
             texts_list = [str(t) for t in (texts or [])]
         if not texts_list:
             return []
+
+        if is_privacy_sanitize_enabled():
+            sanitized_texts: list[str] = []
+            emb_id_cnt = 0
+            emb_bank_cnt = 0
+            for item_t in texts_list:
+                cleaned_t, st = sanitize_text(item_t)
+                sanitized_texts.append(cleaned_t)
+                emb_id_cnt += int(st.get('id_masked') or 0)
+                emb_bank_cnt += int(st.get('bank_masked') or 0)
+            self._record_privacy_stats({'id_masked': emb_id_cnt, 'bank_masked': emb_bank_cnt})
+            texts_list = sanitized_texts
 
         if self.use_openai:
             resp = self.client.embeddings.create(model=model_name, input=texts_list)

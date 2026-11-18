@@ -265,6 +265,8 @@ async function handleRunExtract(): Promise<void> {
   queueDone.value = 0
   extractStopRequested = false
   let successCount = 0
+  let totalIdMasked = 0
+  let totalBankMasked = 0
 
   try {
     while (pendingFiles.value.length > 0 && !extractStopRequested) {
@@ -278,6 +280,8 @@ async function handleRunExtract(): Promise<void> {
         saveToSessionStorage(extracted)
         pushToHistory(extracted)
         successCount += 1
+        totalIdMasked += Number(extracted.privacy_stats?.id_masked || 0)
+        totalBankMasked += Number(extracted.privacy_stats?.bank_masked || 0)
       } catch {
         if (extractStopRequested) {
           break
@@ -290,10 +294,14 @@ async function handleRunExtract(): Promise<void> {
       }
     }
     if (successCount > 0 && !extractStopRequested) {
+      const privacyHint =
+        totalIdMasked > 0 || totalBankMasked > 0
+          ? `（已识别并保护 ${totalIdMasked} 处身份证号、${totalBankMasked} 处银行账号）`
+          : ''
       ElMessage.success(
-        successCount === 1
+        (successCount === 1
           ? `成功提取「${result.value?.filename}」四张必审红线清单`
-          : `批量提取完成：成功提取 ${successCount} 份招标文件`,
+          : `批量提取完成：成功提取 ${successCount} 份招标文件`) + privacyHint,
       )
     }
   } finally {

@@ -40,7 +40,12 @@ from backend.models import (
 )
 from backend.utils.crypto import decrypt_api_key
 from core.deviation_exporter import export_deviation_table
-from core.llm_gateway import build_client_from_user_config, get_llm_client
+from core.llm_gateway import (
+    build_client_from_user_config,
+    get_llm_client,
+    is_inner_model_url_allowed,
+    is_strict_inner_model_only,
+)
 from core.parser import parse_document
 from core.price_extractor import run_price_check
 from core.qualification_scanner import (
@@ -295,26 +300,43 @@ def resolve_effective_llm_client(session: Session, user_id: Optional[int] = None
     if os.environ.get('BIDGUARD_FORCE_ZERO_TOKEN', '').strip() == '1':
         return None, 'skipped'
 
+    strict_inner = is_strict_inner_model_only()
+
     if user_id is not None:
         try:
             ensure_user_model_configs_columns(session.get_bind())
             cfg = session.query(UserModelConfig).filter_by(user_id=int(user_id)).first()
             if cfg is not None and cfg.base_url and cfg.api_key_encrypted and cfg.model_flash:
-                plain_key = decrypt_api_key(cfg.api_key_encrypted)
-                client = build_client_from_user_config(
-                    base_url=cfg.base_url,
-                    api_key=plain_key,
-                    model_flash=cfg.model_flash,
-                    model_flagship=cfg.model_flagship or cfg.model_flash,
-                    supports_reasoning_effort=bool(cfg.supports_reasoning_effort),
-                    supports_vision=bool(getattr(cfg, 'supports_vision', False)),
-                )
-                return client, 'done'
+                if strict_inner and not is_inner_model_url_allowed(cfg.base_url):
+                    logging.getLogger(__name__).warning(
+                        '已开启 STRICT_INNER_MODEL_ONLY，忽略用户 %s 的存量外网自定义模型配置并回退内网网关',
+                        user_id,
+                    )
+                else:
+                    plain_key = decrypt_api_key(cfg.api_key_encrypted)
+                    client = build_client_from_user_config(
+                        base_url=cfg.base_url,
+                        api_key=plain_key,
+                        model_flash=cfg.model_flash,
+                        model_flagship=cfg.model_flagship or cfg.model_flash,
+                        supports_reasoning_effort=bool(cfg.supports_reasoning_effort),
+                        supports_vision=bool(getattr(cfg, 'supports_vision', False)),
+                    )
+                    return client, 'done'
         except Exception:
             pass
 
     zhipu_key = os.environ.get('ZHIPU_API_KEY', '').strip()
     priv_key = os.environ.get('PRIVATE_API_KEY', '').strip()
+    if strict_inner:
+        if priv_key:
+            try:
+                client = get_llm_client('prod')
+                return client, 'done'
+            except Exception:
+                pass
+        return None, 'skipped'
+
     has_valid_env_key = (
         (zhipu_key and zhipu_key != 'your_api_key_here')
         or bool(priv_key)

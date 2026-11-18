@@ -20,6 +20,7 @@ from backend.database import PROJECT_ROOT, get_db
 from backend.models import BidCheckTask, BidFinding, QaSession, ensure_qa_sessions_columns
 from backend.schemas import (
     OkResponse,
+    PrivacyStatsOut,
     QaAskRequest,
     QaAskResponseOut,
     QaAttachmentOut,
@@ -32,6 +33,7 @@ from backend.schemas import (
 from backend.worker import resolve_effective_llm_client, resolve_project_path
 from core.bid_react_agent import ask_bid_expert, ask_bid_expert_stream
 from core.parser import parse_qa_attachment
+from core.privacy_sanitizer import scan_document_text
 
 router = APIRouter(prefix='/api/qa', tags=['qa'])
 
@@ -98,6 +100,15 @@ def _is_default_session_title(title: Optional[str]) -> bool:
 
 
 def _att_dict_to_out(a: dict[str, Any]) -> QaAttachmentOut:
+    raw_ps = a.get('privacy_stats')
+    p_stats_out = (
+        PrivacyStatsOut(
+            id_masked=int(raw_ps.get('id_masked') or 0),
+            bank_masked=int(raw_ps.get('bank_masked') or 0),
+        )
+        if isinstance(raw_ps, dict)
+        else None
+    )
     return QaAttachmentOut(
         attachment_id=str(a.get('attachment_id') or ''),
         filename=str(a.get('filename') or ''),
@@ -106,6 +117,7 @@ def _att_dict_to_out(a: dict[str, Any]) -> QaAttachmentOut:
         is_image=bool(a.get('is_image', False)),
         ocr_chars=int(a.get('ocr_chars') or 0),
         has_text=bool(a.get('has_text', False)),
+        privacy_stats=p_stats_out,
         uploaded_at=a.get('uploaded_at'),
     )
 
@@ -489,6 +501,7 @@ def upload_qa_attachment(
             detail={'code': 'ATTACHMENT_PARSE_FAILED', 'message': f"附件解析失败：{exc}"},
         ) from exc
 
+    p_stats = scan_document_text(str(parsed.get('text') or ''))
     rel_path = target_file.relative_to(PROJECT_ROOT.resolve()).as_posix()
     att_record = {
         'attachment_id': att_id,
@@ -498,6 +511,7 @@ def upload_qa_attachment(
         'is_image': bool(parsed['is_image']),
         'ocr_chars': int(parsed['ocr_chars']),
         'has_text': bool(parsed['has_text']),
+        'privacy_stats': p_stats,
         'rel_path': rel_path,
         'uploaded_at': _utc_now().isoformat(),
     }

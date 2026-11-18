@@ -16,9 +16,10 @@ from sqlalchemy.orm import Session
 from backend.auth import AuthUser, get_current_user, record_audit
 from backend.database import get_db
 from backend.models import CompanyCertificate
-from backend.schemas import ExtractChecklistOut
+from backend.schemas import ExtractChecklistOut, PrivacyStatsOut
 from backend.worker import resolve_effective_llm_client
 from core.parser import parse_document
+from core.privacy_sanitizer import scan_document_file
 from core.qualification_scanner import match_required_certificates_with_ledger
 from core.response_checker import build_unified_page_context
 from core.tender_extractor import build_review_checklist, extract_required_certificates
@@ -58,6 +59,7 @@ def extract_tender_checklists(
     tmp_path.write_bytes(content)
 
     try:
+        p_stats = scan_document_file(tmp_path)
         client, llm_status = resolve_effective_llm_client(db, current_user.get('id'))
         if client is not None:
             try:
@@ -157,6 +159,7 @@ def extract_tender_checklists(
             llm_structured=llm_structured,
             required_certificates=matched_certs,
             cert_ledger_summary=cert_summary,
+            privacy_stats=PrivacyStatsOut(**p_stats),
         )
     finally:
         tmp_path.unlink(missing_ok=True)

@@ -166,6 +166,13 @@ class BidFindingOut(BaseModel):
     created_at: Optional[str] = None
 
 
+class PrivacyStatsOut(BaseModel):
+    """E40：上传与脱敏只读统计（不展示明文敏感编号）。"""
+
+    id_masked: int = 0
+    bank_masked: int = 0
+
+
 class BidTaskOut(BaseModel):
     id: int
     tenant_id: int
@@ -184,6 +191,7 @@ class BidTaskOut(BaseModel):
     price_manual_json: Optional[dict[str, Any]] = None
     config_json: Optional[dict[str, Any]] = None
     llm_usage_json: Optional[dict[str, Any]] = None
+    privacy_stats: Optional[PrivacyStatsOut] = None
     delivered_at: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -301,6 +309,7 @@ class ExtractChecklistOut(BaseModel):
     llm_structured: list[dict[str, Any]] = Field(default_factory=list)
     required_certificates: list[RequiredCertItemOut] = Field(default_factory=list)
     cert_ledger_summary: Optional[CertLedgerSummaryOut] = None
+    privacy_stats: Optional[PrivacyStatsOut] = None
 
 
 # ── 5. /api/deviation 契约 ───────────────────────────────────────────────
@@ -363,6 +372,7 @@ class QaAttachmentOut(BaseModel):
     is_image: bool = False
     ocr_chars: int = 0
     has_text: bool = False
+    privacy_stats: Optional[PrivacyStatsOut] = None
     uploaded_at: Optional[str] = None
 
 

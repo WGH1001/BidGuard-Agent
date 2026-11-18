@@ -28,10 +28,12 @@ from backend.schemas import (
     OkResponse,
     PriceManualBackfillOut,
     PriceManualBackfillRequest,
+    PrivacyStatsOut,
     RunTaskTriggerOut,
 )
 from backend.worker import _cleanup_task_deviation_artifacts, _utc_now, get_worker
 from core.price_sandbox import PriceSandbox
+from core.privacy_sanitizer import merge_privacy_stats, scan_document_file
 
 router = APIRouter(prefix='/api/checks', tags=['checks'])
 
@@ -137,6 +139,15 @@ def _save_validated_upload(upload: UploadFile, tenant_id: int, task_id: int, rol
 
 
 def _task_to_out(t: BidCheckTask) -> BidTaskOut:
+    raw_ps = (t.config_json or {}).get('privacy_stats') if isinstance(t.config_json, dict) else None
+    p_stats_out = (
+        PrivacyStatsOut(
+            id_masked=int(raw_ps.get('id_masked') or 0),
+            bank_masked=int(raw_ps.get('bank_masked') or 0),
+        )
+        if isinstance(raw_ps, dict)
+        else None
+    )
     return BidTaskOut(
         id=t.id,
         tenant_id=t.tenant_id,
@@ -155,6 +166,7 @@ def _task_to_out(t: BidCheckTask) -> BidTaskOut:
         price_manual_json=t.price_manual_json,
         config_json=t.config_json,
         llm_usage_json=t.llm_usage_json,
+        privacy_stats=p_stats_out,
         started_at=t.started_at.isoformat() if getattr(t, 'started_at', None) else None,
         finished_at=t.finished_at.isoformat() if getattr(t, 'finished_at', None) else None,
         duration=_parse_duration_json(getattr(t, 'duration_json', None)),
@@ -243,6 +255,12 @@ def create_check_task(
     task.bid_filename = b_orig
     task.tender_path = t_rel
     task.bid_path = b_rel
+
+    # E40：上传受理零 OCR 快速只读扫描身份证/银行账号数量（原文件逐字节不动）
+    t_pstat = scan_document_file(PROJECT_ROOT / t_rel)
+    b_pstat = scan_document_file(PROJECT_ROOT / b_rel)
+    merged_ps = merge_privacy_stats(t_pstat, b_pstat)
+    task.config_json = {**cfg_snap, 'privacy_stats': merged_ps}
     db.commit()
     db.refresh(task)
 

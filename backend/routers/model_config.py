@@ -20,7 +20,11 @@ from backend.schemas import (
     OkResponse,
 )
 from backend.utils.crypto import decrypt_api_key, encrypt_api_key, mask_api_key_last4
-from core.llm_gateway import build_client_from_user_config
+from core.llm_gateway import (
+    build_client_from_user_config,
+    is_inner_model_url_allowed,
+    is_strict_inner_model_only,
+)
 
 router = APIRouter(prefix='/api/model-config', tags=['model-config'])
 
@@ -53,7 +57,16 @@ def _validate_base_url(raw_url: str) -> str:
             )
     except ValueError:
         pass
-    return cleaned.rstrip('/')
+    normalized_url = cleaned.rstrip('/')
+    if is_strict_inner_model_only() and not is_inner_model_url_allowed(normalized_url):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                'code': 'MODEL_HOST_FORBIDDEN',
+                'message': '已锁定公司 inner 模型，仅允许内网网关（private IP 或允许的内网域名）',
+            },
+        )
+    return normalized_url
 
 
 def _row_to_out(row: Optional[UserModelConfig]) -> ModelConfigOut:
