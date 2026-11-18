@@ -85,7 +85,7 @@ event: error      data: {"task_id":1,"status":"failed","error_msg":"..."}
 5. `RadarView`：/api/radar 上传 → 疑似参数卡片流 + 结论横幅（"疑似"标注）+ 单条重扫与开标日期显化；
 6. `QaChatView`：/api/qa 全组——会话侧栏（KeepAlive 切页防丢）+ 多文件/图片附件上传 + 消息流（ReAct 思考轨迹 SSE 流式直播 + 7 工具折叠面板 + quotes 溯源卡 + 0-Token 动态快捷追问）；
 7. `SimilarityCheckView`（`/similarity`，E36/E38）：/api/similarity——`>=2` 份无限数量标书对比+可选招标书剥离公共条款+可选 AI 语义深层复核与误报排查、后台队列进度条与中断（`<keep-alive>` 切页不中断）、矩阵热力与脱敏证据，中性「多标书交叉比对」界面（禁洗稿）；
-8. `BidComposerView`（`/composer`，E37/E38）：/api/composer + `/api/reports/{id}/clean-bid`——Tab 1 正向初稿（Skill 写作规范选择与 GitHub/Gitee/本地上传管理弹窗 + AI 动态规划与撰稿开关 + 后台队列进度/中断 + `<keep-alive>` + 紧凑分组待填抽屉）与 Tab 2 采纳整改导 Clean 定稿工作台；
+8. `BidComposerView`（`/composer`，E37/E38/E39）：/api/composer + `/api/reports/{id}/clean-bid`——Tab 1 正向初稿（Skill 写作规范选择与 GitHub/Gitee/本地上传管理弹窗 + AI 动态规划与撰稿开关 + 后台队列进度/中断 + `<keep-alive>` + 紧凑分组待填抽屉 + 资格证照角色合并与逐项独立附页形态预览）与 Tab 2 采纳整改导 Clean 定稿工作台；
 9. `RulesAndCertsView`：规则配置 + 企业证照台账（支持 PDF/图片扫件 OCR 预填与原件留档、长期有效开关）+ 法规库（法条三态核验与单条条文删除维护）；
 10. `ReportsAndAuditView`：交付中心（按任务列 redline/clean-bid/deliver.zip/signoff 下载 + 批量打包）+ 安全操作审计日志表（admin，支持 UTF-8 BOM CSV 导出）；
 11. 管理与辅助：`UsersManageView`（`/users`，admin 部门重命名与账号管理）/ `LoginView` / `ChangePasswordView` / `ModelSettingsView`（/api/model-config + test 连通性测试 + 思考参数防御与多模态视觉开关）。

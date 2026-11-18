@@ -85,6 +85,19 @@ _UNGROUNDED_MONEY_RE = re.compile(
 _UNGROUNDED_CONTRACT_RE = re.compile(
     r'(?:合同编号|证书编号|业绩编号)\s*[：:]\s*([A-Za-z0-9\-_/]{4,40})'
 )
+_TOC_DOT_LEADER_RE = re.compile(r'\.{4,}|…{2,}')
+_PROCEDURAL_TOPIC_RE = re.compile(
+    r'(?:'
+    r'认真阅读招标文件|招标文件的澄清|招标文件的修改|潜在投标人|购买招标文件|'
+    r'获取招标文件|投标文件编制的原则|投标截止期|采购代理机构|'
+    r'评标委员会根据评分标准|得分合计后取平均值|计分方法|排名第一的中标候选人|'
+    r'综合评分法|评审结果按评审|不接受联合体|特定资格要求|'
+    r'政府采购法.{0,12}第二十二条|信用中国|失信被执行人|重大税收违法|'
+    r'密封和标记|开标时间|开标地点|答疑会|踏勘现场|保证金退还|中标通知书'
+    r')'
+)
+_PDF_SCORE_LINE_RE = re.compile(r'^(?:\d+(?:\.\d+)?\s*[-~—至]\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?)\s*分$')
+_CERT_IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
 
 
 @dataclass
@@ -270,6 +283,89 @@ def _obj_field(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default)
 
 
+def _merge_required_certificates_by_role(required_certs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按规范证书名称合并重复证照条目，保留全部角色（如 `必交资格 / 加分参考`）。"""
+    merged: list[dict[str, Any]] = []
+    by_key: dict[str, dict[str, Any]] = {}
+    for item in required_certs or []:
+        c_name = re.sub(r'\s+', ' ', str(item.get('cert_name') or '').strip())
+        if not c_name:
+            continue
+        norm_k = normalize_zh(c_name)
+        role = str(item.get('requirement_level') or 'bonus').strip()
+        if role not in ('mandatory', 'bonus'):
+            role = 'bonus'
+        if norm_k not in by_key:
+            entry = dict(item)
+            entry['cert_name'] = c_name
+            entry['requirement_level'] = role
+            entry['requirement_roles'] = [role]
+            by_key[norm_k] = entry
+            merged.append(entry)
+        else:
+            existing = by_key[norm_k]
+            roles = list(existing.get('requirement_roles') or [])
+            if role not in roles:
+                roles.append(role)
+            roles.sort(key=lambda r: 0 if r == 'mandatory' else 1)
+            existing['requirement_roles'] = roles
+            if 'mandatory' in roles:
+                existing['requirement_level'] = 'mandatory'
+            q_new = str(item.get('quote') or '').strip()
+            q_old = str(existing.get('quote') or '').strip()
+            if q_new and q_new not in q_old:
+                existing['quote'] = f"{q_old}；{q_new}".strip('；') if q_old else q_new
+    return merged
+
+
+def _format_cert_roles_label(roles: Optional[list[str]], level: str) -> str:
+    role_set = set(roles or ())
+    if 'mandatory' in role_set and 'bonus' in role_set:
+        return '必交资格 / 加分参考'
+    if level == 'mandatory' or 'mandatory' in role_set:
+        return '必交资格项'
+    if level == 'ledger_reference':
+        return '台账备查项'
+    return '加分/参考项'
+
+
+def _lookup_cert_attachment_path(best_cert: dict[str, Any], ledger_certs: Optional[list[Any]]) -> Optional[str]:
+    if not best_cert or not ledger_certs:
+        return None
+    target_id = best_cert.get('id')
+    target_name = normalize_zh(str(best_cert.get('cert_name') or ''))
+    for raw_c in ledger_certs:
+        cid = _obj_field(raw_c, 'id')
+        att_p = _obj_field(raw_c, 'attachment_path')
+        if not att_p:
+            continue
+        if target_id and cid and int(cid) == int(target_id):
+            return str(att_p)
+        if target_name and normalize_zh(str(_obj_field(raw_c, 'cert_name') or '')) == target_name:
+            return str(att_p)
+    return None
+
+
+def _resolve_embeddable_image_path(att_path: Optional[str]) -> Optional[Path]:
+    raw = str(att_path or '').strip()
+    if not raw:
+        return None
+    p = Path(raw)
+    if '..' in p.parts:
+        return None
+    if p.suffix.lower() not in _CERT_IMAGE_EXTS:
+        return None
+    project_root = Path(__file__).resolve().parents[1]
+    if p.is_absolute():
+        resolved = p.resolve()
+        return resolved if resolved.is_file() else None
+    uploads_root = (project_root / 'data' / 'uploads').resolve()
+    resolved = (project_root / p).resolve()
+    if resolved.is_relative_to(uploads_root) and resolved.is_file():
+        return resolved
+    return None
+
+
 def _format_decimal_yuan(raw_val: Any) -> Optional[str]:
     """用 Decimal（ROUND_HALF_UP）格式化金额字符串，禁用 float。"""
     if raw_val is None or isinstance(raw_val, bool):
@@ -329,8 +425,70 @@ def _match_f4_finding(
     return None
 
 
+def _is_procedural_topic(text: str) -> bool:
+    """判定条文是否属于投标人须知/目录存根/评标计分规则等非方案编写主题。"""
+    s = re.sub(r'\s+', ' ', (text or '')).strip()
+    if not s:
+        return True
+    if _TOC_DOT_LEADER_RE.search(s):
+        return True
+    if _PROCEDURAL_TOPIC_RE.search(s):
+        return True
+    if not re.search(r'(?:\d+\s*分|评分标准|技术要求|实施方案|售后|培训|验收|交付|质保)', s):
+        if classify_invalid_clause_role(s, '') in ('submission_rule', 'eval_rule'):
+            return True
+    return False
+
+
+def _extract_pdf_scoring_items(excerpts: list[str]) -> list[tuple[str, str, str]]:
+    """从 PDF `评分细则` 文本块中抽取具体评分因素与分值（如 `实施方案 0-9 分`）。"""
+    extracted: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for ex in excerpts:
+        if _TOC_DOT_LEADER_RE.search(ex) and '评分细则' not in ex:
+            continue
+        lines = [ln.strip() for ln in ex.splitlines() if ln.strip()]
+        for idx, ln in enumerate(lines):
+            m_sc = _PDF_SCORE_LINE_RE.match(ln)
+            if not m_sc:
+                continue
+            score_str = ln
+            # 向上回溯 1~4 行拼合被 PDF 断行的评分因素标题
+            title_parts: list[str] = []
+            for back in range(idx - 1, max(-1, idx - 5), -1):
+                cand = lines[back]
+                if (
+                    cand.isdigit()
+                    or _PDF_SCORE_LINE_RE.match(cand)
+                    or len(cand) > 20
+                    or any(w in cand for w in ('序号', '评分因素', '评价指标', '分值', '评分细则', '。', '；', '：'))
+                ):
+                    break
+                title_parts.insert(0, cand)
+            factor_title = ''.join(title_parts).strip()
+            if len(factor_title) < 2 or factor_title in ('合计', '总分', '小计'):
+                continue
+            if '价格' in factor_title:
+                continue
+            # 向下采集最多 6 行作为评分细节摘要
+            desc_parts: list[str] = []
+            for fwd in range(idx + 1, min(len(lines), idx + 7)):
+                nxt = lines[fwd]
+                if _PDF_SCORE_LINE_RE.match(nxt) or nxt.isdigit():
+                    break
+                desc_parts.append(nxt)
+            desc = ' '.join(desc_parts).strip()
+            if _is_procedural_topic(factor_title) or _is_procedural_topic(desc[:80]):
+                continue
+            k = normalize_zh(factor_title)
+            if k and k not in seen:
+                seen.add(k)
+                extracted.append((factor_title, desc or factor_title, score_str))
+    return extracted
+
+
 def _collect_scoring_topics(checklist: dict[str, Any], text: str) -> list[dict[str, Any]]:
-    """优先按评分细则提取方案主题，缺省时汇总第四章采购需求或评分段落。"""
+    """优先按评分细则提取方案主题（过滤目录与投标须知程序条文），并融合第四章全量采购需求。"""
     topics: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
 
@@ -359,23 +517,45 @@ def _collect_scoring_topics(checklist: dict[str, Any], text: str) -> list[dict[s
         factor = str(st.get('factor') or '').strip()
         detail = str(st.get('detail') or '').strip()
         score = str(st.get('score') or '').strip()
+        if _is_procedural_topic(factor):
+            continue
         _add_topic(factor, detail, score, 'scoring_table')
 
     if len(topics) < 2:
-        for sh in checklist.get('scoring_hits') or []:
-            excerpt = str(sh.get('excerpt') or '')
-            for m in _EVAL_SUBITEM_RE.finditer(excerpt):
-                line = m.group(1).strip()
-                if len(line) < 8:
+        raw_hits = [str(sh.get('excerpt') or '') for sh in (checklist.get('scoring_hits') or []) if sh.get('excerpt')]
+        # 优先处理明确含 `评分细则` / `评分因素` / 具体分值的正文窗，跳过前文目录引导页
+        prioritized_hits = sorted(
+            raw_hits,
+            key=lambda ex: (
+                0 if _TOC_DOT_LEADER_RE.search(ex[:180]) else 1,
+                1 if ('评分细则' in ex or '评价指标' in ex or '评分因素' in ex) else 0,
+                len(re.findall(r'\d+\s*分', ex)),
+            ),
+            reverse=True,
+        )
+        for f_title, f_desc, f_score in _extract_pdf_scoring_items(prioritized_hits):
+            _add_topic(f_title, f_desc, f_score, 'scoring_pdf_block')
+            if len(topics) >= 14:
+                break
+
+        if len(topics) < 4:
+            for excerpt in prioritized_hits:
+                if _TOC_DOT_LEADER_RE.search(excerpt[:180]) and '评分细则' not in excerpt:
                     continue
-                score_m = re.search(r'([（(]\s*\d+(?:\.\d+)?\s*分\s*[）)])', line)
-                _add_topic(
-                    line[:40],
-                    line,
-                    score_m.group(1) if score_m else '评分要点',
-                    'scoring_prose',
-                )
-                if len(topics) >= 10:
+                for m in _EVAL_SUBITEM_RE.finditer(excerpt):
+                    line = m.group(1).strip()
+                    if len(line) < 8 or _is_procedural_topic(line):
+                        continue
+                    score_m = re.search(r'([（(]\s*\d+(?:\.\d+)?\s*分\s*[）)])', line)
+                    _add_topic(
+                        line[:40],
+                        line,
+                        score_m.group(1) if score_m else '评分要点',
+                        'scoring_prose',
+                    )
+                    if len(topics) >= 14:
+                        break
+                if len(topics) >= 14:
                     break
 
     for ch4 in extract_chapter4_procurement_requirements(text):
@@ -383,7 +563,7 @@ def _collect_scoring_topics(checklist: dict[str, Any], text: str) -> list[dict[s
         ctxt = str(ch4.get('text') or '').strip()
         first_line = ctxt.split('\n', 1)[0].strip()
         _add_topic(cno or first_line[:30], ctxt, '采购实质性需求', 'chapter4_procurement')
-        if len(topics) >= 16:
+        if len(topics) >= 36:
             break
 
     if not topics:
@@ -480,14 +660,14 @@ def _plan_chapters_with_llm(
     if client is None or not topics:
         return None
 
-    ch_titles = [str(c.get('title') or '').strip() for c in (chapters_meta or []) if c.get('title')][:12]
+    ch_titles = [str(c.get('title') or '').strip() for c in (chapters_meta or []) if c.get('title')][:30]
     topic_lines = [
-        f"- [{t['topic_id']}] {t['title']}（{t['score_points']}）：{str(t.get('tender_quote') or '')[:100]}"
-        for t in topics[:18]
+        f"- [{t['topic_id']}] {t['title']}（{t['score_points']}）：{str(t.get('tender_quote') or '')[:90]}"
+        for t in topics[:40]
     ]
     req_lines = [
         f"- {r.get('mark', '')}{r.get('clause_no', '')}：{str(r.get('text') or '')[:80]}"
-        for r in deviation_reqs[:15]
+        for r in deviation_reqs[:30]
     ]
 
     prompt = (
@@ -501,44 +681,80 @@ def _plan_chapters_with_llm(
         "请严格返回纯 JSON 对象：\n"
         '{"chapters": [{"chapter_no": "第一章", "title": "章节标题", "chapter_kind": "technical|implementation|service|security", "focus_topic_ids": ["topic_1"], "writing_brief": "本章撰写侧重点", "recommended_table": "可选建议表格名或空字符串"}]}'
     )
-    try:
-        resp = client.chat([{'role': 'user', 'content': prompt}], model_tier='flash')
-        parsed = _parse_json_tolerant(str(getattr(resp, 'content', '') or ''))
-        raw_chs = parsed.get('chapters') if isinstance(parsed, dict) else parsed
-        if not isinstance(raw_chs, list) or not raw_chs:
-            return None
-
-        valid_tids = {t['topic_id'] for t in topics}
-        covered_tids: set[str] = set()
-        planned: list[dict[str, Any]] = []
-        for idx, ch in enumerate(raw_chs[:8], start=1):
-            if not isinstance(ch, dict):
+    valid_tids = {t['topic_id'] for t in topics}
+    for _attempt in range(2):
+        try:
+            resp = client.chat([{'role': 'user', 'content': prompt}], model_tier='flash')
+            parsed = _parse_json_tolerant(str(getattr(resp, 'content', '') or ''))
+            raw_chs = parsed.get('chapters') if isinstance(parsed, dict) else parsed
+            if not isinstance(raw_chs, list) or not raw_chs:
                 continue
-            title = str(ch.get('title') or '').strip()
-            if not title:
+
+            covered_tids: set[str] = set()
+            planned: list[dict[str, Any]] = []
+            for idx, ch in enumerate(raw_chs[:8], start=1):
+                if not isinstance(ch, dict):
+                    continue
+                title = str(ch.get('title') or '').strip()
+                if not title:
+                    continue
+                f_ids = [str(x) for x in (ch.get('focus_topic_ids') or []) if str(x) in valid_tids]
+                covered_tids.update(f_ids)
+                planned.append({
+                    'chapter_id': f"dyn_ch_{idx}",
+                    'chapter_no': str(ch.get('chapter_no') or f"第{idx}部分").strip(),
+                    'title': title[:80],
+                    'chapter_kind': str(ch.get('chapter_kind') or 'technical'),
+                    'focus_topic_ids': f_ids,
+                    'writing_brief': str(ch.get('writing_brief') or '').strip()[:300],
+                    'recommended_table': str(ch.get('recommended_table') or '').strip()[:60],
+                })
+
+            if not planned:
                 continue
-            f_ids = [str(x) for x in (ch.get('focus_topic_ids') or []) if str(x) in valid_tids]
-            covered_tids.update(f_ids)
-            planned.append({
-                'chapter_id': f"dyn_ch_{idx}",
-                'chapter_no': str(ch.get('chapter_no') or f"第{idx}部分").strip(),
-                'title': title[:80],
-                'chapter_kind': str(ch.get('chapter_kind') or 'technical'),
-                'focus_topic_ids': f_ids,
-                'writing_brief': str(ch.get('writing_brief') or '').strip()[:300],
-                'recommended_table': str(ch.get('recommended_table') or '').strip()[:60],
-            })
 
-        if not planned:
-            return None
+            # ★/评分点覆盖率硬校验：遗漏的 topic_id 自动挂接至最后一章或补充保障章，绝不漏分
+            missing_tids = [t['topic_id'] for t in topics if t['topic_id'] not in covered_tids]
+            if missing_tids:
+                planned[-1]['focus_topic_ids'].extend(missing_tids)
+            return planned
+        except Exception:
+            continue
+    return None
 
-        # ★/评分点覆盖率硬校验：遗漏的 topic_id 自动挂接至最后一章或补充保障章，绝不漏分
-        missing_tids = [t['topic_id'] for t in topics if t['topic_id'] not in covered_tids]
-        if missing_tids:
-            planned[-1]['focus_topic_ids'].extend(missing_tids)
-        return planned
-    except Exception:
-        return None
+
+def _strip_duplicate_leading_title(
+    paragraphs: list[str],
+    chapter_no: str,
+    chapter_title: str,
+) -> list[str]:
+    """剔除 AI 在正文首段重复输出的章节号或本章标题，避免与 Word Heading 2 叠印。"""
+    if not paragraphs:
+        return []
+    out = [str(p or '').strip() for p in paragraphs if str(p or '').strip()]
+    if not out:
+        return []
+
+    title_norm = normalize_zh(chapter_title)
+    full_norm = normalize_zh(f"{chapter_no}{chapter_title}")
+    no_norm = normalize_zh(chapter_no)
+    head_candidates = {x for x in (title_norm, full_norm) if len(x) >= 2}
+
+    first = out[0]
+    first_norm = normalize_zh(first)
+    if first_norm in head_candidates:
+        return out[1:] if len(out) > 1 else []
+
+    if '\n' in first:
+        first_line, rest = first.split('\n', 1)
+        fl_norm = normalize_zh(first_line)
+        if fl_norm in head_candidates or (no_norm and fl_norm.startswith(no_norm) and title_norm and title_norm in fl_norm and len(fl_norm) <= len(full_norm) + 4):
+            rest_clean = rest.strip()
+            if rest_clean:
+                out[0] = rest_clean
+            else:
+                out = out[1:]
+    return out
 
 
 def _draft_chapter_with_llm(
@@ -554,7 +770,7 @@ def _draft_chapter_with_llm(
     allowed_context_for_guard: str,
     cancel_check: Optional[Callable[[], None]] = None,
 ) -> dict[str, Any]:
-    """为单个动态章节并发撰写正本草稿（带防金额/合同造假校验）。"""
+    """为单个动态章节并发撰写正本草稿（支持单章瞬时失败最多 2 次自动重试与防造假校验）。"""
     if cancel_check is not None:
         cancel_check()
 
@@ -580,44 +796,55 @@ def _draft_chapter_with_llm(
         "严格约束：\n"
         "1. 严禁虚构任何投标报价金额、过往合同编号或未授权业绩年份；\n"
         "2. 用实实在在的可执行方案语言撰写正文，少喊口号，需企业人工核实的具体配置填 `[待人工确认：...]`；\n"
-        "3. 返回纯 JSON：{\"paragraphs\": [\"分段正文1\", \"分段正文2\"], \"table\": {\"title\": \"表名\", \"headers\": [\"列1\", \"列2\", \"列3\"], \"rows\": [[\"a\", \"b\", \"c\"]]} | null, \"needs_manual\": [\"待确认项1\"]}"
+        "3. `paragraphs` 首段直接写正文内容，严禁在首行重复输出章节编号或本章标题；\n"
+        "4. 返回纯 JSON：{\"paragraphs\": [\"分段正文1\", \"分段正文2\"], \"table\": {\"title\": \"表名\", \"headers\": [\"列1\", \"列2\", \"列3\"], \"rows\": [[\"a\", \"b\", \"c\"]]} | null, \"needs_manual\": [\"待确认项1\"]}"
     )
 
     guard_pool = f"{allowed_context_for_guard}\n{req_desc}\n{snip_desc}"
-    try:
-        resp = client.chat([{'role': 'user', 'content': prompt}], model_tier='flash')
-        parsed = _parse_json_tolerant(str(getattr(resp, 'content', '') or ''))
-        if isinstance(parsed, dict) and isinstance(parsed.get('paragraphs'), list) and parsed['paragraphs']:
-            clean_paras = [
-                _sanitize_ai_draft_text(str(p or ''), guard_pool)
-                for p in parsed['paragraphs']
-                if str(p or '').strip()
-            ]
-            clean_table = None
-            raw_tbl = parsed.get('table')
-            if isinstance(raw_tbl, dict) and isinstance(raw_tbl.get('headers'), list) and isinstance(raw_tbl.get('rows'), list):
-                hdrs = [str(h or '').strip() for h in raw_tbl['headers'] if str(h or '').strip()]
-                if 2 <= len(hdrs) <= 6:
-                    rows = [
-                        [_sanitize_ai_draft_text(str(c or ''), guard_pool) for c in r[:len(hdrs)]]
-                        for r in raw_tbl['rows'][:12]
-                        if isinstance(r, list) and r
-                    ]
-                    if rows:
-                        clean_table = {
-                            'title': str(raw_tbl.get('title') or chapter.get('recommended_table') or '方案明细表').strip(),
-                            'headers': hdrs,
-                            'rows': [r + [''] * (len(hdrs) - len(r)) for r in rows],
-                        }
-            manual_notes = [str(m or '').strip() for m in (parsed.get('needs_manual') or []) if str(m or '').strip()][:5]
-            return {
-                'ai_generated': True,
-                'paragraphs': clean_paras,
-                'table': clean_table,
-                'needs_manual': manual_notes,
-            }
-    except Exception:
-        pass
+    for _attempt in range(3):
+        if cancel_check is not None:
+            cancel_check()
+        try:
+            resp = client.chat([{'role': 'user', 'content': prompt}], model_tier='flash')
+            parsed = _parse_json_tolerant(str(getattr(resp, 'content', '') or ''))
+            if isinstance(parsed, dict) and isinstance(parsed.get('paragraphs'), list) and parsed['paragraphs']:
+                sanitized_paras = [
+                    _sanitize_ai_draft_text(str(p or ''), guard_pool)
+                    for p in parsed['paragraphs']
+                    if str(p or '').strip()
+                ]
+                clean_paras = _strip_duplicate_leading_title(
+                    sanitized_paras,
+                    str(chapter.get('chapter_no') or ''),
+                    str(chapter.get('title') or ''),
+                )
+                if not clean_paras:
+                    continue
+                clean_table = None
+                raw_tbl = parsed.get('table')
+                if isinstance(raw_tbl, dict) and isinstance(raw_tbl.get('headers'), list) and isinstance(raw_tbl.get('rows'), list):
+                    hdrs = [str(h or '').strip() for h in raw_tbl['headers'] if str(h or '').strip()]
+                    if 2 <= len(hdrs) <= 6:
+                        rows = [
+                            [_sanitize_ai_draft_text(str(c or ''), guard_pool) for c in r[:len(hdrs)]]
+                            for r in raw_tbl['rows'][:36]
+                            if isinstance(r, list) and r
+                        ]
+                        if rows:
+                            clean_table = {
+                                'title': str(raw_tbl.get('title') or chapter.get('recommended_table') or '方案明细表').strip(),
+                                'headers': hdrs,
+                                'rows': [r + [''] * (len(hdrs) - len(r)) for r in rows],
+                            }
+                manual_notes = [str(m or '').strip() for m in (parsed.get('needs_manual') or []) if str(m or '').strip()][:5]
+                return {
+                    'ai_generated': True,
+                    'paragraphs': clean_paras,
+                    'table': clean_table,
+                    'needs_manual': manual_notes,
+                }
+        except Exception:
+            continue
 
     return {
         'ai_generated': False,
@@ -638,45 +865,48 @@ def _draft_deviation_with_llm(
     allowed_context: str,
     cancel_check: Optional[Callable[[], None]] = None,
 ) -> dict[int, str]:
-    """为尚未完成 F4 体检的偏离表行批量拟定正面技术/商务响应草稿。"""
+    """为尚未完成 F4 体检的偏离表行分批（每批 12 条）全量拟定正面技术/商务响应草稿。"""
     targets = [
         r for r in dev_rows
         if r.get('deviation') == '[待人工核对]'
-    ][:12]
+    ]
     if client is None or not targets:
         return {}
-    if cancel_check is not None:
-        cancel_check()
 
-    items_txt = '\n'.join(
-        f"seq={r['seq']}｜条款={r['clause_no']}｜要求={str(r['tender_requirement'])[:160]}"
-        for r in targets
-    )
-    prompt = (
-        f"你是资深投标文件撰写助手（风格：{skill_name}）。请为以下招标实质条款逐条撰写简洁明确的“我方响应草稿”（每条 20~60 字，明确肯定完全满足并说明响应点；若必须附第三方证明请附 `[待人工核附：证明页码]`；严禁编造报价或证书编号）：\n"
-        f"Skill要求：{skill_instructions[:600]}\n"
-        f"{items_txt}\n"
-        '返回纯 JSON：{"responses": [{"seq": 1, "response": "完全响应：..."}]}'
-    )
-    try:
-        resp = client.chat([{'role': 'user', 'content': prompt}], model_tier='flash')
-        parsed = _parse_json_tolerant(str(getattr(resp, 'content', '') or ''))
-        items = parsed.get('responses') if isinstance(parsed, dict) else parsed
-        out: dict[int, str] = {}
-        if isinstance(items, list):
-            for it in items:
-                if not isinstance(it, dict):
-                    continue
-                try:
-                    seq = int(it.get('seq'))
-                except (TypeError, ValueError):
-                    continue
-                txt = _sanitize_ai_draft_text(str(it.get('response') or '').strip(), allowed_context)
-                if txt:
-                    out[seq] = txt
-        return out
-    except Exception:
-        return {}
+    out: dict[int, str] = {}
+    batch_size = 12
+    for offset in range(0, len(targets), batch_size):
+        if cancel_check is not None:
+            cancel_check()
+        batch = targets[offset:offset + batch_size]
+        items_txt = '\n'.join(
+            f"seq={r['seq']}｜条款={r['clause_no']}｜要求={str(r['tender_requirement'])[:160]}"
+            for r in batch
+        )
+        prompt = (
+            f"你是资深投标文件撰写助手（风格：{skill_name}）。请为以下招标实质条款逐条撰写简洁明确的“我方响应草稿”（每条 20~60 字，明确肯定完全满足并说明响应点；若必须附第三方证明请附 `[待人工核附：证明页码]`；严禁编造报价或证书编号）：\n"
+            f"Skill要求：{skill_instructions[:600]}\n"
+            f"{items_txt}\n"
+            '返回纯 JSON：{"responses": [{"seq": 1, "response": "完全响应：..."}]}'
+        )
+        try:
+            resp = client.chat([{'role': 'user', 'content': prompt}], model_tier='flash')
+            parsed = _parse_json_tolerant(str(getattr(resp, 'content', '') or ''))
+            items = parsed.get('responses') if isinstance(parsed, dict) else parsed
+            if isinstance(items, list):
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    try:
+                        seq = int(it.get('seq'))
+                    except (TypeError, ValueError):
+                        continue
+                    txt = _sanitize_ai_draft_text(str(it.get('response') or '').strip(), allowed_context)
+                    if txt:
+                        out[seq] = txt
+        except Exception:
+            continue
+    return out
 
 
 def _align_snippet_with_llm_optional(
@@ -822,13 +1052,19 @@ def compose_bid_blueprint(
         source_refs=[{'file': t_path.name, 'open_date_source': open_date_source}],
     )
 
-    # ── Section 2: 资格审查与企业证照核对清单 ────────────────────────────────
+    # ── Section 2: 资格审查与企业证照核对清单（带角色去重合并 + 原件附图索引）────
     required_certs = checklist.get('required_certificates') or []
     if not required_certs and full_text:
         required_certs = extract_required_certificates(full_text, page_ctx=page_ctx)
 
+    merged_required_certs = _merge_required_certificates_by_role(required_certs)
+    roles_by_name = {
+        normalize_zh(it['cert_name']): list(it.get('requirement_roles') or [])
+        for it in merged_required_certs
+    }
+
     matched_certs, cert_summary = match_required_certificates_with_ledger(
-        required_certs,
+        merged_required_certs,
         ledger_certs or [],
         reference_date=open_date,
     )
@@ -839,10 +1075,20 @@ def compose_bid_blueprint(
         c_name = str(mc.get('cert_name') or '')
         status = str(mc.get('ledger_status') or 'not_in_ledger')
         best = mc.get('matched_cert') or {}
+        req_roles = roles_by_name.get(normalize_zh(c_name)) or [mc.get('requirement_level', 'bonus')]
+        role_label = _format_cert_roles_label(req_roles, str(mc.get('requirement_level') or 'bonus'))
+        att_path = _lookup_cert_attachment_path(best, ledger_certs)
+        has_img = _resolve_embeddable_image_path(att_path) is not None
+
         if status == 'valid':
             validity = '长期有效' if best.get('is_long_term') else f"有效期至 {best.get('valid_until')}"
             cert_no = best.get('cert_no') or '见原件'
-            att_tip = f"已关联台账原件《{best.get('attachment_name')}》（可从规则库下载插入）" if best.get('has_attachment') else '[待人工补充：台账未附扫描件，请线下插入原件]'
+            if has_img:
+                att_tip = f"已关联台账原件扫描图《{best.get('attachment_name')}》（导出时已自动嵌入附页）"
+            elif best.get('has_attachment'):
+                att_tip = f"已关联台账原件《{best.get('attachment_name')}》（可从规则库下载插入）"
+            else:
+                att_tip = '[待人工补充：台账未附扫描件，请线下插入原件]'
             status_text = f"台账有效（证号：{cert_no}，{validity}）· {att_tip}"
             highlight = not bool(best.get('has_attachment'))
         elif status == 'expiring_soon':
@@ -862,12 +1108,17 @@ def compose_bid_blueprint(
             'kind': 'cert_row',
             'cert_name': c_name,
             'requirement_level': mc.get('requirement_level', 'bonus'),
+            'requirement_roles': req_roles,
+            'role_label': role_label,
+            'matched_cert_id': best.get('id'),
             'ledger_status': status,
             'cert_no': best.get('cert_no'),
             'valid_until': '长期有效' if best.get('is_long_term') else best.get('valid_until'),
             'is_long_term': bool(best.get('is_long_term', False)),
             'attachment_name': best.get('attachment_name'),
+            'attachment_path': att_path,
             'has_attachment': bool(best.get('has_attachment', False)),
+            'has_embedded_image': has_img,
             'display_status': status_text,
             'quote': mc.get('quote', ''),
             'page': mc.get('page'),
@@ -883,16 +1134,23 @@ def compose_bid_blueprint(
             is_long = bool(_obj_field(raw_c, 'is_long_term', False))
             vu = _obj_field(raw_c, 'valid_until')
             vu_str = '长期有效' if is_long else (vu.isoformat() if hasattr(vu, 'isoformat') else str(vu or ''))
+            att_p = str(_obj_field(raw_c, 'attachment_path') or '').strip() or None
+            has_img = _resolve_embeddable_image_path(att_p) is not None
             s2_blocks.append({
                 'kind': 'cert_row',
                 'cert_name': c_name,
                 'requirement_level': 'ledger_reference',
+                'requirement_roles': ['ledger_reference'],
+                'role_label': '台账备查项',
+                'matched_cert_id': _obj_field(raw_c, 'id'),
                 'ledger_status': 'valid' if is_long else 'in_ledger',
                 'cert_no': _obj_field(raw_c, 'cert_no'),
                 'valid_until': vu_str,
                 'is_long_term': is_long,
                 'attachment_name': _obj_field(raw_c, 'attachment_name'),
-                'has_attachment': bool(_obj_field(raw_c, 'attachment_path') or _obj_field(raw_c, 'has_attachment')),
+                'attachment_path': att_p,
+                'has_attachment': bool(att_p or _obj_field(raw_c, 'has_attachment')),
+                'has_embedded_image': has_img,
                 'display_status': f"企业台账备查（{vu_str}）",
                 'highlight': False,
             })
@@ -902,7 +1160,7 @@ def compose_bid_blueprint(
         title='第二部分 资格审查与企业资质证明文件',
         slot_type='qualification_checklist',
         fill_mode='cert_ledger',
-        tender_requirements=required_certs,
+        tender_requirements=merged_required_certs,
         content_blocks=s2_blocks,
         needs_manual_items=s2_manual,
         source_refs=[{'cert_summary': cert_summary}],
@@ -1605,29 +1863,126 @@ def export_composed_bid_docx(
         elif slot_type == 'qualification_checklist':
             cert_rows = [b for b in blocks if b.get('kind') == 'cert_row']
             if cert_rows:
-                tbl = doc.add_table(rows=1, cols=5)
+                _add_styled_paragraph(
+                    doc,
+                    '以下为本项目所需资格与资质证明总览索引；每项证明材料的独立附页（原件扫描图或标准粘贴装订框）紧随索引表按序号逐一单列，确保满足 A4 全幅清晰审阅要求。',
+                    font_zh=font_zh,
+                    color=_COLOR_MUTED,
+                    font_size=9.5,
+                )
+                _add_doc_heading(
+                    doc,
+                    '2.0 资格与资质证明文件总览索引表',
+                    level=2,
+                    heading_font_zh=heading_font,
+                    accent_rgb=accent_rgb,
+                )
+                tbl = doc.add_table(rows=1, cols=6)
                 tbl.style = 'Table Grid'
                 tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-                col_w = (1.5, 0.9, 1.9, 1.0, 1.0)
-                headers = ('招标所需证照/资质', '要求级别', '台账核对结果', '有效期/证号', '原件关联')
+                col_w = (0.45, 1.4, 0.95, 1.65, 0.95, 0.9)
+                headers = ('序号', '招标所需证照/资质', '要求角色', '台账核对结果', '有效期/证号', '附页 / 原件')
                 for i, h in enumerate(headers):
                     c = tbl.rows[0].cells[i]
                     _style_table_cell(c, width_in=col_w[i])
                     _shade_cell(c, hdr_bg)
                     r = c.paragraphs[0].add_run(h)
-                    _set_run_font(r, name_zh=heading_font, size_pt=9.5, bold=True, color=_COLOR_NAVY)
-                for b in cert_rows:
+                    _set_run_font(r, name_zh=heading_font, size_pt=9.0, bold=True, color=_COLOR_NAVY)
+
+                resolved_imgs: dict[int, Optional[Path]] = {}
+                for idx, b in enumerate(cert_rows, start=1):
+                    img_p = _resolve_embeddable_image_path(b.get('attachment_path'))
+                    resolved_imgs[idx] = img_p
+                    role_txt = str(
+                        b.get('role_label')
+                        or _format_cert_roles_label(b.get('requirement_roles'), str(b.get('requirement_level') or 'bonus'))
+                    )
                     rc = tbl.add_row().cells
-                    for i in range(5):
+                    for i in range(6):
                         _style_table_cell(rc[i], width_in=col_w[i])
-                    _set_run_font(rc[0].paragraphs[0].add_run(str(b.get('cert_name') or '')), name_zh=font_zh, size_pt=9.5)
-                    _set_run_font(rc[1].paragraphs[0].add_run('必交资格项' if b.get('requirement_level') == 'mandatory' else '加分/参考项'), name_zh=font_zh, size_pt=9.5)
+                    _set_run_font(rc[0].paragraphs[0].add_run(str(idx)), name_zh=font_zh, size_pt=9.0)
+                    _set_run_font(rc[1].paragraphs[0].add_run(str(b.get('cert_name') or '')), name_zh=font_zh, size_pt=9.0)
+                    _set_run_font(rc[2].paragraphs[0].add_run(role_txt), name_zh=font_zh, size_pt=9.0)
                     st = str(b.get('ledger_status') or '')
-                    r_st = rc[2].paragraphs[0].add_run(str(b.get('display_status') or ''))
+                    r_st = rc[3].paragraphs[0].add_run(str(b.get('display_status') or ''))
                     col_st = _COLOR_GREEN if st == 'valid' else (_COLOR_RED if st in ('expired', 'not_in_ledger') else _COLOR_AMBER)
-                    _set_run_font(r_st, name_zh=font_zh, size_pt=9.0, bold=(st != 'valid'), color=col_st)
-                    _set_run_font(rc[3].paragraphs[0].add_run(f"{b.get('valid_until') or '—'}\n{b.get('cert_no') or ''}".strip()), name_zh=font_zh, size_pt=9.0)
-                    _set_run_font(rc[4].paragraphs[0].add_run(str(b.get('attachment_name') or '未上传原件')), name_zh=font_zh, size_pt=9.0)
+                    _set_run_font(r_st, name_zh=font_zh, size_pt=8.8, bold=(st != 'valid'), color=col_st)
+                    _set_run_font(rc[4].paragraphs[0].add_run(f"{b.get('valid_until') or '—'}\n{b.get('cert_no') or ''}".strip()), name_zh=font_zh, size_pt=8.8)
+                    att_flag = '已嵌图' if img_p is not None else ('PDF原件' if b.get('has_attachment') else '待粘贴')
+                    _set_run_font(rc[5].paragraphs[0].add_run(f"见 2.{idx}\n({att_flag})"), name_zh=font_zh, size_pt=8.8)
+
+                for idx, b in enumerate(cert_rows, start=1):
+                    c_title = str(b.get('cert_name') or '证明文件')
+                    role_txt = str(
+                        b.get('role_label')
+                        or _format_cert_roles_label(b.get('requirement_roles'), str(b.get('requirement_level') or 'bonus'))
+                    )
+                    _add_doc_heading(
+                        doc,
+                        f"2.{idx} {c_title}",
+                        level=2,
+                        heading_font_zh=heading_font,
+                        accent_rgb=accent_rgb,
+                    )
+                    _add_styled_paragraph(
+                        doc,
+                        f"要求角色：{role_txt} ｜ 台账核对：{b.get('display_status') or '待核对'}",
+                        font_zh=font_zh,
+                        color=_COLOR_MUTED,
+                        font_size=9.5,
+                    )
+                    img_p = resolved_imgs.get(idx)
+                    inserted_pic = False
+                    if img_p is not None:
+                        try:
+                            p_pic = doc.add_paragraph()
+                            p_pic.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            _apply_para_spacing(p_pic, space_before=6, space_after=4)
+                            p_pic.add_run().add_picture(str(img_p), width=Inches(5.4))
+                            _add_styled_paragraph(
+                                doc,
+                                f"【台账自动关联原件扫描图：{b.get('attachment_name') or img_p.name}】",
+                                font_zh=font_zh,
+                                color=_COLOR_GREEN,
+                                font_size=9.0,
+                            )
+                            inserted_pic = True
+                        except Exception:
+                            inserted_pic = False
+
+                    if not inserted_pic:
+                        box_tbl = doc.add_table(rows=1, cols=1)
+                        box_tbl.style = 'Table Grid'
+                        box_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+                        cell = box_tbl.rows[0].cells[0]
+                        if b.get('has_attachment'):
+                            _style_table_cell(cell, pad_v_dxa=260, pad_h_dxa=180, width_in=6.2)
+                            _shade_cell(cell, 'F8FAFC')
+                            p_box = cell.paragraphs[0]
+                            p_box.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            _set_run_font(
+                                p_box.add_run(
+                                    f"【已关联企业台账原件：{b.get('attachment_name') or '已上传附件'}】\n"
+                                    f"本证照非图片格式（如 PDF 原件），请打印导出后按 2.{idx} 位置随正本加盖公章装订。"
+                                ),
+                                name_zh=font_zh,
+                                size_pt=9.5,
+                                color=_COLOR_NAVY,
+                            )
+                        else:
+                            _style_table_cell(cell, pad_v_dxa=380, pad_h_dxa=180, width_in=6.2)
+                            p_box = cell.paragraphs[0]
+                            p_box.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            _set_run_font(
+                                p_box.add_run(
+                                    f"【{c_title} 原件扫描件 / 复印件粘贴区（附页 2.{idx}）】\n\n"
+                                    f"[待人工补充：请在此处整页粘贴有效期内清晰彩色扫描件或复印件并加盖投标人公章]"
+                                ),
+                                name_zh=font_zh,
+                                size_pt=10.0,
+                                bold=True,
+                                color=_COLOR_AMBER,
+                            )
             else:
                 _add_styled_paragraph(doc, '[待人工补充：未提取到明确资格证照，请核对招标文件原文]', font_zh=font_zh, highlight_manual=True)
 
@@ -1678,7 +2033,11 @@ def export_composed_bid_docx(
                             color=_COLOR_MUTED,
                             font_size=9.0,
                         )
-                    for para_txt in b.get('paragraphs') or []:
+                    for para_txt in _strip_duplicate_leading_title(
+                        list(b.get('paragraphs') or []),
+                        str(b.get('chapter_no') or ''),
+                        str(b.get('title') or ''),
+                    ):
                         _add_styled_paragraph(
                             doc,
                             str(para_txt),

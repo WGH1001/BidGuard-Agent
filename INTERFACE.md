@@ -343,12 +343,15 @@ compose_bid_blueprint(
     progress_cb: Optional[Callable[[int, str], None]] = None,
     cancel_check: Optional[Callable[[], None]] = None,
 ) -> BidBlueprint
-# E38 三条防废标硬锁：① 报价栏强制 `[待人工填报金额...]`；② _UNGROUNDED_MONEY_RE / _UNGROUNDED_CONTRACT_RE 防金额/合同幻觉；
-# ③ _plan_chapters_with_llm 覆盖率兜底守卫（所有 ★/▲ 与评分主题必覆盖）+ 剥离 eval_rule/评分细则串行污染
+# E38/E39 三条防废标与防截断硬锁：① 报价栏强制 `[待人工填报金额...]`；② _UNGROUNDED_MONEY_RE / _UNGROUNDED_CONTRACT_RE 防金额/合同幻觉；
+# ③ _plan_chapters_with_llm 覆盖率兜底守卫（章节≤30/主题≤40/全覆盖）+ 剥离 eval_rule/评分细则串行与目录/投标须知程序噪音，
+#    _draft_chapter_with_llm 并发单章最多 3 次尝试自动重试 + 剥离重复章标题首行 + 表行放宽至 36；_draft_deviation_with_llm 分批 12 条覆盖全量待核对偏离行；
+#    第二部分同名证书按角色合并去重（如 `必交资格 / 加分参考`）
 
 export_composed_bid_docx(blueprint: BidBlueprint | dict[str, Any], output_path: str | Path) -> Path
 # 按 skill_layout 动态渲染独立居中封面（gov_clean/navy_business/tech_modern）、原生 Heading 1/2/3 与可选 TOC 域、
-# XML 表格列宽与单元格边距，并依据 append_checklist_at_end 控制是否将内部待核对清单附于文末
+# XML 表格列宽与单元格边距；E39 起第二部分输出「2.0 资格总览索引表 + 2.1~2.N 逐项独立附页（自动嵌台账 PNG/JPG 原件扫描图，PDF 示装订框，缺失示 A4 全幅粘贴框）」；
+# 依据 append_checklist_at_end 控制是否将内部待核对清单附于文末
 
 # core/redline.py —— 原位无损修订 Clean 定稿导出
 export_clean_revised_docx(
@@ -424,6 +427,7 @@ import_skill_from_git_url(url_or_repo: str, *, allow_gitee_fallback: bool = True
 - E36 多标书交叉比对：`backend/models.py` 新增第 12 表 `similarity_reports`（`SimilarityReport` 独立建表，零污染 `BidCheckTask`/`dashboard`）；新增第 12 组路由 `backend/routers/similarity.py`（`POST /api/similarity/compare`、`GET /api/similarity`、`GET /api/similarity/{id}`、`GET /api/similarity/{id}/export`、`DELETE /api/similarity/{id}` 级联删盘）；
 - E37 标书编制输出与无损修订交付：`backend/models.py` 新增第 13 表 `bid_compose_drafts`（`BidComposeDraft`）；新增第 13 组路由 `backend/routers/composer.py`（`POST /api/composer/generate`、`GET /api/composer/drafts`、`GET /api/composer/drafts/{id}`、`GET /api/composer/drafts/{id}/download`、`DELETE /api/composer/drafts/{id}`）；`backend/routers/reports.py` 新增 `POST /api/reports/{task_id}/clean-bid`（`.pdf` 诚实拒收 `422 PDF_CLEAN_EXPORT_UNSUPPORTED`）与 `GET /api/reports/{task_id}/clean-bid/download`；
 - E38 F8 写作 Skills、AI 动态编排与 E36 异步深层研判：`backend/models.py` 新增第 14 表 `composer_skills`（`ComposerSkill`）及 `ensure_similarity_reports_columns`/`ensure_bid_compose_drafts_columns` 老库幂等加列；`backend/worker.py` 新增 `BidTaskWorker.submit_background_job(job_key: str, fn, *, sync=False)` 支持字符串键（`'composer:{id}'`/`'similarity:{id}'`）异步队列与取消；`backend/main.py::recover_stale_tasks` 扩展重启复位 `BidComposeDraft` 与 `SimilarityReport`；`composer.py` 新增 `/skills` CRUD（`409 LAST_SKILL_PROTECTED`）、`/skills/preview-url`、`/skills/import-url`、`/skills/import-file` 与 `/drafts/{id}/cancel`（`/generate` 增 `skill_id`/`use_ai`/`async_run=False`）；`similarity.py` 移除 6 份上限仅校验 `>=2` 份并新增 `enable_ai_review`/`async_run=False`/`POST /{id}/cancel`；
+- E39 F8 初稿质量精修与资格逐项附页：`backend/routers/composer.py` 在 `export_composed_bid_docx` 完成台账原件扫描图嵌入后、持久化 `blueprint_json` 前清洗剔除 `cert_row.attachment_path` 物理路径（保留 `matched_cert_id`/`has_embedded_image`/`role_label`），确保宿主机路径永不外泄；
 - 其余鉴权、多租户隔离、SSE 进度流、文件存储布局与统一错误格式约定保持不变。
 
 ---
@@ -461,3 +465,4 @@ import_skill_from_git_url(url_or_repo: str, *, allow_gitee_fallback: bool = True
 | 2026-11-17 | E36 多标书交叉比对与相似度分析卡：新增 `core/bid_similarity.py` 五维 0-Token 引擎（底层元数据/内嵌图片 SHA256、剥离可选招标底稿与套话的净正文 8-gram Jaccard 与 ≥25 字连续句溯源、非标外部实体/乱码碰撞、关键主体碰撞与手机号/18 位身份证号强制前 3 后 4 脱敏、`Decimal` 规律报价检测及 `.docx` 报告导出）；`backend/models.py` 新增第 12 表 `similarity_reports`；新增 `backend/routers/similarity.py`（`/api/similarity` 对比/列表/详情/导出/级联删盘）；前端新增 `/similarity`（`SimilarityCheckView.vue`「多标书交叉比对」） | 实现 + 验收 |
 | 2026-11-17 | E37 标书编制输出与无损修订交付卡：新增 `core/bid_composer.py` 统一蓝图 IR（V1 零幻觉骨架/长期证照台账/Decimal限价占位锁/★▲偏离预置 + V2 可插拔 `KnowledgeSnippetProvider`/`LocalKnowledgeSnippetProvider` 与优雅回退）；`core/redline.py` 提取共享 `_locate_and_split_quote_runs` 并新增 `export_clean_revised_docx`（Run 级保留样式原位替换、彻底剥离 `w:comment*`/`comments*.xml`、漏应答诚实计入 `manual_pending_items`）；`backend/models.py` 新增第 13 表 `bid_compose_drafts`；新增 `backend/routers/composer.py`（`/api/composer`）及 `/api/reports/{task_id}/clean-bid`（`.pdf` 返回 `422 PDF_CLEAN_EXPORT_UNSUPPORTED`）；前端新增 `/composer`（`BidComposerView.vue`）及详情/交付快捷按钮 | 实现 + 验收 |
 | 2026-11-18 | E38 F8 写作 Skills 与 AI 动态编排及 E36 异步深层研判卡：新增 `core/composer_skills.py`（3 套内置 Skill、YAML/MD 与 JSON 解析钳位、SSRF 白名单、GitHub→Gitee 优雅降级导入与离线 `EXTERNAL_SKILL_UNREACHABLE`）；`core/bid_composer.py` 修复 `eval_rule`/评分细则 Part 4 串行污染、打通 LLM 动态构章（`_plan_chapters_with_llm` + 覆盖率兜底守卫）与并发分节撰稿（`_draft_chapter_with_llm` / `_draft_deviation_with_llm` + `_UNGROUNDED_MONEY_RE` 防金额/合同幻觉）及独立居中封面/原生 Heading/TOC 域动态排版（`append_checklist_at_end` 内外分离）；`core/bid_similarity.py` 解除 6 份上限并新增 `run_similarity_ai_review`（双侧 `verify_quote` 严审与禁洗稿合规锁）；`backend/models.py` 新增第 14 表 `composer_skills` 及 `ensure_*` 老库平滑加列；`backend/worker.py` 新增 `submit_background_job` 与 `recover_stale_tasks` 扩展；`composer.py`/`similarity.py` 全链路打通异步队列/中断取消；前端 `App.vue` `<keep-alive>` 纳入双视图、`BidComposerView.vue`（Skill 弹窗与分组抽屉）与 `SimilarityCheckView.vue`（不限份数与 AI 复核）同步收尾 | 实现 + 验收 |
+| 2026-11-18 | E39 F8 初稿质量精修与资格证明逐项附页增强卡：`core/bid_composer.py` 新增 `_draft_chapter_with_llm` 单章瞬时失败最多 2 次自动重试（`PipelineCancelled` 直通穿透）、`_strip_duplicate_leading_title` 剥离重复章标题首行、`_is_procedural_topic` / `_extract_pdf_scoring_items` 清除目录与投标须知/澄清/计分方法噪音并精准提取 PDF 评分细则、解除 L483/L486/L603/L645 四处截断（偏离表分批 ≤12 条全量覆写），以及第二部分同名证照按角色合并去重（`必交资格 / 加分参考`）与「2.0 总览索引表 + 2.1~2.N 逐项独立附页（自动居中嵌入 PNG/JPG 原件扫描图，PDF 示装订框，缺省示 A4 全幅粘贴框）」；`backend/routers/composer.py` 在持久化 `blueprint_json` 前剥离宿主机 `attachment_path`；`BidComposerView.vue` 第二部分增加角色级别与附页形态预览列 | 实现 + 验收 |

@@ -892,11 +892,45 @@ onUnmounted(() => {
 
                   <!-- Qualification Checklist -->
                   <template v-else-if="sec.slot_type === 'qualification_checklist'">
+                    <p class="bp-slot-tip">
+                      导出 Word 后将在 2.0 总览索引表后逐项单列 2.1~2.N 独立附页（台账已上传图片原件将自动居中嵌图，未传原件则预留 A4 宽度扫描件粘贴装订框）。
+                    </p>
                     <el-table :data="sectionBlocks(sec, 'cert_row')" size="small" border>
-                      <el-table-column prop="cert_name" label="招标所需证照" min-width="180" />
-                      <el-table-column prop="requirement_level" label="级别" width="100" />
-                      <el-table-column prop="valid_until" label="台账有效期" width="120" />
-                      <el-table-column label="对账结果" min-width="240">
+                      <el-table-column prop="cert_name" label="招标所需证照" min-width="170" />
+                      <el-table-column label="角色级别" width="145">
+                        <template #default="{ row }">
+                          {{
+                            (row as Record<string, unknown>).role_label ||
+                            ((row as Record<string, unknown>).requirement_level === 'mandatory'
+                              ? '必交资格项'
+                              : '加分/参考项')
+                          }}
+                        </template>
+                      </el-table-column>
+                      <el-table-column prop="valid_until" label="台账有效期" width="110" />
+                      <el-table-column label="附页形态" width="140">
+                        <template #default="{ row }">
+                          <el-tag
+                            size="small"
+                            :type="
+                              (row as Record<string, unknown>).has_embedded_image
+                                ? 'success'
+                                : (row as Record<string, unknown>).has_attachment
+                                  ? 'info'
+                                  : 'warning'
+                            "
+                          >
+                            {{
+                              (row as Record<string, unknown>).has_embedded_image
+                                ? 'Word 自动嵌图'
+                                : (row as Record<string, unknown>).has_attachment
+                                  ? 'PDF 原件装订框'
+                                  : '全幅待粘贴框'
+                            }}
+                          </el-tag>
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="对账结果" min-width="220">
                         <template #default="{ row }">
                           <span :class="{ 'highlight-manual-text': (row as Record<string, unknown>).ledger_status !== 'valid' }">
                             {{ (row as Record<string, unknown>).display_status }}
@@ -1573,6 +1607,16 @@ onUnmounted(() => {
   margin: 10px 0 0;
   font-size: 13px;
   line-height: 1.6;
+}
+
+.bp-slot-tip {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: #475569;
+  background: #f8fafc;
+  padding: 6px 10px;
+  border-radius: 4px;
+  border-left: 3px solid #3b82f6;
 }
 
 .ai-chapter-card,

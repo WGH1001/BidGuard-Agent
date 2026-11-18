@@ -671,6 +671,12 @@ def generate_composed_draft(
             export_composed_bid_docx(bp_dict, out_docx_abs)
             out_rel = out_docx_abs.relative_to(PROJECT_ROOT.resolve()).as_posix()
 
+            # 持久化前剔除宿主机本地磁盘路径，避免 DB/API 暴露服务器存储结构
+            for sec in bp_dict.get('sections') or []:
+                for blk in sec.get('content_blocks') or []:
+                    if isinstance(blk, dict) and 'attachment_path' in blk:
+                        blk.pop('attachment_path', None)
+
             worker.check_cancelled(job_key, cancel_ev)
             now_utc = _utc_now()
             d_row = sess.query(BidComposeDraft).filter_by(id=draft_id).first()
