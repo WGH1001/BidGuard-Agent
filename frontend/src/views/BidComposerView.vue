@@ -78,6 +78,18 @@ const packageNo = ref<number | undefined>(undefined)
 const composeMode = ref<ComposeModeType>('skeleton_v1')
 const useAi = ref(true)
 const useIndicatorLibrary = ref(false)
+const blindBidMode = ref(false)
+const BLIND_RULE_OPTIONS = [
+  { key: 'hide_bidder_name', label: '投标人或单位名称' },
+  { key: 'hide_logo_media', label: 'Logo、商标、公章图片' },
+  { key: 'hide_person_name', label: '人员真实姓名与签字' },
+  { key: 'hide_contact_info', label: '联系方式、电话、邮箱' },
+  { key: 'hide_external_project', label: '非本项目名称与编号' },
+  { key: 'hide_past_cases', label: '历史项目或业绩案例' },
+] as const
+const blindRules = ref<string[]>(BLIND_RULE_OPTIONS.map((o) => o.key))
+const blindCustomWords = ref<string[]>([])
+const blindCustomInput = ref('')
 const indicatorOverview = ref<BizLineIndicatorOverviewOut | null>(null)
 const loadingIndicators = ref(false)
 const showIndicatorPreview = ref(false)
@@ -432,6 +444,9 @@ async function handleGenerateDraft(): Promise<void> {
       skillId: selectedSkillId.value,
       useAi: useAi.value,
       useIndicatorLibrary: useIndicatorLibrary.value,
+      blindBidMode: blindBidMode.value,
+      blindRules: blindBidMode.value ? blindRules.value : undefined,
+      blindCustomWords: blindBidMode.value ? blindCustomWords.value : undefined,
       asyncRun: true,
     })
     activeDraft.value = detail
@@ -585,9 +600,46 @@ watch(
   { immediate: true },
 )
 
+function addBlindCustomWord(): void {
+  const parts = blindCustomInput.value
+    .split(/[,，;\n\s]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 2)
+  if (parts.length === 0) {
+    ElMessage.warning('请输入至少 2 个字的屏蔽词（如公司简称、商标词）')
+    return
+  }
+  const set = new Set(blindCustomWords.value)
+  for (const p of parts) {
+    if (set.size < 30) {
+      set.add(p)
+    }
+  }
+  blindCustomWords.value = Array.from(set)
+  blindCustomInput.value = ''
+}
+
+function removeBlindCustomWord(idx: number): void {
+  blindCustomWords.value = blindCustomWords.value.filter((_, i) => i !== idx)
+}
+
 onMounted(async () => {
   if (route.query.tab === 'clean') {
     mainTab.value = 'clean'
+  }
+  if (route.query.blind === '1') {
+    blindBidMode.value = true
+    const rawRules = typeof route.query.rules === 'string' ? route.query.rules : ''
+    if (rawRules) {
+      const validSet = new Set<string>(BLIND_RULE_OPTIONS.map((o) => o.key))
+      const parsed = rawRules
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => validSet.has(s))
+      if (parsed.length > 0) {
+        blindRules.value = Array.from(new Set(parsed))
+      }
+    }
   }
   const qTaskId = Number(route.query.taskId)
   if (Number.isFinite(qTaskId) && qTaskId > 0) {
@@ -815,6 +867,68 @@ onUnmounted(() => {
                 </div>
               </div>
 
+              <!-- E43：暗标防护双模式切换（按通用方式 vs 按暗标生成） -->
+              <div class="blind-mode-box">
+                <div class="bmb-head">
+                  <span class="bmb-title">暗标设置（生成方式双模式）</span>
+                  <el-tag v-if="blindBidMode" size="small" type="danger" effect="dark">
+                    暗标保护已开启（{{ blindRules.length }}/6 项）
+                  </el-tag>
+                </div>
+                <el-radio-group v-model="blindBidMode" class="bmb-radios">
+                  <el-radio :value="false">
+                    按通用方式生成（独立封面 · 目录 · Skill 底纹配色）
+                  </el-radio>
+                  <el-radio :value="true">
+                    按暗标生成（去封面与底纹粗斜体 · 隐去身份/Logo · 禁目录自动清理）
+                  </el-radio>
+                </el-radio-group>
+
+                <div v-if="blindBidMode" class="bmb-panel">
+                  <el-alert
+                    type="warning"
+                    :closable="false"
+                    class="mb-8"
+                    title="暗标导出版面将清空页眉页脚、移除单元格底纹(w:shd)与粗斜体彩色样式、按招标规则移除禁止目录；历史业绩与外部编号等歧义文本仍请在人工清单终核。"
+                  />
+                  <div class="bmb-sub-title">启用保护规则：</div>
+                  <el-checkbox-group v-model="blindRules" class="bmb-checks">
+                    <el-checkbox
+                      v-for="opt in BLIND_RULE_OPTIONS"
+                      :key="opt.key"
+                      :value="opt.key"
+                    >
+                      {{ opt.label }}
+                    </el-checkbox>
+                  </el-checkbox-group>
+
+                  <div class="bmb-custom-row">
+                    <el-input
+                      v-model="blindCustomInput"
+                      size="small"
+                      placeholder="添加自定义屏蔽词（如公司简称/品牌词，回车或点击添加）"
+                      style="max-width: 340px"
+                      @keyup.enter="addBlindCustomWord"
+                    />
+                    <el-button size="small" @click="addBlindCustomWord">
+                      + 添加自定义屏蔽词
+                    </el-button>
+                  </div>
+                  <div v-if="blindCustomWords.length > 0" class="bmb-custom-tags">
+                    <el-tag
+                      v-for="(cw, idx) in blindCustomWords"
+                      :key="`${cw}-${idx}`"
+                      size="small"
+                      type="danger"
+                      closable
+                      @close="removeBlindCustomWord(idx)"
+                    >
+                      {{ cw }}
+                    </el-tag>
+                  </div>
+                </div>
+              </div>
+
               <div class="action-bar">
                 <el-button
                   type="primary"
@@ -863,6 +977,14 @@ onUnmounted(() => {
                     }}
                   </el-tag>
                   <span>{{ item.skill_name || '标准版' }}</span>
+                  <el-tag
+                    v-if="item.blind_bid_mode || Boolean((item.stats as Record<string, unknown>)?.blind_bid_applied)"
+                    size="small"
+                    type="danger"
+                    effect="plain"
+                  >
+                    暗标无痕
+                  </el-tag>
                 </div>
                 <div class="draft-actions" @click.stop>
                   <el-button
@@ -933,6 +1055,13 @@ onUnmounted(() => {
                     <el-tag size="small" type="info">Skill：{{ activeBlueprint.skill_name || activeDraft.skill_name }}</el-tag>
                     <el-tag size="small" :type="bizLineTagType(activeDraft.biz_line)">
                       业务线：{{ bizLineLabel(activeDraft.biz_line) }}
+                    </el-tag>
+                    <el-tag
+                      v-if="activeBlueprint.blind_bid_mode || activeDraft.blind_bid_mode || Boolean((activeBlueprint.stats as Record<string, unknown>)?.blind_bid_applied)"
+                      size="small"
+                      type="danger"
+                    >
+                      暗标素颜模式已生效（{{ (activeBlueprint.blind_rules || []).length || 6 }} 项屏蔽）
                     </el-tag>
                     <el-tag
                       v-if="activeDraft.use_indicator_library || Boolean((activeBlueprint.stats as Record<string, unknown>)?.use_indicator_library)"
@@ -2049,5 +2178,65 @@ onUnmounted(() => {
 
 .mt-12 {
   margin-top: 12px;
+}
+
+.blind-mode-box {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  background: #fffafa;
+}
+
+.bmb-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.bmb-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.bmb-radios {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.bmb-panel {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #fca5a5;
+}
+
+.bmb-sub-title {
+  font-size: 12px;
+  color: #475569;
+  margin-bottom: 4px;
+}
+
+.bmb-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.bmb-custom-row {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bmb-custom-tags {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 </style>

@@ -34,6 +34,7 @@ from backend.models import (
     BidCheckTask,
     BidFinding,
     BidRuleConfig,
+    Tenant,
     UserModelConfig,
     ensure_bid_check_tasks_columns,
     ensure_user_model_configs_columns,
@@ -51,6 +52,7 @@ from core.price_extractor import run_price_check
 from core.qualification_scanner import (
     parse_cn_date,
     resolve_effective_social_requirement,
+    scan_blind_bid_compliance,
     scan_qualifications,
 )
 from core.quote_verifier import verify_quote
@@ -61,6 +63,7 @@ from core.response_checker import (
 )
 from core.tender_extractor import (
     build_review_checklist,
+    extract_blind_bid_requirements,
     extract_open_date_from_tender_text,
     extract_open_date_with_evidence,
 )
@@ -754,6 +757,12 @@ class BidTaskWorker:
             # E23 §2.1.2：优先级为 任务手填 > 标书原文自动提取 > 正则未命中时 AI 局部窗兜底 > 规则页默认日期 > DEFAULT_FALLBACK_OPEN_DATE
             # 同时写入 open_date_source / open_date_quote 显式来源可观测性，并在手填与标书原文不一致时追加 OPEN_DATE_MISMATCH 预警
             tender_parsed = parse_document(str(tender_abs))
+            blind_bid_info = f1_res.get('blind_bid_info') if isinstance(f1_res, dict) else None
+            if not isinstance(blind_bid_info, dict):
+                blind_bid_info = extract_blind_bid_requirements(
+                    tender_parsed.text,
+                    page_ctx=_build_unified_page_context(str(tender_abs)),
+                )
             tender_date_ev = extract_open_date_with_evidence(tender_parsed.text)
             detected_open_date = ''
             detected_source = ''
@@ -1180,6 +1189,63 @@ class BidTaskWorker:
                         )
                     )
 
+            # (e) E43 暗标防废标合规核查（0 Token，source_module='BLIND_BID'）
+            blind_bid_findings: list[dict[str, Any]] = []
+            if blind_bid_info.get('is_blind_bid'):
+                tenant_row = session.query(Tenant).filter_by(id=task.tenant_id).first()
+                tenant_name = str(tenant_row.name or '').strip() if tenant_row else ''
+                raw_hints = list(forbidden_names) + list(cfg_snap.get('bidder_hints') or [])
+                if (
+                    tenant_name
+                    and len(tenant_name) >= 4
+                    and tenant_name not in ('默认租户', '默认部门', '系统默认部门', 'Default Tenant')
+                ):
+                    raw_hints.append(tenant_name)
+                blind_custom_words = [
+                    str(w).strip()
+                    for w in (cfg_snap.get('blind_custom_words') or [])
+                    if str(w or '').strip()
+                ]
+                blind_bid_findings = scan_blind_bid_compliance(
+                    bid_abs,
+                    blind_bid_info,
+                    bidder_hints=raw_hints,
+                    custom_words=blind_custom_words,
+                )
+                for bf in blind_bid_findings:
+                    b_off = bf.get('offset')
+                    bf_phys, bf_footer, bf_docx = (
+                        _resolve_unified_page(b_off, bid_page_ctx)
+                        if b_off is not None
+                        else (bf.get('page'), None, False)
+                    )
+                    bf_detail = _enrich_detail_with_page_meta(
+                        dict(bf.get('detail_json') or {}),
+                        bf_phys,
+                        bf_footer,
+                        bf_docx,
+                    )
+                    if bf.get('tender_quote'):
+                        bf_detail['tender_quote'] = str(bf['tender_quote'])[:300]
+                    new_findings.append(
+                        BidFinding(
+                            task_id=task.id,
+                            source_module='BLIND_BID',
+                            code=str(bf.get('code') or 'BLIND_BID_IDENTITY_LEAK'),
+                            severity=str(bf.get('severity') or 'error'),
+                            category='暗标防废标核查',
+                            clause_no=str(bf.get('clause_no') or '暗标合规核查'),
+                            quote=str(bf.get('bid_quote') or ''),
+                            quote_offset=b_off,
+                            quote_verified=bool(bf.get('quote_verified', False)),
+                            page=bf_phys,
+                            message=str(bf.get('message') or ''),
+                            suggestion=str(bf.get('suggestion') or ''),
+                            consequence=str(bf.get('consequence') or ('veto' if bf.get('severity') == 'error' else 'none')),
+                            detail_json=bf_detail,
+                        )
+                    )
+
             session.add_all(new_findings)
             session.flush()
             duration_record['grading_ms'] = max(0, int(round((time.perf_counter() - t_grading) * 1000)))
@@ -1202,6 +1268,9 @@ class BidTaskWorker:
                 'total_requirements': int(align_sum.get('total_requirements', 0)),
                 'aligned_hits': int(align_sum.get('aligned_hits', 0)),
                 'hit_rate': float(align_sum.get('hit_rate', 1.0)),
+                'is_blind_bid': bool(blind_bid_info.get('is_blind_bid')),
+                'blind_toc_forbidden': bool(blind_bid_info.get('toc_forbidden')),
+                'blind_bid_finding_count': len(blind_bid_findings),
                 'price_status': str(f2_res.get('status') or 'NEED_MANUAL'),
                 'price_cap': f2_res.get('price_cap'),
                 'bid_total': f2_res.get('bid_total'),

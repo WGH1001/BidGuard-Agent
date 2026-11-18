@@ -677,6 +677,9 @@ export const composerApi = {
     skillId?: number | null
     useAi?: boolean
     useIndicatorLibrary?: boolean
+    blindBidMode?: boolean
+    blindRules?: string[]
+    blindCustomWords?: string[]
     asyncRun?: boolean
   }): Promise<ComposeDraftDetailOut> {
     const fd = new FormData()
@@ -701,6 +704,13 @@ export const composerApi = {
     }
     fd.append('use_ai', payload.useAi !== false ? 'true' : 'false')
     fd.append('use_indicator_library', payload.useIndicatorLibrary ? 'true' : 'false')
+    fd.append('blind_bid_mode', payload.blindBidMode ? 'true' : 'false')
+    if (payload.blindRules) {
+      fd.append('blind_rules_json', JSON.stringify(payload.blindRules))
+    }
+    if (payload.blindCustomWords && payload.blindCustomWords.length > 0) {
+      fd.append('blind_custom_words_json', JSON.stringify(payload.blindCustomWords))
+    }
     fd.append('async_run', payload.asyncRun ? 'true' : 'false')
     return post<ComposeDraftDetailOut>('/composer/generate', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },

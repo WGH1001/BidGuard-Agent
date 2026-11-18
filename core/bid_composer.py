@@ -99,6 +99,86 @@ _PROCEDURAL_TOPIC_RE = re.compile(
 _PDF_SCORE_LINE_RE = re.compile(r'^(?:\d+(?:\.\d+)?\s*[-~—至]\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?)\s*分$')
 _CERT_IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
 
+_BLIND_RULE_KEYS: tuple[str, ...] = (
+    'hide_bidder_name',
+    'hide_logo_media',
+    'hide_person_name',
+    'hide_contact_info',
+    'hide_external_project',
+    'hide_past_cases',
+)
+
+_BLIND_RULE_DESCRIPTIONS: dict[str, str] = {
+    'hide_bidder_name': '禁止出现投标人全称、简称或企业注册标识，统一用“本公司/我方”指代',
+    'hide_logo_media': '禁止插入公司 Logo、商标、印章或公章水印图片（改为纯文字清单）',
+    'hide_person_name': '禁止出现法人代表、项目经理、团队成员真实姓名与手写签字',
+    'hide_contact_info': '禁止出现真实手机号、固定电话、传真、电子邮箱及办公详细地址',
+    'hide_external_project': '禁止出现非本项目的招标编号、采购编号、合同编号或档案号',
+    'hide_past_cases': '禁止直接点名历史客户或真实业绩项目名称，须泛化为“某大型同类项目”',
+}
+
+_BLIND_MOBILE_RE = re.compile(r'(?<!\d)1[3-9]\d{9}(?!\d)')
+_BLIND_EMAIL_RE = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
+_BLIND_TEL_LABEL_RE = re.compile(r'(?:联系电话|手机|电话|传真|Tel|TEL|Fax)\s*[：:]\s*[0-9\-—\s]{7,20}')
+
+
+def _normalize_blind_rules(blind_bid_mode: bool, blind_rules: Optional[list[str]]) -> list[str]:
+    if not blind_bid_mode:
+        return []
+    if blind_rules is None:
+        return list(_BLIND_RULE_KEYS)
+    req = {str(r).strip() for r in blind_rules if str(r).strip()}
+    return [rk for rk in _BLIND_RULE_KEYS if rk in req]
+
+
+def _normalize_custom_words(custom_words: Optional[list[str]]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for w in custom_words or []:
+        s = str(w or '').strip()
+        if len(s) >= 2 and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def _apply_blind_bid_sanitization(
+    text: str,
+    *,
+    active_rules: set[str],
+    custom_words: list[str],
+    extra_hints: Optional[list[str]] = None,
+) -> str:
+    """E43 · 保守型暗标确定性清理边界。
+
+    仅对可确定性定位且不误伤正文语义的线索做精确替换：
+    1) 用户自定义屏蔽词 custom_words -> [已按暗标屏蔽]；
+    2) hide_bidder_name 且显式传入的投标人/台账机构名称 extra_hints -> 本公司；
+    3) hide_contact_info -> 正则脱敏手机号、电子邮箱与带标签电话/传真。
+    非本项目编号 / 历史业绩案例不强改正文，由 AI 指令约束 + manual_checklist 人工终核兜底。
+    """
+    out = str(text or '')
+    if not out:
+        return out
+
+    # 1. 自定义屏蔽词（按长度降序，避免短词截断长词）
+    for w in sorted(_normalize_custom_words(custom_words), key=len, reverse=True):
+        out = out.replace(w, '[已按暗标屏蔽]')
+
+    # 2. 显式企业/投标人线索词（仅限 >=3 字符明确实体，绝不误伤通用词）
+    if 'hide_bidder_name' in active_rules and extra_hints:
+        hints = sorted({str(h or '').strip() for h in extra_hints if len(str(h or '').strip()) >= 3}, key=len, reverse=True)
+        for h in hints:
+            out = out.replace(h, '本公司')
+
+    # 3. 联系方式正则脱敏
+    if 'hide_contact_info' in active_rules:
+        out = _BLIND_MOBILE_RE.sub('[联系方式已按暗标隐藏]', out)
+        out = _BLIND_EMAIL_RE.sub('[邮箱已按暗标隐藏]', out)
+        out = _BLIND_TEL_LABEL_RE.sub('联系电话：[已按暗标隐藏]', out)
+
+    return out
+
 
 @dataclass
 class BlueprintSection:
@@ -135,6 +215,8 @@ class BidBlueprint:
     manual_checklist: list[dict[str, Any]] = field(default_factory=list)
     cert_match_summary: dict[str, Any] = field(default_factory=dict)
     stats: dict[str, Any] = field(default_factory=dict)
+    blind_bid_mode: bool = False
+    blind_rules: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -156,6 +238,8 @@ class BidBlueprint:
             'manual_checklist': list(self.manual_checklist),
             'cert_match_summary': dict(self.cert_match_summary),
             'stats': dict(self.stats),
+            'blind_bid_mode': bool(self.blind_bid_mode),
+            'blind_rules': list(self.blind_rules),
         }
 
 
@@ -655,6 +739,7 @@ def _plan_chapters_with_llm(
     skill_name: str,
     skill_instructions: str,
     skill_layout: dict[str, Any],
+    blind_prompt_note: str = '',
 ) -> Optional[list[dict[str, Any]]]:
     """调用大模型结合选定 Skill + 招标结构动态规划投标文件技术与服务章节树。"""
     if client is None or not topics:
@@ -670,12 +755,14 @@ def _plan_chapters_with_llm(
         for r in deviation_reqs[:30]
     ]
 
+    blind_block = f"【暗标编写铁律】：\n{blind_prompt_note}\n" if blind_prompt_note else ''
     prompt = (
         "你是资深招投标方案架构师。请依据【选定写作 Skill】与本次招标信息，规划 3 至 6 个高度凝练、贴合招标评分架构的《技术与商务实施方案》动态章节（不得机械照抄或拆成十几个碎片小段）：\n"
         f"【项目名称】：{project_name}（采购人：{buyer_name}）\n"
         f"【招标原章节目录参考】：{', '.join(ch_titles) or '常规采购项目'}\n"
         f"【选定写作 Skill】：{skill_name}（语气：{skill_layout.get('tone')}，单章目标字数：{skill_layout.get('target_section_words')}）\n"
         f"【Skill 编写约束】：\n{skill_instructions[:1200] or '专业严谨点对点响应'}\n"
+        f"{blind_block}"
         f"【招标评分与需求要点】：\n" + '\n'.join(topic_lines) + "\n"
         f"【主要强制条款（供挂接检查）】：\n" + ('\n'.join(req_lines) or '无额外强制标记') + "\n"
         "请严格返回纯 JSON 对象：\n"
@@ -768,6 +855,7 @@ def _draft_chapter_with_llm(
     skill_instructions: str,
     skill_layout: dict[str, Any],
     allowed_context_for_guard: str,
+    blind_prompt_note: str = '',
     cancel_check: Optional[Callable[[], None]] = None,
 ) -> dict[str, Any]:
     """为单个动态章节并发撰写正本草稿（支持单章瞬时失败最多 2 次自动重试与防造假校验）。"""
@@ -786,10 +874,12 @@ def _draft_chapter_with_llm(
     ) or '（无额外历史参考片段，请仅紧扣招标需求与规范方法论撰写）'
 
     target_words = int(skill_layout.get('target_section_words') or 500)
+    blind_block = f"【暗标编制约束（必须严格遵守）】：\n{blind_prompt_note}\n" if blind_prompt_note else ''
     prompt = (
         f"你是投标方案专家，正在为《{project_name}》撰写标书章节：{chapter['chapter_no']} {chapter['title']}。\n"
         f"【选定 Skill】：{skill_name}｜行文语气：{skill_layout.get('tone')}｜目标字数约 {target_words} 字。\n"
         f"【Skill 规则与格式限制】：\n{skill_instructions[:1200] or '正式专业、逐点响应'}\n"
+        f"{blind_block}"
         f"【本章对应招标需求与评分细则】：\n{req_desc[:2200]}\n"
         f"【可借鉴企业参考片段（如有）】：\n{snip_desc[:2400]}\n"
         f"【建议附带表格（可选）】：{chapter.get('recommended_table') or '如适合则给出实施分工/SLA承诺表'}\n"
@@ -863,6 +953,7 @@ def _draft_deviation_with_llm(
     skill_name: str,
     skill_instructions: str,
     allowed_context: str,
+    blind_prompt_note: str = '',
     cancel_check: Optional[Callable[[], None]] = None,
 ) -> dict[int, str]:
     """为尚未完成 F4 体检的偏离表行分批（每批 12 条）全量拟定正面技术/商务响应草稿。"""
@@ -875,6 +966,7 @@ def _draft_deviation_with_llm(
 
     out: dict[int, str] = {}
     batch_size = 12
+    blind_block = f"暗标约束：{blind_prompt_note}\n" if blind_prompt_note else ''
     for offset in range(0, len(targets), batch_size):
         if cancel_check is not None:
             cancel_check()
@@ -886,6 +978,7 @@ def _draft_deviation_with_llm(
         prompt = (
             f"你是资深投标文件撰写助手（风格：{skill_name}）。请为以下招标实质条款逐条撰写简洁明确的“我方响应草稿”（每条 20~60 字，明确肯定完全满足并说明响应点；若必须附第三方证明请附 `[待人工核附：证明页码]`；严禁编造报价或证书编号）：\n"
             f"Skill要求：{skill_instructions[:600]}\n"
+            f"{blind_block}"
             f"{items_txt}\n"
             '返回纯 JSON：{"responses": [{"seq": 1, "response": "完全响应：..."}]}'
         )
@@ -955,10 +1048,14 @@ def compose_bid_blueprint(
     checklist: Optional[dict[str, Any]] = None,
     skill: Any = None,
     use_ai: bool = True,
+    blind_bid_mode: bool = False,
+    blind_rules: Optional[list[str]] = None,
+    blind_custom_words: Optional[list[str]] = None,
+    bidder_hints: Optional[list[str]] = None,
     progress_cb: Optional[Callable[[int, str], None]] = None,
     cancel_check: Optional[Callable[[], None]] = None,
 ) -> BidBlueprint:
-    """E37 + E38：生成受写作 Skill 与可选 AI 驱动的统一投标蓝图 IR（严格守住报价/证照/覆盖三铁律）。"""
+    """E37 + E38 + E43：生成受写作 Skill 与可选 AI 驱动的统一投标蓝图 IR（支持暗标防废标双模式）。"""
     if compose_mode not in ('skeleton_v1', 'knowledge_draft_v2'):
         raise ValueError(f"不支持的编制模式 compose_mode={compose_mode!r}")
 
@@ -981,6 +1078,35 @@ def compose_bid_blueprint(
 
     if checklist is None:
         checklist = build_review_checklist(str(t_path))
+
+    blind_info = checklist.get('blind_bid_info') or {}
+    active_rule_list = _normalize_blind_rules(bool(blind_bid_mode), blind_rules)
+    active_rule_set = set(active_rule_list)
+    clean_custom_words = _normalize_custom_words(blind_custom_words) if blind_bid_mode else []
+    blind_toc_forbidden = bool(blind_info.get('toc_forbidden')) if blind_bid_mode else False
+    hide_logo_media = bool(blind_bid_mode and 'hide_logo_media' in active_rule_set)
+
+    def _san(raw: Any) -> str:
+        txt = str(raw or '')
+        if not blind_bid_mode:
+            return txt
+        return _apply_blind_bid_sanitization(
+            txt,
+            active_rules=active_rule_set,
+            custom_words=clean_custom_words,
+            extra_hints=bidder_hints,
+        )
+
+    blind_prompt_note = ''
+    if blind_bid_mode:
+        rule_bullets = [
+            f"- {_BLIND_RULE_DESCRIPTIONS[rk]}"
+            for rk in active_rule_list
+            if rk in _BLIND_RULE_DESCRIPTIONS
+        ]
+        if clean_custom_words:
+            rule_bullets.append('- 严禁输出任何与用户指定屏蔽实体相关的具体单位、人员或专属产品字样')
+        blind_prompt_note = '\n'.join(rule_bullets) or '严格匿名编制，禁止泄露任何投标人身份与格式修饰'
 
     extracted_name = _extract_first_match(full_text, _PROJECT_NAME_RES)
     project_name = extracted_name or (task_title or '').strip() or t_path.stem
@@ -1024,12 +1150,44 @@ def compose_bid_blueprint(
         _add_manual('sec_cover', '法定代表人/授权代表签章', '封标前须完成法人签章及授权委托书签署', '核对授权书有效期'),
         _add_manual('sec_cover', '投标有效期承诺天数', '需满足招标文件前附表规定最低天数', '例如：自开标之日起不少于 90 日历天'),
     ]
+    if blind_bid_mode:
+        s1_manual.append(_add_manual(
+            'sec_cover',
+            '暗标身份与素颜导出复核',
+            '已开启暗标保护，导出已清空封面底纹、页眉页脚与特殊字体样式',
+            '人工核查是否仍需在独立资格明标包另行提交签章件',
+        ))
+        if 'hide_external_project' in active_rule_set:
+            s1_manual.append(_add_manual(
+                'sec_cover',
+                '非本项目编号人工复核',
+                '保守清洗策略不自动篡改疑难项目编号，请人工复核正文中未残留外部项目编号',
+                '重点检查实施案例与引用标准号',
+            ))
+        if 'hide_past_cases' in active_rule_set:
+            s1_manual.append(_add_manual(
+                'sec_cover',
+                '历史业绩案例匿名复核',
+                '保守清洗策略不自动篡改历史业绩正文，请人工核查已改为泛化指代',
+                '将过往客户全称替换为“某同类大型项目”',
+            ))
     if not extracted_code:
         s1_manual.append(_add_manual('sec_cover', '招标项目编号', '未在招标前文正则命中明确项目编号', '请对照招标公告人工补填'))
     if open_date:
         pass
     else:
         s1_manual.append(_add_manual('sec_cover', '开标日期', '未提取到明确开标日期', '请对照招标公告人工补填'))
+
+    bidder_cell_val = (
+        '[暗标模式已隐藏：不得出现投标人名称或公章标识]'
+        if (blind_bid_mode and 'hide_bidder_name' in active_rule_set)
+        else '[待人工填报：投标人法定全称（加盖公章）]'
+    )
+    rep_cell_val = (
+        '[暗标模式已隐藏：不得出现人员真实姓名或签字]'
+        if (blind_bid_mode and 'hide_person_name' in active_rule_set)
+        else '[待人工填报：签字或盖章]'
+    )
 
     sec_cover = BlueprintSection(
         section_id='sec_cover',
@@ -1038,15 +1196,15 @@ def compose_bid_blueprint(
         fill_mode='deterministic',
         tender_requirements=[],
         content_blocks=[
-            {'kind': 'meta', 'label': '项目名称', 'value': project_name, 'highlight': False},
-            {'kind': 'meta', 'label': '项目编号', 'value': project_code, 'highlight': extracted_code is None},
-            {'kind': 'meta', 'label': '采购人/招标人', 'value': buyer_name, 'highlight': buyer_name.startswith('[待人工')},
+            {'kind': 'meta', 'label': '项目名称', 'value': _san(project_name), 'highlight': False},
+            {'kind': 'meta', 'label': '项目编号', 'value': _san(project_code), 'highlight': extracted_code is None},
+            {'kind': 'meta', 'label': '采购人/招标人', 'value': _san(buyer_name), 'highlight': buyer_name.startswith('[待人工')},
             {'kind': 'meta', 'label': '分包信息', 'value': f"第 {package_no} 包" if package_no else '整包/默认包', 'highlight': False},
             {'kind': 'meta', 'label': '开标日期', 'value': open_date or '[待人工核对：开标日期]', 'highlight': open_date is None},
             {'kind': 'meta', 'label': '最高限价参考', 'value': f"{formatted_cap} 元" if formatted_cap else '[待人工核对：招标控制价]', 'highlight': formatted_cap is None},
-            {'kind': 'placeholder', 'label': '投标人名称（盖章）', 'value': '[待人工填报：投标人法定全称（加盖公章）]', 'highlight': True},
-            {'kind': 'placeholder', 'label': '法定代表人或委托代理人', 'value': '[待人工填报：签字或盖章]', 'highlight': True},
-            {'kind': 'paragraph', 'text': f"致 {buyer_name}：我方已全面研读《{project_name}》招标文件及全部补充澄清通知，充分理解并承诺遵守招标文件全部实质性条款要求。本项目投标有效期为：[待人工填报，须不少于招标文件规定天数]。", 'highlight': True},
+            {'kind': 'placeholder', 'label': '投标人名称（盖章）', 'value': bidder_cell_val, 'highlight': not blind_bid_mode},
+            {'kind': 'placeholder', 'label': '法定代表人或委托代理人', 'value': rep_cell_val, 'highlight': not blind_bid_mode},
+            {'kind': 'paragraph', 'text': _san(f"致 {buyer_name}：我方已全面研读《{project_name}》招标文件及全部补充澄清通知，充分理解并承诺遵守招标文件全部实质性条款要求。本项目投标有效期为：[待人工填报，须不少于招标文件规定天数]。"), 'highlight': not blind_bid_mode},
         ],
         needs_manual_items=s1_manual,
         source_refs=[{'file': t_path.name, 'open_date_source': open_date_source}],
@@ -1072,36 +1230,38 @@ def compose_bid_blueprint(
     s2_blocks: list[dict[str, Any]] = []
     s2_manual: list[dict[str, Any]] = []
     for mc in matched_certs:
-        c_name = str(mc.get('cert_name') or '')
+        c_name = _san(mc.get('cert_name') or '')
         status = str(mc.get('ledger_status') or 'not_in_ledger')
         best = mc.get('matched_cert') or {}
-        req_roles = roles_by_name.get(normalize_zh(c_name)) or [mc.get('requirement_level', 'bonus')]
+        req_roles = roles_by_name.get(normalize_zh(str(mc.get('cert_name') or ''))) or [mc.get('requirement_level', 'bonus')]
         role_label = _format_cert_roles_label(req_roles, str(mc.get('requirement_level') or 'bonus'))
-        att_path = _lookup_cert_attachment_path(best, ledger_certs)
-        has_img = _resolve_embeddable_image_path(att_path) is not None
+        att_path = None if hide_logo_media else _lookup_cert_attachment_path(best, ledger_certs)
+        has_img = False if hide_logo_media else (_resolve_embeddable_image_path(att_path) is not None)
 
         if status == 'valid':
             validity = '长期有效' if best.get('is_long_term') else f"有效期至 {best.get('valid_until')}"
-            cert_no = best.get('cert_no') or '见原件'
-            if has_img:
+            cert_no = '[暗标模式已隐去证号]' if (blind_bid_mode and ('hide_bidder_name' in active_rule_set or 'hide_external_project' in active_rule_set)) else (best.get('cert_no') or '见原件')
+            if hide_logo_media:
+                att_tip = '暗标模式已隐去原件扫描图与 Logo 附件（改用纯文字清单响应）'
+            elif has_img:
                 att_tip = f"已关联台账原件扫描图《{best.get('attachment_name')}》（导出时已自动嵌入附页）"
             elif best.get('has_attachment'):
                 att_tip = f"已关联台账原件《{best.get('attachment_name')}》（可从规则库下载插入）"
             else:
                 att_tip = '[待人工补充：台账未附扫描件，请线下插入原件]'
-            status_text = f"台账有效（证号：{cert_no}，{validity}）· {att_tip}"
-            highlight = not bool(best.get('has_attachment'))
+            status_text = _san(f"台账有效（证号：{cert_no}，{validity}）· {att_tip}")
+            highlight = (not blind_bid_mode) and (not bool(best.get('has_attachment')))
         elif status == 'expiring_soon':
-            status_text = f"[预警：证照将于 {best.get('valid_until')} 临期（距开标基准剩余 {best.get('days_remaining')} 天），请确认续期]"
-            highlight = True
+            status_text = _san(f"[预警：证照将于 {best.get('valid_until')} 临期（距开标基准剩余 {best.get('days_remaining')} 天），请确认续期]")
+            highlight = not blind_bid_mode
             s2_manual.append(_add_manual('sec_qual', f"临期证照：{c_name}", status_text, '请核对开标日是否在有效期内或换发新证'))
         elif status == 'expired':
-            status_text = f"[红线预警：台账证照已于 {best.get('valid_until')} 过期，请立即更新]"
-            highlight = True
+            status_text = _san(f"[红线预警：台账证照已于 {best.get('valid_until')} 过期，请立即更新]")
+            highlight = not blind_bid_mode
             s2_manual.append(_add_manual('sec_qual', f"过期证照：{c_name}", status_text, '过期证照将直接触发资格废标，请立即补传新证'))
         else:
             status_text = '[台账缺失，请补充上传：未在企业证照台账匹配到该项]'
-            highlight = True
+            highlight = not blind_bid_mode
             s2_manual.append(_add_manual('sec_qual', f"缺失证照：{c_name}", '企业台账暂无此证照记录', '请前往「废标规则与证照底表」补录并粘贴原件扫描件'))
 
         s2_blocks.append({
@@ -1112,12 +1272,12 @@ def compose_bid_blueprint(
             'role_label': role_label,
             'matched_cert_id': best.get('id'),
             'ledger_status': status,
-            'cert_no': best.get('cert_no'),
+            'cert_no': None if hide_logo_media else best.get('cert_no'),
             'valid_until': '长期有效' if best.get('is_long_term') else best.get('valid_until'),
             'is_long_term': bool(best.get('is_long_term', False)),
-            'attachment_name': best.get('attachment_name'),
+            'attachment_name': None if hide_logo_media else best.get('attachment_name'),
             'attachment_path': att_path,
-            'has_attachment': bool(best.get('has_attachment', False)),
+            'has_attachment': False if hide_logo_media else bool(best.get('has_attachment', False)),
             'has_embedded_image': has_img,
             'display_status': status_text,
             'quote': mc.get('quote', ''),
@@ -1128,14 +1288,14 @@ def compose_bid_blueprint(
     if not matched_certs:
         s2_manual.append(_add_manual('sec_qual', '资格文件核对', '未自动识别出细分证照清单，请人工核对招标书资格审查表', '对照招标文件第三章资格审查要求逐项附证'))
         for raw_c in ledger_certs or []:
-            c_name = str(_obj_field(raw_c, 'cert_name', '') or '').strip()
+            c_name = _san(_obj_field(raw_c, 'cert_name', '') or '').strip()
             if not c_name:
                 continue
             is_long = bool(_obj_field(raw_c, 'is_long_term', False))
             vu = _obj_field(raw_c, 'valid_until')
             vu_str = '长期有效' if is_long else (vu.isoformat() if hasattr(vu, 'isoformat') else str(vu or ''))
-            att_p = str(_obj_field(raw_c, 'attachment_path') or '').strip() or None
-            has_img = _resolve_embeddable_image_path(att_p) is not None
+            att_p = None if hide_logo_media else (str(_obj_field(raw_c, 'attachment_path') or '').strip() or None)
+            has_img = False if hide_logo_media else (_resolve_embeddable_image_path(att_p) is not None)
             s2_blocks.append({
                 'kind': 'cert_row',
                 'cert_name': c_name,
@@ -1144,14 +1304,14 @@ def compose_bid_blueprint(
                 'role_label': '台账备查项',
                 'matched_cert_id': _obj_field(raw_c, 'id'),
                 'ledger_status': 'valid' if is_long else 'in_ledger',
-                'cert_no': _obj_field(raw_c, 'cert_no'),
+                'cert_no': None if hide_logo_media else _obj_field(raw_c, 'cert_no'),
                 'valid_until': vu_str,
                 'is_long_term': is_long,
-                'attachment_name': _obj_field(raw_c, 'attachment_name'),
+                'attachment_name': None if hide_logo_media else _obj_field(raw_c, 'attachment_name'),
                 'attachment_path': att_p,
-                'has_attachment': bool(att_p or _obj_field(raw_c, 'has_attachment')),
+                'has_attachment': False if hide_logo_media else bool(att_p or _obj_field(raw_c, 'has_attachment')),
                 'has_embedded_image': has_img,
-                'display_status': f"企业台账备查（{vu_str}）",
+                'display_status': _san(f"企业台账备查（{vu_str}）" + (" · 暗标已隐去原件图片" if hide_logo_media else '')),
                 'highlight': False,
             })
 
@@ -1280,13 +1440,20 @@ def compose_bid_blueprint(
             skill_name=skill_name,
             skill_instructions=skill_instructions,
             allowed_context=allowed_guard_text,
+            blind_prompt_note=blind_prompt_note,
             cancel_check=cancel_check,
         )
         for r in s4_blocks:
             seq_no = r['seq']
             if seq_no in drafted_dev:
-                r['bid_response'] = f"{drafted_dev[seq_no]} [AI草稿·待确认]"
+                r['bid_response'] = _san(f"{drafted_dev[seq_no]} [AI草稿·待确认]")
                 r['deviation'] = '无偏离（AI草稿·待核对）'
+
+    if blind_bid_mode:
+        for r in s4_blocks:
+            r['bid_response'] = _san(r.get('bid_response'))
+            if clean_custom_words:
+                r['tender_requirement'] = _san(r.get('tender_requirement'))
 
     sec_deviation = BlueprintSection(
         section_id='sec_deviation',
@@ -1377,6 +1544,7 @@ def compose_bid_blueprint(
             skill_name=skill_name,
             skill_instructions=skill_instructions,
             skill_layout=skill_layout,
+            blind_prompt_note=blind_prompt_note,
         )
         if planned:
             planned_chapters = planned
@@ -1403,6 +1571,7 @@ def compose_bid_blueprint(
                     skill_instructions=skill_instructions,
                     skill_layout=skill_layout,
                     allowed_context_for_guard=allowed_guard_text,
+                    blind_prompt_note=blind_prompt_note,
                     cancel_check=cancel_check,
                 )
                 return ch_item['chapter_id'], res_d
@@ -1481,6 +1650,22 @@ def compose_bid_blueprint(
     else:
         sec_scoring_mode = 'rag_knowledge' if (use_rag and matched_rag_count > 0) else 'outline_stub'
 
+    if blind_bid_mode:
+        for sb in s5_blocks:
+            if sb.get('kind') == 'ai_chapter':
+                sb['title'] = _san(sb.get('title'))
+                sb['paragraphs'] = [_san(p) for p in (sb.get('paragraphs') or [])]
+                tbl = sb.get('table')
+                if isinstance(tbl, dict):
+                    tbl['title'] = _san(tbl.get('title'))
+                    tbl['headers'] = [_san(h) for h in (tbl.get('headers') or [])]
+                    tbl['rows'] = [[_san(c) for c in row] for row in (tbl.get('rows') or [])]
+            elif sb.get('kind') == 'scoring_topic':
+                sb['sub_outline'] = [_san(ln) for ln in (sb.get('sub_outline') or [])]
+            for sn in sb.get('reference_snippets') or []:
+                sn['snippet'] = _san(sn.get('snippet'))
+                sn['notice'] = _san(sn.get('notice'))
+
     sec_scoring = BlueprintSection(
         section_id='sec_scoring',
         title='第五部分 技术与商务实施方案',
@@ -1495,7 +1680,7 @@ def compose_bid_blueprint(
     # ── Section 6: 人工待填项汇总与台账备查附录 ──────────────────────────────
     ledger_refs: list[dict[str, Any]] = []
     for raw_c in ledger_certs or []:
-        c_name = str(_obj_field(raw_c, 'cert_name', '') or '').strip()
+        c_name = _san(_obj_field(raw_c, 'cert_name', '') or '').strip()
         if not c_name:
             continue
         is_long = bool(_obj_field(raw_c, 'is_long_term', False))
@@ -1504,11 +1689,11 @@ def compose_bid_blueprint(
         ledger_refs.append({
             'kind': 'ledger_appendix_row',
             'cert_name': c_name,
-            'cert_no': _obj_field(raw_c, 'cert_no') or '—',
+            'cert_no': '[暗标已隐去]' if hide_logo_media else (_obj_field(raw_c, 'cert_no') or '—'),
             'valid_until': vu_str,
             'is_long_term': is_long,
-            'has_attachment': bool(_obj_field(raw_c, 'attachment_path') or _obj_field(raw_c, 'has_attachment')),
-            'attachment_name': _obj_field(raw_c, 'attachment_name') or '—',
+            'has_attachment': False if hide_logo_media else bool(_obj_field(raw_c, 'attachment_path') or _obj_field(raw_c, 'has_attachment')),
+            'attachment_name': '暗标已隐去附件' if hide_logo_media else (_obj_field(raw_c, 'attachment_name') or '—'),
         })
 
     sec_appendix = BlueprintSection(
@@ -1545,6 +1730,10 @@ def compose_bid_blueprint(
             matched_indicator_count > 0
             or (provider is not None and (hasattr(provider, 'target_lines') or hasattr(provider, '_providers')))
         ),
+        'blind_bid_applied': bool(blind_bid_mode),
+        'blind_toc_forbidden': bool(blind_toc_forbidden),
+        'blind_rules': list(active_rule_list),
+        'blind_custom_word_count': len(clean_custom_words),
     }
     return BidBlueprint(
         project_name=project_name,
@@ -1565,6 +1754,8 @@ def compose_bid_blueprint(
         manual_checklist=manual_checklist,
         cert_match_summary=cert_summary,
         stats=stats,
+        blind_bid_mode=bool(blind_bid_mode),
+        blind_rules=list(active_rule_list),
     )
 
 
@@ -1578,6 +1769,44 @@ def _hex_to_rgb(hex_str: str, fallback: RGBColor = _COLOR_NAVY) -> RGBColor:
         return fallback
 
 
+_COLOR_BLACK = RGBColor(0x00, 0x00, 0x00)
+_BLIND_STRIP_RPR_TAGS = (
+    qn('w:b'),
+    qn('w:bCs'),
+    qn('w:i'),
+    qn('w:iCs'),
+    qn('w:u'),
+    qn('w:highlight'),
+    qn('w:shadow'),
+    qn('w:outline'),
+    qn('w:emboss'),
+    qn('w:imprint'),
+)
+
+
+def _strip_docx_ooxml_special_styles(doc: Document) -> None:
+    """E43 · 彻底剥离 word/document.xml 与 word/styles.xml 中的底纹/粗斜体/下划线/高亮/彩色标记。"""
+    roots = [doc.element.body, doc.styles.element]
+    for root in roots:
+        if root is None:
+            continue
+        for shd in list(root.iter(qn('w:shd'))):
+            parent = shd.getparent()
+            if parent is not None:
+                parent.remove(shd)
+        for tag in _BLIND_STRIP_RPR_TAGS:
+            for el in list(root.iter(tag)):
+                parent = el.getparent()
+                if parent is not None:
+                    parent.remove(el)
+        for col in list(root.iter(qn('w:color'))):
+            col.set(qn('w:val'), '000000')
+            for attr in ('themeColor', 'themeShade', 'themeTint'):
+                qname = qn(f'w:{attr}')
+                if qname in col.attrib:
+                    del col.attrib[qname]
+
+
 def _set_run_font(
     run,
     *,
@@ -1585,6 +1814,7 @@ def _set_run_font(
     size_pt: float = 11.5,
     bold: bool = False,
     color: Optional[RGBColor] = None,
+    plain_blind: bool = False,
 ) -> None:
     run.font.name = name_zh
     rPr = run._r.get_or_add_rPr()
@@ -1594,9 +1824,16 @@ def _set_run_font(
         rPr.append(rFonts)
     rFonts.set(qn('w:eastAsia'), name_zh)
     run.font.size = Pt(size_pt)
-    run.bold = bold
-    if color is not None:
-        run.font.color.rgb = color
+    if plain_blind:
+        run.bold = None
+        run.italic = None
+        run.underline = None
+        run.font.highlight_color = None
+        run.font.color.rgb = _COLOR_BLACK
+    else:
+        run.bold = bold
+        if color is not None:
+            run.font.color.rgb = color
 
 
 def _apply_para_spacing(p, *, line_spacing: float = 1.35, space_before: int = 2, space_after: int = 5) -> None:
@@ -1665,14 +1902,15 @@ def _add_styled_paragraph(
     font_size: float = 11.0,
     line_spacing: float = 1.35,
     first_line_indent_pt: float = 0.0,
+    plain_blind: bool = False,
 ) -> None:
     p = doc.add_paragraph()
     _apply_para_spacing(p, line_spacing=line_spacing)
     if first_line_indent_pt > 0:
         p.paragraph_format.first_line_indent = Pt(first_line_indent_pt)
     run = p.add_run(text)
-    _set_run_font(run, name_zh=font_zh, size_pt=font_size, bold=bold, color=color)
-    if highlight_manual:
+    _set_run_font(run, name_zh=font_zh, size_pt=font_size, bold=bold, color=color, plain_blind=plain_blind)
+    if highlight_manual and not plain_blind:
         run.font.highlight_color = WD_COLOR_INDEX.YELLOW
 
 
@@ -1683,20 +1921,26 @@ def _add_doc_heading(
     level: int,
     heading_font_zh: str,
     accent_rgb: RGBColor,
+    plain_blind: bool = False,
 ) -> None:
     h = doc.add_heading('', level=level)
     _apply_para_spacing(h, line_spacing=1.2, space_before=10 if level == 1 else 6, space_after=4)
     r = h.add_run(text)
     sz = 15.0 if level == 1 else (12.5 if level == 2 else 11.5)
-    _set_run_font(r, name_zh=heading_font_zh, size_pt=sz, bold=True, color=accent_rgb)
+    _set_run_font(r, name_zh=heading_font_zh, size_pt=sz, bold=not plain_blind, color=accent_rgb, plain_blind=plain_blind)
 
 
 def export_composed_bid_docx(
     blueprint: BidBlueprint | dict[str, Any],
     output_path: str | Path,
 ) -> Path:
-    """按 Skill `skill_layout` 规范渲染独立封面 + 原生目录/标题 + 洁净标书正文 `.docx`。"""
+    """按 Skill `skill_layout` 规范渲染独立封面 + 原生目录/标题 + 洁净标书正文 `.docx`（支持 E43 暗标素颜导出）。"""
     bp = blueprint.to_dict() if isinstance(blueprint, BidBlueprint) else dict(blueprint)
+    is_blind = bool(bp.get('blind_bid_mode'))
+    blind_rules_set = set(bp.get('blind_rules') or (_BLIND_RULE_KEYS if is_blind else ()))
+    blind_toc_forbidden = bool((bp.get('stats') or {}).get('blind_toc_forbidden')) if is_blind else False
+    hide_media = is_blind and ('hide_logo_media' in blind_rules_set)
+
     project_name = str(bp.get('project_name') or '拟投标项目')
     project_code = str(bp.get('project_code') or '—')
     buyer_name = str(bp.get('buyer_name') or '—')
@@ -1707,95 +1951,129 @@ def export_composed_bid_docx(
         layout['append_checklist_at_end'] = bool(bp['skill_layout']['append_checklist_at_end'])
 
     font_zh = str(layout['font_zh'])
-    heading_font = str(layout['heading_font_zh'])
+    heading_font = font_zh if is_blind else str(layout['heading_font_zh'])
     font_size = float(layout['font_size_pt'])
     line_spacing = float(layout['line_spacing'])
-    accent_rgb = _hex_to_rgb(str(layout['accent_color_hex']))
+    accent_rgb = _COLOR_BLACK if is_blind else _hex_to_rgb(str(layout['accent_color_hex']))
     hdr_bg = str(layout['table_header_bg'])
     cover_style = str(layout['cover_style'])
+
+    def _run(run, *, name_zh: str = font_zh, size_pt: float = 10.5, bold: bool = False, color: Optional[RGBColor] = None) -> None:
+        _set_run_font(run, name_zh=name_zh, size_pt=size_pt, bold=bold, color=color, plain_blind=is_blind)
+
+    def _shade(cell, fill_hex: str) -> None:
+        if not is_blind:
+            _shade_cell(cell, fill_hex)
 
     doc = Document()
     normal_style = doc.styles['Normal']
     normal_style.font.name = font_zh
     normal_style.font.size = Pt(font_size)
+    if is_blind:
+        normal_style.font.color.rgb = _COLOR_BLACK
+        for st_name in ('Heading 1', 'Heading 2', 'Heading 3'):
+            if st_name in doc.styles:
+                st = doc.styles[st_name]
+                st.font.name = font_zh
+                st.font.bold = False
+                st.font.italic = False
+                st.font.underline = False
+                st.font.color.rgb = _COLOR_BLACK
 
-    # 页边距与不同首页设置（封面不显示页眉页脚）
+    # 页边距与页眉页脚设置（暗标模式清空全部页眉页脚）
     for sec in doc.sections:
         sec.top_margin = Inches(0.95)
         sec.bottom_margin = Inches(0.9)
         sec.left_margin = Inches(1.0)
         sec.right_margin = Inches(1.0)
-        sec.different_first_page_header_footer = True
+        if is_blind:
+            sec.different_first_page_header_footer = False
+            for p in list(sec.header.paragraphs):
+                p.text = ''
+            for p in list(sec.footer.paragraphs):
+                p.text = ''
+        else:
+            sec.different_first_page_header_footer = True
 
-        hdr = sec.header.paragraphs[0] if sec.header.paragraphs else sec.header.add_paragraph()
-        hdr.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        r_hdr = hdr.add_run(f"{project_name} · 投标文件（初稿）")
-        _set_run_font(r_hdr, name_zh=font_zh, size_pt=8.5, color=_COLOR_MUTED)
+            hdr = sec.header.paragraphs[0] if sec.header.paragraphs else sec.header.add_paragraph()
+            hdr.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            r_hdr = hdr.add_run(f"{project_name} · 投标文件（初稿）")
+            _set_run_font(r_hdr, name_zh=font_zh, size_pt=8.5, color=_COLOR_MUTED)
 
-        ftr = sec.footer.paragraphs[0] if sec.footer.paragraphs else sec.footer.add_paragraph()
-        ftr.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r_ftr = ftr.add_run("请结合招标文件终核报价、业绩证明及签章后正式封标提交")
-        _set_run_font(r_ftr, name_zh=font_zh, size_pt=8.5, color=_COLOR_MUTED)
+            ftr = sec.footer.paragraphs[0] if sec.footer.paragraphs else sec.footer.add_paragraph()
+            ftr.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r_ftr = ftr.add_run("请结合招标文件终核报价、业绩证明及签章后正式封标提交")
+            _set_run_font(r_ftr, name_zh=font_zh, size_pt=8.5, color=_COLOR_MUTED)
 
-    # ── 1. 独立居中封面页（按 cover_style 动态控制视觉）─────────────────────
-    top_spacer = doc.add_paragraph()
-    _apply_para_spacing(top_spacer, space_before=18, space_after=12)
-    top_spacer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    badge_txt = {
-        'tech_modern': 'TECHNICAL & COMMERCIAL PROPOSAL',
-        'navy_business': '正 式 投 标 文 件（商 务 及 技 术 稿）',
-        'gov_clean': '政 府 采 购 投 标 文 件（初 稿）',
-    }.get(cover_style, '投 标 文 件（初 稿）')
-    r_badge = top_spacer.add_run(badge_txt)
-    _set_run_font(r_badge, name_zh=heading_font, size_pt=11, bold=True, color=accent_rgb)
+    # ── 1. 独立居中封面页（暗标模式跳过装饰性封面与底纹表格）─────────────────
+    if is_blind:
+        _add_doc_heading(
+            doc,
+            f"{project_name} 投标文件（暗标编制稿）",
+            level=1,
+            heading_font_zh=heading_font,
+            accent_rgb=accent_rgb,
+            plain_blind=True,
+        )
+    else:
+        top_spacer = doc.add_paragraph()
+        _apply_para_spacing(top_spacer, space_before=18, space_after=12)
+        top_spacer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        badge_txt = {
+            'tech_modern': 'TECHNICAL & COMMERCIAL PROPOSAL',
+            'navy_business': '正 式 投 标 文 件（商 务 及 技 术 稿）',
+            'gov_clean': '政 府 采 购 投 标 文 件（初 稿）',
+        }.get(cover_style, '投 标 文 件（初 稿）')
+        r_badge = top_spacer.add_run(badge_txt)
+        _set_run_font(r_badge, name_zh=heading_font, size_pt=11, bold=True, color=accent_rgb)
 
-    p_proj = doc.add_paragraph()
-    p_proj.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _apply_para_spacing(p_proj, line_spacing=1.35, space_before=16, space_after=8)
-    r_proj = p_proj.add_run(project_name)
-    _set_run_font(r_proj, name_zh=heading_font, size_pt=22, bold=True, color=accent_rgb)
+        p_proj = doc.add_paragraph()
+        p_proj.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _apply_para_spacing(p_proj, line_spacing=1.35, space_before=16, space_after=8)
+        r_proj = p_proj.add_run(project_name)
+        _set_run_font(r_proj, name_zh=heading_font, size_pt=22, bold=True, color=accent_rgb)
 
-    p_sub = doc.add_paragraph()
-    p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _apply_para_spacing(p_sub, space_before=4, space_after=24)
-    r_sub_title = p_sub.add_run('投 标 文 件')
-    _set_run_font(r_sub_title, name_zh=heading_font, size_pt=26, bold=True, color=_COLOR_NAVY)
+        p_sub = doc.add_paragraph()
+        p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _apply_para_spacing(p_sub, space_before=4, space_after=24)
+        r_sub_title = p_sub.add_run('投 标 文 件')
+        _set_run_font(r_sub_title, name_zh=heading_font, size_pt=26, bold=True, color=_COLOR_NAVY)
 
-    cover_tbl = doc.add_table(rows=5, cols=2)
-    cover_tbl.style = 'Table Grid'
-    cover_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-    cover_pairs = (
-        ('项目编号', project_code),
-        ('采购人 / 招标人', buyer_name),
-        ('开标日期', open_date),
-        ('投标人名称（盖章）', '[待人工填报：投标单位法定全称（加盖公章）]'),
-        ('法定代表人或授权代表', '[待人工填报：签字或盖章]'),
-    )
-    for idx, (k, v) in enumerate(cover_pairs):
-        c0, c1 = cover_tbl.rows[idx].cells[0], cover_tbl.rows[idx].cells[1]
-        _style_table_cell(c0, width_in=2.1)
-        _style_table_cell(c1, width_in=4.2)
-        if cover_style != 'gov_clean':
-            _shade_cell(c0, hdr_bg)
-        r0 = c0.paragraphs[0].add_run(k)
-        _set_run_font(r0, name_zh=heading_font, size_pt=10.5, bold=True, color=_COLOR_NAVY)
-        r1 = c1.paragraphs[0].add_run(v)
-        is_ph = v.startswith('[待人工')
-        _set_run_font(r1, name_zh=font_zh, size_pt=10.5, bold=is_ph, color=_COLOR_RED if is_ph else _COLOR_NAVY)
+        cover_tbl = doc.add_table(rows=5, cols=2)
+        cover_tbl.style = 'Table Grid'
+        cover_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+        cover_pairs = (
+            ('项目编号', project_code),
+            ('采购人 / 招标人', buyer_name),
+            ('开标日期', open_date),
+            ('投标人名称（盖章）', '[待人工填报：投标单位法定全称（加盖公章）]'),
+            ('法定代表人或授权代表', '[待人工填报：签字或盖章]'),
+        )
+        for idx, (k, v) in enumerate(cover_pairs):
+            c0, c1 = cover_tbl.rows[idx].cells[0], cover_tbl.rows[idx].cells[1]
+            _style_table_cell(c0, width_in=2.1)
+            _style_table_cell(c1, width_in=4.2)
+            if cover_style != 'gov_clean':
+                _shade_cell(c0, hdr_bg)
+            r0 = c0.paragraphs[0].add_run(k)
+            _set_run_font(r0, name_zh=heading_font, size_pt=10.5, bold=True, color=_COLOR_NAVY)
+            r1 = c1.paragraphs[0].add_run(v)
+            is_ph = v.startswith('[待人工')
+            _set_run_font(r1, name_zh=font_zh, size_pt=10.5, bold=is_ph, color=_COLOR_RED if is_ph else _COLOR_NAVY)
 
-    p_foot = doc.add_paragraph()
-    p_foot.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _apply_para_spacing(p_foot, space_before=30, space_after=4)
-    r_pf = p_foot.add_run(
-        f"编写风格规范：{bp.get('skill_name', '标准')} ｜ 依据：{bp.get('tender_filename', '')} ｜ {datetime.datetime.now().strftime('%Y-%m-%d')}"
-    )
-    _set_run_font(r_pf, name_zh=font_zh, size_pt=9.5, color=_COLOR_MUTED)
+        p_foot = doc.add_paragraph()
+        p_foot.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _apply_para_spacing(p_foot, space_before=30, space_after=4)
+        r_pf = p_foot.add_run(
+            f"编写风格规范：{bp.get('skill_name', '标准')} ｜ 依据：{bp.get('tender_filename', '')} ｜ {datetime.datetime.now().strftime('%Y-%m-%d')}"
+        )
+        _set_run_font(r_pf, name_zh=font_zh, size_pt=9.5, color=_COLOR_MUTED)
 
-    doc.add_page_break()
+        doc.add_page_break()
 
-    # ── 2. 目录索引页（include_toc=True）────────────────────────────────────
-    if layout.get('include_toc', True):
-        _add_doc_heading(doc, '目  录', level=1, heading_font_zh=heading_font, accent_rgb=accent_rgb)
+    # ── 2. 目录索引页（include_toc=True 且未被暗标禁目录锁定）────────────────
+    if layout.get('include_toc', True) and not blind_toc_forbidden:
+        _add_doc_heading(doc, '目  录', level=1, heading_font_zh=heading_font, accent_rgb=accent_rgb, plain_blind=is_blind)
         p_toc_tip = doc.add_paragraph()
         _insert_toc_field(p_toc_tip)
         _add_styled_paragraph(
@@ -1804,6 +2082,7 @@ def export_composed_bid_docx(
             font_zh=font_zh,
             color=_COLOR_MUTED,
             font_size=9.0,
+            plain_blind=is_blind,
         )
         for sec_data in bp.get('sections') or []:
             if sec_data.get('slot_type') == 'cert_ledger_appendix' and not layout.get('append_checklist_at_end'):
@@ -1815,6 +2094,7 @@ def export_composed_bid_docx(
                 bold=True,
                 color=_COLOR_NAVY,
                 font_size=10.5,
+                plain_blind=is_blind,
             )
             if sec_data.get('slot_type') == 'scoring_response_outline':
                 for b in sec_data.get('content_blocks') or []:
@@ -1825,6 +2105,7 @@ def export_composed_bid_docx(
                             font_zh=font_zh,
                             color=_COLOR_MUTED,
                             font_size=9.5,
+                            plain_blind=is_blind,
                         )
         doc.add_page_break()
 
@@ -1840,6 +2121,7 @@ def export_composed_bid_docx(
             level=1,
             heading_font_zh=heading_font,
             accent_rgb=accent_rgb,
+            plain_blind=is_blind,
         )
         blocks = sec_data.get('content_blocks') or []
 
@@ -1853,18 +2135,18 @@ def export_composed_bid_docx(
                 for i, h_txt in enumerate(headers_kv):
                     c = tbl.rows[0].cells[i]
                     _style_table_cell(c, width_in=2.1 if i == 0 else 4.2)
-                    _shade_cell(c, hdr_bg)
+                    _shade(c, hdr_bg)
                     r = c.paragraphs[0].add_run(h_txt)
-                    _set_run_font(r, name_zh=heading_font, size_pt=10, bold=True, color=_COLOR_NAVY)
+                    _run(r, name_zh=heading_font, size_pt=10, bold=True, color=_COLOR_NAVY)
                 for item in kv_rows:
                     rc = tbl.add_row().cells
                     _style_table_cell(rc[0], width_in=2.1)
                     _style_table_cell(rc[1], width_in=4.2)
                     r0 = rc[0].paragraphs[0].add_run(str(item.get('label') or ''))
-                    _set_run_font(r0, name_zh=font_zh, size_pt=10, bold=True, color=_COLOR_NAVY)
+                    _run(r0, name_zh=font_zh, size_pt=10, bold=True, color=_COLOR_NAVY)
                     r1 = rc[1].paragraphs[0].add_run(str(item.get('value') or ''))
-                    is_hl = bool(item.get('highlight'))
-                    _set_run_font(r1, name_zh=font_zh, size_pt=10, bold=is_hl, color=_COLOR_RED if is_hl else _COLOR_NAVY)
+                    is_hl = bool(item.get('highlight')) and not is_blind
+                    _run(r1, name_zh=font_zh, size_pt=10, bold=is_hl, color=_COLOR_RED if is_hl else _COLOR_NAVY)
                     if is_hl:
                         r1.font.highlight_color = WD_COLOR_INDEX.YELLOW
             for b in blocks:
@@ -1878,6 +2160,7 @@ def export_composed_bid_docx(
                         font_size=font_size,
                         line_spacing=line_spacing,
                         first_line_indent_pt=22.0,
+                        plain_blind=is_blind,
                     )
 
         elif slot_type == 'qualification_checklist':
@@ -1885,10 +2168,15 @@ def export_composed_bid_docx(
             if cert_rows:
                 _add_styled_paragraph(
                     doc,
-                    '以下为本项目所需资格与资质证明总览索引；每项证明材料的独立附页（原件扫描图或标准粘贴装订框）紧随索引表按序号逐一单列，确保满足 A4 全幅清晰审阅要求。',
+                    (
+                        '以下为本项目所需资格与资质证明总览索引（暗标模式已按规则隐去证照原件扫描图与 Logo 标识）。'
+                        if hide_media
+                        else '以下为本项目所需资格与资质证明总览索引；每项证明材料的独立附页（原件扫描图或标准粘贴装订框）紧随索引表按序号逐一单列，确保满足 A4 全幅清晰审阅要求。'
+                    ),
                     font_zh=font_zh,
                     color=_COLOR_MUTED,
                     font_size=9.5,
+                    plain_blind=is_blind,
                 )
                 _add_doc_heading(
                     doc,
@@ -1896,6 +2184,7 @@ def export_composed_bid_docx(
                     level=2,
                     heading_font_zh=heading_font,
                     accent_rgb=accent_rgb,
+                    plain_blind=is_blind,
                 )
                 tbl = doc.add_table(rows=1, cols=6)
                 tbl.style = 'Table Grid'
@@ -1905,13 +2194,13 @@ def export_composed_bid_docx(
                 for i, h in enumerate(headers):
                     c = tbl.rows[0].cells[i]
                     _style_table_cell(c, width_in=col_w[i])
-                    _shade_cell(c, hdr_bg)
+                    _shade(c, hdr_bg)
                     r = c.paragraphs[0].add_run(h)
-                    _set_run_font(r, name_zh=heading_font, size_pt=9.0, bold=True, color=_COLOR_NAVY)
+                    _run(r, name_zh=heading_font, size_pt=9.0, bold=True, color=_COLOR_NAVY)
 
                 resolved_imgs: dict[int, Optional[Path]] = {}
                 for idx, b in enumerate(cert_rows, start=1):
-                    img_p = _resolve_embeddable_image_path(b.get('attachment_path'))
+                    img_p = None if hide_media else _resolve_embeddable_image_path(b.get('attachment_path'))
                     resolved_imgs[idx] = img_p
                     role_txt = str(
                         b.get('role_label')
@@ -1920,16 +2209,16 @@ def export_composed_bid_docx(
                     rc = tbl.add_row().cells
                     for i in range(6):
                         _style_table_cell(rc[i], width_in=col_w[i])
-                    _set_run_font(rc[0].paragraphs[0].add_run(str(idx)), name_zh=font_zh, size_pt=9.0)
-                    _set_run_font(rc[1].paragraphs[0].add_run(str(b.get('cert_name') or '')), name_zh=font_zh, size_pt=9.0)
-                    _set_run_font(rc[2].paragraphs[0].add_run(role_txt), name_zh=font_zh, size_pt=9.0)
+                    _run(rc[0].paragraphs[0].add_run(str(idx)), name_zh=font_zh, size_pt=9.0)
+                    _run(rc[1].paragraphs[0].add_run(str(b.get('cert_name') or '')), name_zh=font_zh, size_pt=9.0)
+                    _run(rc[2].paragraphs[0].add_run(role_txt), name_zh=font_zh, size_pt=9.0)
                     st = str(b.get('ledger_status') or '')
                     r_st = rc[3].paragraphs[0].add_run(str(b.get('display_status') or ''))
                     col_st = _COLOR_GREEN if st == 'valid' else (_COLOR_RED if st in ('expired', 'not_in_ledger') else _COLOR_AMBER)
-                    _set_run_font(r_st, name_zh=font_zh, size_pt=8.8, bold=(st != 'valid'), color=col_st)
-                    _set_run_font(rc[4].paragraphs[0].add_run(f"{b.get('valid_until') or '—'}\n{b.get('cert_no') or ''}".strip()), name_zh=font_zh, size_pt=8.8)
-                    att_flag = '已嵌图' if img_p is not None else ('PDF原件' if b.get('has_attachment') else '待粘贴')
-                    _set_run_font(rc[5].paragraphs[0].add_run(f"见 2.{idx}\n({att_flag})"), name_zh=font_zh, size_pt=8.8)
+                    _run(r_st, name_zh=font_zh, size_pt=8.8, bold=(st != 'valid'), color=col_st)
+                    _run(rc[4].paragraphs[0].add_run(f"{b.get('valid_until') or '—'}\n{b.get('cert_no') or ''}".strip()), name_zh=font_zh, size_pt=8.8)
+                    att_flag = '暗标隐图' if hide_media else ('已嵌图' if img_p is not None else ('PDF原件' if b.get('has_attachment') else '待粘贴'))
+                    _run(rc[5].paragraphs[0].add_run(f"见 2.{idx}\n({att_flag})"), name_zh=font_zh, size_pt=8.8)
 
                 for idx, b in enumerate(cert_rows, start=1):
                     c_title = str(b.get('cert_name') or '证明文件')
@@ -1943,6 +2232,7 @@ def export_composed_bid_docx(
                         level=2,
                         heading_font_zh=heading_font,
                         accent_rgb=accent_rgb,
+                        plain_blind=is_blind,
                     )
                     _add_styled_paragraph(
                         doc,
@@ -1950,10 +2240,11 @@ def export_composed_bid_docx(
                         font_zh=font_zh,
                         color=_COLOR_MUTED,
                         font_size=9.5,
+                        plain_blind=is_blind,
                     )
                     img_p = resolved_imgs.get(idx)
                     inserted_pic = False
-                    if img_p is not None:
+                    if img_p is not None and not hide_media:
                         try:
                             p_pic = doc.add_paragraph()
                             p_pic.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1965,46 +2256,56 @@ def export_composed_bid_docx(
                                 font_zh=font_zh,
                                 color=_COLOR_GREEN,
                                 font_size=9.0,
+                                plain_blind=is_blind,
                             )
                             inserted_pic = True
                         except Exception:
                             inserted_pic = False
 
                     if not inserted_pic:
-                        box_tbl = doc.add_table(rows=1, cols=1)
-                        box_tbl.style = 'Table Grid'
-                        box_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-                        cell = box_tbl.rows[0].cells[0]
-                        if b.get('has_attachment'):
-                            _style_table_cell(cell, pad_v_dxa=260, pad_h_dxa=180, width_in=6.2)
-                            _shade_cell(cell, 'F8FAFC')
-                            p_box = cell.paragraphs[0]
-                            p_box.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            _set_run_font(
-                                p_box.add_run(
-                                    f"【已关联企业台账原件：{b.get('attachment_name') or '已上传附件'}】\n"
-                                    f"本证照非图片格式（如 PDF 原件），请打印导出后按 2.{idx} 位置随正本加盖公章装订。"
-                                ),
-                                name_zh=font_zh,
-                                size_pt=9.5,
-                                color=_COLOR_NAVY,
+                        if hide_media:
+                            _add_styled_paragraph(
+                                doc,
+                                f"[暗标模式纯文字清单占位：{c_title} — 已按暗标规则隐去扫描件图片与企业印章图标]",
+                                font_zh=font_zh,
+                                font_size=9.5,
+                                plain_blind=is_blind,
                             )
                         else:
-                            _style_table_cell(cell, pad_v_dxa=380, pad_h_dxa=180, width_in=6.2)
-                            p_box = cell.paragraphs[0]
-                            p_box.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            _set_run_font(
-                                p_box.add_run(
-                                    f"【{c_title} 原件扫描件 / 复印件粘贴区（附页 2.{idx}）】\n\n"
-                                    f"[待人工补充：请在此处整页粘贴有效期内清晰彩色扫描件或复印件并加盖投标人公章]"
-                                ),
-                                name_zh=font_zh,
-                                size_pt=10.0,
-                                bold=True,
-                                color=_COLOR_AMBER,
-                            )
+                            box_tbl = doc.add_table(rows=1, cols=1)
+                            box_tbl.style = 'Table Grid'
+                            box_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+                            cell = box_tbl.rows[0].cells[0]
+                            if b.get('has_attachment'):
+                                _style_table_cell(cell, pad_v_dxa=260, pad_h_dxa=180, width_in=6.2)
+                                _shade(cell, 'F8FAFC')
+                                p_box = cell.paragraphs[0]
+                                p_box.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                _run(
+                                    p_box.add_run(
+                                        f"【已关联企业台账原件：{b.get('attachment_name') or '已上传附件'}】\n"
+                                        f"本证照非图片格式（如 PDF 原件），请打印导出后按 2.{idx} 位置随正本加盖公章装订。"
+                                    ),
+                                    name_zh=font_zh,
+                                    size_pt=9.5,
+                                    color=_COLOR_NAVY,
+                                )
+                            else:
+                                _style_table_cell(cell, pad_v_dxa=380, pad_h_dxa=180, width_in=6.2)
+                                p_box = cell.paragraphs[0]
+                                p_box.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                _run(
+                                    p_box.add_run(
+                                        f"【{c_title} 原件扫描件 / 复印件粘贴区（附页 2.{idx}）】\n\n"
+                                        f"[待人工补充：请在此处整页粘贴有效期内清晰彩色扫描件或复印件并加盖投标人公章]"
+                                    ),
+                                    name_zh=font_zh,
+                                    size_pt=10.0,
+                                    bold=True,
+                                    color=_COLOR_AMBER,
+                                )
             else:
-                _add_styled_paragraph(doc, '[待人工补充：未提取到明确资格证照，请核对招标文件原文]', font_zh=font_zh, highlight_manual=True)
+                _add_styled_paragraph(doc, '[待人工补充：未提取到明确资格证照，请核对招标文件原文]', font_zh=font_zh, highlight_manual=True, plain_blind=is_blind)
 
         elif slot_type == 'deviation_table':
             dev_rows = [b for b in blocks if b.get('kind') == 'deviation_row']
@@ -2016,23 +2317,23 @@ def export_composed_bid_docx(
                 for i, h in enumerate(('序号', '条款号', '招标实质性要求', '我方响应（初稿）', '偏离状态')):
                     c = tbl.rows[0].cells[i]
                     _style_table_cell(c, width_in=col_w[i])
-                    _shade_cell(c, hdr_bg)
-                    _set_run_font(c.paragraphs[0].add_run(h), name_zh=heading_font, size_pt=9.5, bold=True, color=_COLOR_NAVY)
+                    _shade(c, hdr_bg)
+                    _run(c.paragraphs[0].add_run(h), name_zh=heading_font, size_pt=9.5, bold=True, color=_COLOR_NAVY)
                 for b in dev_rows:
                     rc = tbl.add_row().cells
                     for i in range(5):
                         _style_table_cell(rc[i], width_in=col_w[i])
-                    _set_run_font(rc[0].paragraphs[0].add_run(str(b.get('seq') or '')), name_zh=font_zh, size_pt=9.0)
-                    _set_run_font(rc[1].paragraphs[0].add_run(str(b.get('clause_no') or '')), name_zh=font_zh, size_pt=9.0)
-                    _set_run_font(rc[2].paragraphs[0].add_run(str(b.get('tender_requirement') or '')), name_zh=font_zh, size_pt=9.0)
+                    _run(rc[0].paragraphs[0].add_run(str(b.get('seq') or '')), name_zh=font_zh, size_pt=9.0)
+                    _run(rc[1].paragraphs[0].add_run(str(b.get('clause_no') or '')), name_zh=font_zh, size_pt=9.0)
+                    _run(rc[2].paragraphs[0].add_run(str(b.get('tender_requirement') or '')), name_zh=font_zh, size_pt=9.0)
                     r_resp = rc[3].paragraphs[0].add_run(str(b.get('bid_response') or ''))
-                    is_hl = bool(b.get('highlight')) and '[AI草稿' not in str(b.get('bid_response') or '')
-                    _set_run_font(r_resp, name_zh=font_zh, size_pt=9.0, bold=is_hl, color=_COLOR_AMBER if is_hl else _COLOR_NAVY)
+                    is_hl = bool(b.get('highlight')) and '[AI草稿' not in str(b.get('bid_response') or '') and not is_blind
+                    _run(r_resp, name_zh=font_zh, size_pt=9.0, bold=is_hl, color=_COLOR_AMBER if is_hl else _COLOR_NAVY)
                     if is_hl:
                         r_resp.font.highlight_color = WD_COLOR_INDEX.YELLOW
-                    _set_run_font(rc[4].paragraphs[0].add_run(str(b.get('deviation') or '')), name_zh=font_zh, size_pt=9.0)
+                    _run(rc[4].paragraphs[0].add_run(str(b.get('deviation') or '')), name_zh=font_zh, size_pt=9.0)
             else:
-                _add_styled_paragraph(doc, '[待人工补充：请结合第四章技术与商务要求核填偏离表]', font_zh=font_zh, highlight_manual=True)
+                _add_styled_paragraph(doc, '[待人工补充：请结合第四章技术与商务要求核填偏离表]', font_zh=font_zh, highlight_manual=True, plain_blind=is_blind)
 
         elif slot_type == 'scoring_response_outline':
             for b in blocks:
@@ -2043,6 +2344,7 @@ def export_composed_bid_docx(
                         level=2,
                         heading_font_zh=heading_font,
                         accent_rgb=accent_rgb,
+                        plain_blind=is_blind,
                     )
                     covered = b.get('covered_topics') or []
                     if covered:
@@ -2052,6 +2354,7 @@ def export_composed_bid_docx(
                             font_zh=font_zh,
                             color=_COLOR_MUTED,
                             font_size=9.0,
+                            plain_blind=is_blind,
                         )
                     for para_txt in _strip_duplicate_leading_title(
                         list(b.get('paragraphs') or []),
@@ -2066,11 +2369,20 @@ def export_composed_bid_docx(
                             line_spacing=line_spacing,
                             first_line_indent_pt=22.0,
                             color=_COLOR_NAVY,
+                            plain_blind=is_blind,
                         )
                     ai_tbl = b.get('table')
                     if isinstance(ai_tbl, dict) and ai_tbl.get('headers') and ai_tbl.get('rows'):
                         if ai_tbl.get('title'):
-                            _add_styled_paragraph(doc, f"表：{ai_tbl['title']}", font_zh=heading_font, bold=True, font_size=10.0, color=accent_rgb)
+                            _add_styled_paragraph(
+                                doc,
+                                f"表：{ai_tbl['title']}",
+                                font_zh=heading_font,
+                                bold=True,
+                                font_size=10.0,
+                                color=accent_rgb,
+                                plain_blind=is_blind,
+                            )
                         hdrs = list(ai_tbl['headers'])
                         t_doc = doc.add_table(rows=1, cols=len(hdrs))
                         t_doc.style = 'Table Grid'
@@ -2079,21 +2391,21 @@ def export_composed_bid_docx(
                         for idx, ht in enumerate(hdrs):
                             c = t_doc.rows[0].cells[idx]
                             _style_table_cell(c, width_in=col_unit)
-                            _shade_cell(c, hdr_bg)
-                            _set_run_font(c.paragraphs[0].add_run(str(ht)), name_zh=heading_font, size_pt=9.5, bold=True, color=_COLOR_NAVY)
+                            _shade(c, hdr_bg)
+                            _run(c.paragraphs[0].add_run(str(ht)), name_zh=heading_font, size_pt=9.5, bold=True, color=_COLOR_NAVY)
                         for r_vals in ai_tbl['rows']:
                             rc = t_doc.add_row().cells
                             for idx, val in enumerate(r_vals[:len(hdrs)]):
                                 _style_table_cell(rc[idx], width_in=col_unit)
-                                _set_run_font(rc[idx].paragraphs[0].add_run(str(val)), name_zh=font_zh, size_pt=9.5, color=_COLOR_NAVY)
+                                _run(rc[idx].paragraphs[0].add_run(str(val)), name_zh=font_zh, size_pt=9.5, color=_COLOR_NAVY)
                     for sn in b.get('reference_snippets') or []:
                         tbl = doc.add_table(rows=1, cols=1)
                         tbl.style = 'Table Grid'
                         cell = tbl.rows[0].cells[0]
                         _style_table_cell(cell, width_in=6.2)
-                        _shade_cell(cell, 'F8FAFC')
-                        _set_run_font(cell.paragraphs[0].add_run(str(sn.get('notice') or '') + '\n'), name_zh=font_zh, size_pt=9.0, bold=True, color=_COLOR_AMBER)
-                        _set_run_font(cell.add_paragraph().add_run(str(sn.get('snippet') or '')), name_zh=font_zh, size_pt=9.0, color=_COLOR_MUTED)
+                        _shade(cell, 'F8FAFC')
+                        _run(cell.paragraphs[0].add_run(str(sn.get('notice') or '') + '\n'), name_zh=font_zh, size_pt=9.0, bold=True, color=_COLOR_AMBER)
+                        _run(cell.add_paragraph().add_run(str(sn.get('snippet') or '')), name_zh=font_zh, size_pt=9.0, color=_COLOR_MUTED)
                     continue
 
                 if b.get('kind') != 'scoring_topic':
@@ -2104,6 +2416,7 @@ def export_composed_bid_docx(
                     level=2,
                     heading_font_zh=heading_font,
                     accent_rgb=accent_rgb,
+                    plain_blind=is_blind,
                 )
                 if b.get('tender_quote'):
                     _add_styled_paragraph(
@@ -2112,6 +2425,7 @@ def export_composed_bid_docx(
                         font_zh=font_zh,
                         color=_COLOR_MUTED,
                         font_size=9.5,
+                        plain_blind=is_blind,
                     )
                 for line in b.get('sub_outline') or []:
                     _add_styled_paragraph(
@@ -2121,23 +2435,31 @@ def export_composed_bid_docx(
                         highlight_manual='[待人工补充' in line,
                         font_size=font_size,
                         line_spacing=line_spacing,
+                        plain_blind=is_blind,
                     )
                 for sn in b.get('reference_snippets') or []:
                     tbl = doc.add_table(rows=1, cols=1)
                     tbl.style = 'Table Grid'
                     cell = tbl.rows[0].cells[0]
                     _style_table_cell(cell, width_in=6.2)
-                    _shade_cell(cell, 'F8FAFC')
+                    _shade(cell, 'F8FAFC')
                     p_notice = cell.paragraphs[0]
-                    _set_run_font(p_notice.add_run(str(sn.get('notice') or '') + '\n'), name_zh=font_zh, size_pt=9.0, bold=True, color=_COLOR_AMBER)
+                    _run(p_notice.add_run(str(sn.get('notice') or '') + '\n'), name_zh=font_zh, size_pt=9.0, bold=True, color=_COLOR_AMBER)
                     p_snip = cell.add_paragraph()
-                    _set_run_font(p_snip.add_run(str(sn.get('snippet') or '')), name_zh=font_zh, size_pt=9.0, color=_COLOR_MUTED)
+                    _run(p_snip.add_run(str(sn.get('snippet') or '')), name_zh=font_zh, size_pt=9.0, color=_COLOR_MUTED)
 
         elif slot_type == 'cert_ledger_appendix':
             for b in blocks:
                 if b.get('kind') == 'manual_summary':
                     items = b.get('items') or []
-                    _add_styled_paragraph(doc, f"共 {len(items)} 项待人工补充/核对确认：", font_zh=heading_font, bold=True, color=_COLOR_RED if items else _COLOR_GREEN)
+                    _add_styled_paragraph(
+                        doc,
+                        f"共 {len(items)} 项待人工补充/核对确认：",
+                        font_zh=heading_font,
+                        bold=True,
+                        color=_COLOR_RED if items else _COLOR_GREEN,
+                        plain_blind=is_blind,
+                    )
                     for idx, mi in enumerate(items, start=1):
                         _add_styled_paragraph(
                             doc,
@@ -2145,6 +2467,7 @@ def export_composed_bid_docx(
                             font_zh=font_zh,
                             highlight_manual=True,
                             font_size=9.0,
+                            plain_blind=is_blind,
                         )
             ledger_rows = [b for b in blocks if b.get('kind') == 'ledger_appendix_row']
             if ledger_rows:
@@ -2154,14 +2477,17 @@ def export_composed_bid_docx(
                 for i, h in enumerate(('企业台账证照', '证号', '效期类型', '原件附件')):
                     c = tbl.rows[0].cells[i]
                     _style_table_cell(c, width_in=1.55)
-                    _shade_cell(c, hdr_bg)
-                    _set_run_font(c.paragraphs[0].add_run(h), name_zh=heading_font, size_pt=9.5, bold=True)
+                    _shade(c, hdr_bg)
+                    _run(c.paragraphs[0].add_run(h), name_zh=heading_font, size_pt=9.5, bold=True)
                 for lr in ledger_rows:
                     rc = tbl.add_row().cells
-                    _set_run_font(rc[0].paragraphs[0].add_run(str(lr.get('cert_name') or '')), name_zh=font_zh, size_pt=9.0)
-                    _set_run_font(rc[1].paragraphs[0].add_run(str(lr.get('cert_no') or '')), name_zh=font_zh, size_pt=9.0)
-                    _set_run_font(rc[2].paragraphs[0].add_run(str(lr.get('valid_until') or '')), name_zh=font_zh, size_pt=9.0)
-                    _set_run_font(rc[3].paragraphs[0].add_run(str(lr.get('attachment_name') or '')), name_zh=font_zh, size_pt=9.0)
+                    _run(rc[0].paragraphs[0].add_run(str(lr.get('cert_name') or '')), name_zh=font_zh, size_pt=9.0)
+                    _run(rc[1].paragraphs[0].add_run(str(lr.get('cert_no') or '')), name_zh=font_zh, size_pt=9.0)
+                    _run(rc[2].paragraphs[0].add_run(str(lr.get('valid_until') or '')), name_zh=font_zh, size_pt=9.0)
+                    _run(rc[3].paragraphs[0].add_run(str(lr.get('attachment_name') or '')), name_zh=font_zh, size_pt=9.0)
+
+    if is_blind:
+        _strip_docx_ooxml_special_styles(doc)
 
     out_p = Path(output_path)
     out_p.parent.mkdir(parents=True, exist_ok=True)

@@ -459,6 +459,15 @@ function goCertLedger(): void {
   void router.push({ path: '/rules', query: { tab: 'certs' } })
 }
 
+function goComposerBlindMode(): void {
+  const rec = result.value?.blind_bid_info?.recommended_rules || []
+  const q: Record<string, string> = { blind: '1' }
+  if (rec.length > 0) {
+    q.rules = rec.join(',')
+  }
+  void router.push({ path: '/composer', query: q })
+}
+
 onMounted(() => {
   restoreFromSessionStorage()
   window.addEventListener('bidguard-auth-changed', handleAuthChanged)
@@ -670,6 +679,53 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </div>
+
+      <!-- E43：暗标评审信号高危废标红线提醒 + 一键跳 F8 暗标生成 -->
+      <el-alert
+        v-if="result.blind_bid_info?.is_blind_bid"
+        type="error"
+        :closable="false"
+        show-icon
+        class="blind-alert-card"
+        :title="`【暗标红线预警】识别到技术暗标 / 盲评约束（${result.blind_bid_info.requirements.length} 条）— 普通排版或出现单位名称可能一秒废标`"
+      >
+        <div class="blind-alert-body">
+          <div class="blind-alert-flags">
+            <el-tag v-if="result.blind_bid_info.style_forbidden" size="small" type="danger">
+              禁底纹 / 阴影 / 加粗 / 特殊样式
+            </el-tag>
+            <el-tag v-if="result.blind_bid_info.toc_forbidden" size="small" type="danger">
+              禁止设置目录（TOC）
+            </el-tag>
+            <el-tag v-if="result.blind_bid_info.no_images_strict" size="small" type="danger">
+              严格禁出现任何图片
+            </el-tag>
+            <el-tag
+              v-for="rk in result.blind_bid_info.recommended_rules.slice(0, 6)"
+              :key="rk"
+              size="small"
+              type="warning"
+              effect="plain"
+            >
+              建议开启：{{ rk }}
+            </el-tag>
+          </div>
+          <ul class="blind-req-list">
+            <li
+              v-for="(req, idx) in result.blind_bid_info.requirements.slice(0, 4)"
+              :key="`${req.category}-${idx}`"
+            >
+              <b>[{{ req.clause_no || req.category }}{{ req.page ? ` · P${req.page}` : '' }}]</b>
+              {{ req.summary }}：<code>{{ req.quote }}</code>
+            </li>
+          </ul>
+          <div class="blind-alert-actions">
+            <el-button type="danger" size="small" @click="goComposerBlindMode">
+              前往 F8「按暗标生成」（自动剥离身份与特殊样式）
+            </el-button>
+          </div>
+        </div>
+      </el-alert>
 
       <!-- 四张清单切换 Tabs -->
       <div class="bg-panel ext-tabs-panel">
@@ -1155,6 +1211,42 @@ onBeforeUnmount(() => {
   border-left: 4px solid var(--brand);
   color: #1e3a8a;
   font-size: 12.5px;
+}
+
+.blind-alert-card {
+  border-radius: 8px;
+}
+
+.blind-alert-body {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.blind-alert-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.blind-req-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.blind-req-list code {
+  background: rgba(15, 23, 42, 0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.blind-alert-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .ext-summary-strip {

@@ -16,13 +16,17 @@ from sqlalchemy.orm import Session
 from backend.auth import AuthUser, get_current_user, record_audit
 from backend.database import get_db
 from backend.models import CompanyCertificate
-from backend.schemas import ExtractChecklistOut, PrivacyStatsOut
+from backend.schemas import BlindBidInfoOut, ExtractChecklistOut, PrivacyStatsOut
 from backend.worker import resolve_effective_llm_client
 from core.parser import parse_document
 from core.privacy_sanitizer import scan_document_file
 from core.qualification_scanner import match_required_certificates_with_ledger
 from core.response_checker import build_unified_page_context
-from core.tender_extractor import build_review_checklist, extract_required_certificates
+from core.tender_extractor import (
+    build_review_checklist,
+    extract_blind_bid_requirements,
+    extract_required_certificates,
+)
 from core.tender_llm import extract_scoring_with_llm, extract_tender_with_llm
 
 router = APIRouter(prefix='/api/extract', tags=['extract'])
@@ -124,6 +128,14 @@ def extract_tender_checklists(
             reference_date=res.get('open_date'),
         )
 
+        blind_bid_raw = res.get('blind_bid_info')
+        if not isinstance(blind_bid_raw, dict):
+            parsed_for_blind = parse_document(str(tmp_path), ocr_images=False)
+            blind_bid_raw = extract_blind_bid_requirements(
+                parsed_for_blind.text,
+                page_ctx=build_unified_page_context(str(tmp_path)),
+            )
+
         record_audit(
             db,
             action='extract_tender',
@@ -135,6 +147,7 @@ def extract_tender_checklists(
                 'marked_count': len(marked_list),
                 'invalid_count': len(invalid_list),
                 'required_certs_count': len(matched_certs),
+                'is_blind_bid': bool(blind_bid_raw.get('is_blind_bid')),
                 'total_extracted': len(marked_list) + len(invalid_list) + len(qual_list) + len(comp_list),
             },
         )
@@ -159,6 +172,7 @@ def extract_tender_checklists(
             llm_structured=llm_structured,
             required_certificates=matched_certs,
             cert_ledger_summary=cert_summary,
+            blind_bid_info=BlindBidInfoOut(**blind_bid_raw),
             privacy_stats=PrivacyStatsOut(**p_stats),
         )
     finally:

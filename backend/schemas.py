@@ -289,6 +289,27 @@ class CertLedgerSummaryOut(BaseModel):
     reference_date_source: Literal['open_date', 'today'] = 'today'
 
 
+class BlindBidRequirementItemOut(BaseModel):
+    category: str
+    summary: str
+    clause_no: str = ''
+    quote: str = ''
+    quote_verified: bool = True
+    offset: int = 0
+    page: Optional[int] = None
+    recommended_rule: Optional[str] = None
+
+
+class BlindBidInfoOut(BaseModel):
+    is_blind_bid: bool = False
+    requirements: list[BlindBidRequirementItemOut] = Field(default_factory=list)
+    recommended_rules: list[str] = Field(default_factory=list)
+    toc_forbidden: bool = False
+    style_forbidden: bool = False
+    no_images_strict: bool = False
+    image_ban_scope: str = 'none'
+
+
 class ExtractChecklistOut(BaseModel):
     filename: str
     source_type: str
@@ -309,6 +330,7 @@ class ExtractChecklistOut(BaseModel):
     llm_structured: list[dict[str, Any]] = Field(default_factory=list)
     required_certificates: list[RequiredCertItemOut] = Field(default_factory=list)
     cert_ledger_summary: Optional[CertLedgerSummaryOut] = None
+    blind_bid_info: Optional[BlindBidInfoOut] = None
     privacy_stats: Optional[PrivacyStatsOut] = None
 
 
@@ -733,6 +755,7 @@ class ComposeDraftSummaryOut(BaseModel):
     skill_name: str = ''
     biz_line: str = 'general'
     use_indicator_library: bool = False
+    blind_bid_mode: bool = False
     title: str
     status: str = 'completed'
     progress: int = 100

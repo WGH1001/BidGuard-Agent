@@ -755,3 +755,504 @@ def match_required_certificates_with_ledger(
     }
     return enriched, summary
 
+
+# ── E43 · 暗标合规确定性审计（0 Token）────────────────────────────────────────
+_BLIND_MOBILE_RE = re.compile(r'(?<!\d)1[3-9]\d{9}(?!\d)')
+_BLIND_EMAIL_RE = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
+_BLIND_FIXED_TEL_RE = re.compile(r'(?:联系电话|传真|Tel|TEL|Fax)\s*[：:]\s*0\d{2,3}[-—]?\d{7,8}')
+_BLIND_PAGE_NUM_ONLY_RE = re.compile(r'^(?:第\s*\d+\s*页(?:\s*/\s*共\s*\d+\s*页)?|\d+\s*/\s*\d+|\d+|-\s*\d+\s*-)$')
+_BLIND_TOC_DOT_RE = re.compile(r'(?:\.{4,}|…{2,})\s*\d+\s*$', re.MULTILINE)
+_W_NS = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+
+
+def _blind_excerpt(text: str, pos: int, length: int) -> str:
+    """围绕命中偏移裁剪连续原文摘录，供 verify_quote 校验。"""
+    s = max(0, pos - 24)
+    e = min(len(text), pos + length + 36)
+    snippet = text[s:e].replace('\r', ' ').strip()
+    return snippet[:160]
+
+
+def _pick_tender_quote(blind_bid_info: dict[str, Any], *categories: str) -> tuple[str, Optional[int]]:
+    for req in blind_bid_info.get('requirements') or []:
+        if not categories or req.get('category') in categories:
+            q = str(req.get('quote') or '').strip()
+            if q:
+                return q, req.get('page')
+    reqs = blind_bid_info.get('requirements') or []
+    if reqs:
+        return str(reqs[0].get('quote') or ''), reqs[0].get('page')
+    return '', None
+
+
+def _ooxml_flag_on(elem: Any) -> bool:
+    if elem is None:
+        return False
+    val = elem.attrib.get(f'{_W_NS}val')
+    if val is None:
+        return True
+    return str(val).strip().lower() not in ('0', 'false', 'off', 'none')
+
+
+def _inspect_docx_blind_compliance(
+    docx_path: str,
+    blind_bid_info: dict[str, Any],
+    *,
+    identity_terms: list[str],
+    check_contact: bool,
+) -> list[dict[str, Any]]:
+    """检查 .docx OOXML 底纹/粗斜体/TOC 域/页眉页脚/图片附件。"""
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    findings: list[dict[str, Any]] = []
+    style_forbidden = bool(blind_bid_info.get('style_forbidden'))
+    toc_forbidden = bool(blind_bid_info.get('toc_forbidden'))
+    no_images_strict = bool(blind_bid_info.get('no_images_strict'))
+    image_ban_scope = str(blind_bid_info.get('image_ban_scope') or 'none')
+    rec_rules = set(blind_bid_info.get('recommended_rules') or [])
+
+    try:
+        zf = zipfile.ZipFile(docx_path, 'r')
+    except Exception:
+        return findings
+
+    with zf:
+        names = set(zf.namelist())
+
+        # 1. 页眉 / 页脚检查
+        hf_texts: list[tuple[str, str]] = []
+        for nm in sorted(names):
+            low = nm.lower()
+            if low.startswith('word/header') or low.startswith('word/footer'):
+                if not low.endswith('.xml'):
+                    continue
+                try:
+                    root = ET.fromstring(zf.read(nm))
+                except Exception:
+                    continue
+                joined = ''.join((t.text or '') for t in root.iter(f'{_W_NS}t')).strip()
+                if joined:
+                    hf_texts.append((nm, joined))
+
+        if hf_texts:
+            tq_id, _ = _pick_tender_quote(blind_bid_info, 'no_identity', 'no_special_style')
+            leaked_hf: list[str] = []
+            non_page_hf: list[str] = []
+            for nm, jtxt in hf_texts:
+                matched_term = next((t for t in identity_terms if t in jtxt), None)
+                if matched_term or (
+                    check_contact and (_BLIND_MOBILE_RE.search(jtxt) or _BLIND_EMAIL_RE.search(jtxt))
+                ):
+                    leaked_hf.append(f"{nm}: {jtxt[:50]}")
+                elif not _BLIND_PAGE_NUM_ONLY_RE.match(jtxt):
+                    non_page_hf.append(f"{nm}: {jtxt[:50]}")
+
+            if leaked_hf:
+                findings.append({
+                    'source_module': 'BLIND_BID',
+                    'code': 'BLIND_BID_IDENTITY_LEAK',
+                    'severity': 'error',
+                    'consequence': 'veto',
+                    'clause_no': '暗标页眉页脚核查',
+                    'message': f"暗标文档页眉/页脚命中投标人或联系线索：{leaked_hf[0]}",
+                    'suggestion': '清空全部节的页眉与页脚内容（暗标仅可保留纯数字页码或完全留空）。',
+                    'tender_quote': tq_id,
+                    'bid_quote': leaked_hf[0],
+                    'quote_verified': False,
+                    'page': None,
+                    'offset': None,
+                    'detail_json': {'check_type': 'header_footer_identity', 'hits': leaked_hf[:5]},
+                })
+            elif non_page_hf and style_forbidden:
+                tq_st, _ = _pick_tender_quote(blind_bid_info, 'no_special_style', 'format_constraint')
+                findings.append({
+                    'source_module': 'BLIND_BID',
+                    'code': 'BLIND_BID_STYLE_VIOLATION',
+                    'severity': 'error',
+                    'consequence': 'veto',
+                    'clause_no': '暗标页眉页脚核查',
+                    'message': f"暗标禁特殊修饰/页眉页脚，但存在非纯页码页眉页脚：{non_page_hf[0]}",
+                    'suggestion': '清除文档页眉/页脚中的文字、横线或装饰标记。',
+                    'tender_quote': tq_st,
+                    'bid_quote': non_page_hf[0],
+                    'quote_verified': False,
+                    'page': None,
+                    'offset': None,
+                    'detail_json': {'check_type': 'header_footer_style', 'hits': non_page_hf[:5]},
+                })
+
+        # 2. 图片媒体 word/media/ 检查（严格区分全图禁令 vs 仅禁Logo降级 NEED_MANUAL）
+        media_files = [
+            nm for nm in sorted(names)
+            if nm.startswith('word/media/') and not nm.endswith('/')
+        ]
+        if media_files:
+            tq_img, _ = _pick_tender_quote(blind_bid_info, 'no_identity')
+            preview = '、'.join(nm.rsplit('/', 1)[-1] for nm in media_files[:5])
+            if no_images_strict:
+                findings.append({
+                    'source_module': 'BLIND_BID',
+                    'code': 'BLIND_BID_IDENTITY_LEAK',
+                    'severity': 'error',
+                    'consequence': 'veto',
+                    'clause_no': '暗标图像禁令核查',
+                    'message': f"招标文件明令暗标不得出现图片/图像，检测到文档内嵌 {len(media_files)} 个媒体文件（{preview}）",
+                    'suggestion': '删除投标文件中全部内嵌图片/证照扫描件，改为纯文本清单占位。',
+                    'tender_quote': tq_img,
+                    'bid_quote': '',
+                    'quote_verified': False,
+                    'page': None,
+                    'offset': None,
+                    'detail_json': {'check_type': 'media_strict_ban', 'media_files': media_files[:20]},
+                })
+            elif image_ban_scope == 'logo_only' or 'hide_logo_media' in rec_rules:
+                findings.append({
+                    'source_module': 'BLIND_BID',
+                    'code': 'BLIND_BID_NEED_MANUAL',
+                    'severity': 'warning',
+                    'consequence': 'none',
+                    'clause_no': '暗标图像人工复核',
+                    'message': (
+                        f"NEED_MANUAL：检测到文档内嵌 {len(media_files)} 张图片（{preview}）。"
+                        "招标禁止出现 Logo/商标/公章等身份图片，0-Token 规则无法识别图片画面，请人工复核图片中不含任何单位标识。"
+                    ),
+                    'suggestion': '逐张核对文档配图与流程图，确认无公司 Logo、水印、印章或人员签名；必要时使用“暗标模式+隐去Logo”重新生成。',
+                    'tender_quote': tq_img,
+                    'bid_quote': '',
+                    'quote_verified': False,
+                    'page': None,
+                    'offset': None,
+                    'detail_json': {
+                        'check_type': 'media_need_manual',
+                        'needs_manual': True,
+                        'media_files': media_files[:20],
+                    },
+                })
+
+        # 3. 样式 definition (word/styles.xml) 读取（检测标题样式是否残留粗体/彩色）
+        style_props: dict[str, dict[str, bool]] = {}
+        if 'word/styles.xml' in names:
+            try:
+                s_root = ET.fromstring(zf.read('word/styles.xml'))
+                for st in s_root.findall(f'.//{_W_NS}style'):
+                    sid = st.attrib.get(f'{_W_NS}styleId') or ''
+                    rpr = st.find(f'{_W_NS}rPr')
+                    if not sid or rpr is None:
+                        continue
+                    b_el = rpr.find(f'{_W_NS}b')
+                    i_el = rpr.find(f'{_W_NS}i')
+                    u_el = rpr.find(f'{_W_NS}u')
+                    col_el = rpr.find(f'{_W_NS}color')
+                    col_val = str(col_el.attrib.get(f'{_W_NS}val', '') if col_el is not None else '').strip().lower()
+                    style_props[sid] = {
+                        'bold': _ooxml_flag_on(b_el),
+                        'italic': _ooxml_flag_on(i_el),
+                        'underline': (u_el is not None and str(u_el.attrib.get(f'{_W_NS}val', 'single')).lower() != 'none'),
+                        'color': bool(col_val and col_val not in ('000000', 'auto')),
+                    }
+            except Exception:
+                style_props = {}
+
+        # 4. 正文 word/document.xml：TOC 域 + OOXML 底纹/粗斜体/下划线/高亮/彩色字体
+        if 'word/document.xml' in names:
+            try:
+                d_root = ET.fromstring(zf.read('word/document.xml'))
+            except Exception:
+                d_root = None
+
+            if d_root is not None:
+                if toc_forbidden:
+                    has_toc_field = False
+                    for instr in d_root.iter(f'{_W_NS}instrText'):
+                        if instr.text and 'TOC' in instr.text.upper():
+                            has_toc_field = True
+                            break
+                    if not has_toc_field:
+                        for gal in d_root.iter(f'{_W_NS}docPartGallery'):
+                            if 'Table of Contents' in str(gal.attrib.get(f'{_W_NS}val') or ''):
+                                has_toc_field = True
+                                break
+                    if has_toc_field:
+                        tq_toc, _ = _pick_tender_quote(blind_bid_info, 'toc_policy')
+                        findings.append({
+                            'source_module': 'BLIND_BID',
+                            'code': 'BLIND_BID_TOC_VIOLATION',
+                            'severity': 'error',
+                            'consequence': 'veto',
+                            'clause_no': '暗标目录禁令核查',
+                            'message': '招标文件禁止暗标设置目录，检测到文档正文包含 Word TOC 自动目录域',
+                            'suggestion': '开启暗标模式重新导出或手工删除目录页与 TOC 域代码。',
+                            'tender_quote': tq_toc,
+                            'bid_quote': '',
+                            'quote_verified': False,
+                            'page': None,
+                            'offset': None,
+                            'detail_json': {'check_type': 'ooxml_toc_field'},
+                        })
+
+                if style_forbidden:
+                    shd_count = 0
+                    bold_count = 0
+                    italic_count = 0
+                    underline_count = 0
+                    highlight_count = 0
+                    color_count = 0
+                    sample_texts: list[str] = []
+
+                    # 底纹 w:shd（段落/表格单元格/run）
+                    for shd in d_root.iter(f'{_W_NS}shd'):
+                        fill = str(shd.attrib.get(f'{_W_NS}fill') or '').strip().lower()
+                        sval = str(shd.attrib.get(f'{_W_NS}val') or '').strip().lower()
+                        if (fill and fill not in ('auto', 'ffffff')) or (sval and sval not in ('clear', 'nil', 'auto')):
+                            shd_count += 1
+
+                    for p in d_root.iter(f'{_W_NS}p'):
+                        ppr = p.find(f'{_W_NS}pPr')
+                        pstyle_el = ppr.find(f'{_W_NS}pStyle') if ppr is not None else None
+                        pstyle_id = str(pstyle_el.attrib.get(f'{_W_NS}val') or '') if pstyle_el is not None else ''
+                        inh = style_props.get(pstyle_id, {})
+
+                        for r in p.iter(f'{_W_NS}r'):
+                            rtxt = ''.join((t.text or '') for t in r.findall(f'{_W_NS}t')).strip()
+                            if not rtxt:
+                                continue
+                            rpr = r.find(f'{_W_NS}rPr')
+                            b_el = rpr.find(f'{_W_NS}b') if rpr is not None else None
+                            bcs_el = rpr.find(f'{_W_NS}bCs') if rpr is not None else None
+                            i_el = rpr.find(f'{_W_NS}i') if rpr is not None else None
+                            ics_el = rpr.find(f'{_W_NS}iCs') if rpr is not None else None
+                            u_el = rpr.find(f'{_W_NS}u') if rpr is not None else None
+                            hl_el = rpr.find(f'{_W_NS}highlight') if rpr is not None else None
+                            col_el = rpr.find(f'{_W_NS}color') if rpr is not None else None
+
+                            is_b = (_ooxml_flag_on(b_el) or _ooxml_flag_on(bcs_el)) if (b_el is not None or bcs_el is not None) else inh.get('bold', False)
+                            is_i = (_ooxml_flag_on(i_el) or _ooxml_flag_on(ics_el)) if (i_el is not None or ics_el is not None) else inh.get('italic', False)
+                            is_u = (u_el is not None and str(u_el.attrib.get(f'{_W_NS}val', 'single')).lower() != 'none') if u_el is not None else inh.get('underline', False)
+                            is_hl = hl_el is not None and str(hl_el.attrib.get(f'{_W_NS}val') or '').lower() not in ('', 'none')
+                            if col_el is not None:
+                                cval = str(col_el.attrib.get(f'{_W_NS}val') or '').strip().lower()
+                                is_col = bool(cval and cval not in ('000000', 'auto'))
+                            else:
+                                is_col = inh.get('color', False)
+
+                            if is_b:
+                                bold_count += 1
+                            if is_i:
+                                italic_count += 1
+                            if is_u:
+                                underline_count += 1
+                            if is_hl:
+                                highlight_count += 1
+                            if is_col:
+                                color_count += 1
+                            if (is_b or is_i or is_u or is_hl or is_col) and len(sample_texts) < 3 and len(rtxt) >= 2:
+                                sample_texts.append(rtxt[:40])
+
+                    style_summary_parts: list[str] = []
+                    if shd_count:
+                        style_summary_parts.append(f"底纹/阴影 w:shd {shd_count} 处")
+                    if bold_count:
+                        style_summary_parts.append(f"加粗 {bold_count} 处")
+                    if italic_count:
+                        style_summary_parts.append(f"斜体 {italic_count} 处")
+                    if underline_count:
+                        style_summary_parts.append(f"下划线 {underline_count} 处")
+                    if highlight_count:
+                        style_summary_parts.append(f"高亮标记 {highlight_count} 处")
+                    if color_count:
+                        style_summary_parts.append(f"非黑色字体 {color_count} 处")
+
+                    if style_summary_parts:
+                        tq_st, _ = _pick_tender_quote(blind_bid_info, 'no_special_style')
+                        findings.append({
+                            'source_module': 'BLIND_BID',
+                            'code': 'BLIND_BID_STYLE_VIOLATION',
+                            'severity': 'error',
+                            'consequence': 'veto',
+                            'clause_no': '暗标特殊样式核查',
+                            'message': f"暗标禁特殊样式标记，检测到 OOXML 违规样式：{'、'.join(style_summary_parts)}",
+                            'suggestion': '开启「按暗标生成」素颜导出，移除全部表格底纹、加粗、斜体、下划线、高亮与彩色字体。',
+                            'tender_quote': tq_st,
+                            'bid_quote': sample_texts[0] if sample_texts else '',
+                            'quote_verified': False,
+                            'page': None,
+                            'offset': None,
+                            'detail_json': {
+                                'check_type': 'ooxml_style',
+                                'shd_count': shd_count,
+                                'bold_count': bold_count,
+                                'italic_count': italic_count,
+                                'underline_count': underline_count,
+                                'highlight_count': highlight_count,
+                                'color_count': color_count,
+                            },
+                        })
+
+    return findings
+
+
+def scan_blind_bid_compliance(
+    bid_path_or_text: Any,
+    blind_bid_info: Optional[dict[str, Any]],
+    *,
+    bidder_hints: Optional[list[str]] = None,
+    custom_words: Optional[list[str]] = None,
+) -> list[dict[str, Any]]:
+    """E43 · 0-Token 暗标合规性审计。
+
+    当招标文件为暗标时（blind_bid_info['is_blind_bid'] 为 True），检查投标文件是否残留：
+    1. 投标人名称 / 关联证照单位名称 / 自定义屏蔽词 / 手机号与邮箱；
+    2. 页眉页脚非页码内容、图片/Logo（全禁图像确定性判违禁，仅禁 Logo 降级 NEED_MANUAL）；
+    3. .docx OOXML 底纹（w:shd）、加粗、斜体、下划线、高亮、非黑字体、TOC 目录域。
+    """
+    if not blind_bid_info or not blind_bid_info.get('is_blind_bid'):
+        return []
+
+    from pathlib import Path
+    from core.parser import parse_document
+
+    file_path: Optional[Path] = None
+    text = ''
+    if isinstance(bid_path_or_text, Path):
+        if bid_path_or_text.is_file():
+            file_path = bid_path_or_text
+            text = parse_document(str(file_path), ocr_images=False).text
+    elif isinstance(bid_path_or_text, str):
+        raw_str = bid_path_or_text
+        if len(raw_str) < 300 and '\n' not in raw_str and '\r' not in raw_str:
+            candidate = Path(raw_str)
+            if candidate.is_file():
+                file_path = candidate
+                text = parse_document(str(file_path), ocr_images=False).text
+            else:
+                text = raw_str
+        else:
+            text = raw_str
+
+    rec_rules = set(blind_bid_info.get('recommended_rules') or [])
+    check_contact = 'hide_contact_info' in rec_rules or any(
+        '电话' in str(r.get('quote') or '') or '邮箱' in str(r.get('quote') or '') or '联系' in str(r.get('quote') or '')
+        for r in (blind_bid_info.get('requirements') or [])
+    )
+
+    # 汇总需拦截的身份词与自定义屏蔽词（去重、过滤过短碎片）
+    raw_terms: list[tuple[str, str]] = []
+    for h in bidder_hints or []:
+        t = str(h or '').strip()
+        if len(t) >= 3:
+            raw_terms.append((t, '投标人/企业线索'))
+    for cw in custom_words or []:
+        t = str(cw or '').strip()
+        if len(t) >= 2:
+            raw_terms.append((t, '自定义屏蔽词'))
+
+    seen_terms: set[str] = set()
+    identity_terms: list[str] = []
+    term_labels: dict[str, str] = {}
+    for t, lbl in raw_terms:
+        if t not in seen_terms:
+            seen_terms.add(t)
+            identity_terms.append(t)
+            term_labels[t] = lbl
+
+    findings: list[dict[str, Any]] = []
+    tq_id, _ = _pick_tender_quote(blind_bid_info, 'no_identity')
+
+    # 1. 正文身份词 / 自定义屏蔽词泄露检测
+    if text:
+        for term in identity_terms:
+            m = re.search(re.escape(term), text)
+            if m:
+                snippet = _blind_excerpt(text, m.start(), len(term))
+                verified = bool(verify_quote(snippet, text))
+                findings.append({
+                    'source_module': 'BLIND_BID',
+                    'code': 'BLIND_BID_IDENTITY_LEAK',
+                    'severity': 'error',
+                    'consequence': 'veto',
+                    'clause_no': '暗标身份线索核查',
+                    'message': f"暗标正文疑似泄露{term_labels.get(term, '身份线索')}（命中：{term}）",
+                    'suggestion': f"删除或泛化替换正文中的「{term}」（可使用「本公司」或系统暗标模式统一脱敏）。",
+                    'tender_quote': tq_id,
+                    'bid_quote': snippet if verified else term,
+                    'quote_verified': verified,
+                    'page': None,
+                    'offset': m.start(),
+                    'detail_json': {'check_type': 'text_identity_leak', 'term_kind': term_labels.get(term)},
+                })
+
+        # 2. 正文手机号 / 邮箱 / 固定电话泄露检测
+        if check_contact:
+            contact_patterns: tuple[tuple[str, re.Pattern[str]], ...] = (
+                ('手机号', _BLIND_MOBILE_RE),
+                ('电子邮箱', _BLIND_EMAIL_RE),
+                ('固定电话/传真', _BLIND_FIXED_TEL_RE),
+            )
+            for c_label, c_re in contact_patterns:
+                m = c_re.search(text)
+                if m:
+                    matched_val = m.group(0)
+                    snippet = _blind_excerpt(text, m.start(), len(matched_val))
+                    verified = bool(verify_quote(snippet, text))
+                    findings.append({
+                        'source_module': 'BLIND_BID',
+                        'code': 'BLIND_BID_IDENTITY_LEAK',
+                        'severity': 'error',
+                        'consequence': 'veto',
+                        'clause_no': '暗标联系方式核查',
+                        'message': f"暗标正文疑似出现{c_label}（{matched_val}），违反匿名要求",
+                        'suggestion': f"移除正文中的真实{c_label}，避免暴露投标人联系线索。",
+                        'tender_quote': tq_id,
+                        'bid_quote': snippet if verified else matched_val,
+                        'quote_verified': verified,
+                        'page': None,
+                        'offset': m.start(),
+                        'detail_json': {'check_type': 'contact_leak', 'contact_type': c_label},
+                    })
+
+        # 3. 纯文本/PDF 目录违规兜底检测（当非 .docx 或 .docx 未带 TOC XML 域时）
+        if blind_bid_info.get('toc_forbidden') and (file_path is None or file_path.suffix.lower() != '.docx'):
+            toc_head = re.search(r'(?m)^\s*目\s*录\s*$', text[:10000])
+            dot_hits = _BLIND_TOC_DOT_RE.findall(text[:15000])
+            if toc_head and len(dot_hits) >= 2:
+                tq_toc, _ = _pick_tender_quote(blind_bid_info, 'toc_policy')
+                snippet = _blind_excerpt(text, toc_head.start(), 20)
+                verified = bool(verify_quote(snippet, text))
+                findings.append({
+                    'source_module': 'BLIND_BID',
+                    'code': 'BLIND_BID_TOC_VIOLATION',
+                    'severity': 'error',
+                    'consequence': 'veto',
+                    'clause_no': '暗标目录禁令核查',
+                    'message': '招标文件禁止暗标设置目录，检测到文档前部疑似存在目录引导页',
+                    'suggestion': '导出或定稿前删除目录页及目录页码索引。',
+                    'tender_quote': tq_toc,
+                    'bid_quote': snippet if verified else '',
+                    'quote_verified': verified,
+                    'page': None,
+                    'offset': toc_head.start(),
+                    'detail_json': {'check_type': 'text_toc_heuristic'},
+                })
+
+    # 4. .docx OOXML 深度检查
+    if file_path is not None and file_path.suffix.lower() == '.docx':
+        docx_findings = _inspect_docx_blind_compliance(
+            str(file_path),
+            blind_bid_info,
+            identity_terms=identity_terms,
+            check_contact=check_contact,
+        )
+        # 避免与正文重复叠加相同 TOC 发现
+        if any(f['code'] == 'BLIND_BID_TOC_VIOLATION' for f in docx_findings):
+            findings = [f for f in findings if f['code'] != 'BLIND_BID_TOC_VIOLATION']
+        # 为 OOXML sample bid_quote 做原文 verify_quote 校验
+        for df in docx_findings:
+            bq = str(df.get('bid_quote') or '')
+            if bq and text and verify_quote(bq, text):
+                df['quote_verified'] = True
+        findings.extend(docx_findings)
+
+    return findings
+
+

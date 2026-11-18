@@ -23,7 +23,11 @@ build_review_checklist(file_path: str) -> dict
 # 返回：{'file','source_type','pages','chars','open_date','open_date_source',
 #        'open_date_quote','chapters','marked_clauses','invalid_bid_clauses',
 #        'qualification_hits','compliance_hits','eval_chapter','scoring_hits',
-#        'scoring_tables','required_certificates'}
+#        'scoring_tables','required_certificates','blind_bid_info'}
+extract_blind_bid_requirements(text: str, *, page_ctx: Any = None) -> dict[str, Any]
+# E43：0-Token 正则提取暗标/盲评要求，过滤「非暗标/不采用暗标/是否暗标：否」及逗号混合否定片段，
+#      所有命中均过 verify_quote 与 page_ctx；返回 {'is_blind_bid', 'requirements',
+#      'recommended_rules', 'toc_forbidden', 'style_forbidden', 'no_images_strict', 'image_ban_scope'}
 extract_required_certificates(text: str, *, qualification_hits=None, compliance_hits=None,
                                 marked_clauses=None, invalid_bid_clauses=None,
                                 scoring_tables=None, scoring_prose=None, page_ctx=None) -> list[dict]
@@ -107,6 +111,12 @@ match_required_certificates_with_ledger(required_certs: list[dict], ledger_certs
                                         reference_date: Optional[str] = None) -> tuple[list[dict], dict]
 # E26/E35：0-Token 将招标所需证照清单与租户 CompanyCertificate 台账保守对账，返回 (enriched_items, cert_ledger_summary)；
 #          E35 适配 is_long_term=True（matched_cert 恒判 'valid'，返回 is_long_term=True / valid_until=None / days_remaining=None，排在有限日期前）
+scan_blind_bid_compliance(bid_path_or_text: Any, blind_bid_info: Optional[dict[str, Any]], *,
+                          bidder_hints: Optional[list[str]] = None,
+                          custom_words: Optional[list[str]] = None) -> list[dict[str, Any]]
+# E43：0-Token 暗标合规审计（is_blind_bid=True 时执行），返回 source_module='BLIND_BID' 发现列表：
+#      BLIND_BID_IDENTITY_LEAK / BLIND_BID_STYLE_VIOLATION / BLIND_BID_TOC_VIOLATION (severity='error', consequence='veto')；
+#      对图像区分全图禁令（no_images_strict -> error/veto）与仅禁 Logo（0 Token 无法识图 -> 诚实降级 BLIND_BID_NEED_MANUAL warning/none）
 ```
 
 ### 1.4 F4 双书勾稽核验（CheckDetail 主流程）
@@ -318,10 +328,10 @@ export_similarity_report_docx(report: dict[str, Any], output_path: str | Path) -
 # ai_review.status == 'done' 时追加「五、AI 语义深层复核与误报排查综述」章节
 ```
 
-### 1.12 E37/E38/E41 标书编制输出与无损修订交付（`BidComposerView` / `/api/composer` & `/api/reports/{task_id}/clean-bid`）
+### 1.12 E37/E38/E41/E43 标书编制输出与无损修订交付（`BidComposerView` / `/api/composer` & `/api/reports/{task_id}/clean-bid`）
 
 ```python
-# core/bid_composer.py —— F8 标书正向动态编排引擎（Skill 约束 + AI 动态构章撰稿 + V1/V2 蓝图与排版输出）
+# core/bid_composer.py —— F8 标书正向动态编排引擎（Skill 约束 + AI 动态构章撰稿 + V1/V2 蓝图与排版输出 + E43 暗标双模式）
 class KnowledgeSnippetProvider(Protocol):
     @property
     def has_documents(self) -> bool: ...
@@ -346,19 +356,25 @@ compose_bid_blueprint(
     checklist: Optional[dict[str, Any]] = None,
     skill: Any = None,
     use_ai: bool = True,
+    blind_bid_mode: bool = False,
+    blind_rules: Optional[list[str]] = None,        # _BLIND_RULE_KEYS 子集，默认 6 项全启
+    blind_custom_words: Optional[list[str]] = None,
+    bidder_hints: Optional[list[str]] = None,
     progress_cb: Optional[Callable[[int, str], None]] = None,
     cancel_check: Optional[Callable[[], None]] = None,
 ) -> BidBlueprint
-# E38/E39/E41 接线契约：① 报价栏强制 `[待人工填报金额...]`；② _UNGROUNDED_MONEY_RE / _UNGROUNDED_CONTRACT_RE 防金额/合同幻觉；
+# E38/E39/E41/E43 接线契约：① 报价栏强制 `[待人工填报金额...]`；② _UNGROUNDED_MONEY_RE / _UNGROUNDED_CONTRACT_RE 防金额/合同幻觉；
 # ③ _plan_chapters_with_llm 覆盖率兜底守卫 + 剥离 eval_rule/评分细则串行与目录/投标须知程序噪音，
 #    _draft_chapter_with_llm 并发单章最多 3 次尝试自动重试 + 剥离重复章标题首行 + 表行放宽至 36；_draft_deviation_with_llm 分批 12 条覆盖全量待核对偏离行；
 #    第二部分同名证书按角色合并去重；
 # ④ E41：传入显式 knowledge_provider（如 IndicatorLibraryProvider）时，在 skeleton_v1 与 knowledge_draft_v2 模式下均可激活参考片段注入，
-#    透传 is_indicator_ref/scoring_ref 与自定义 notice 且跳过招标原文强制回引重对齐，并在 stats 记录 biz_line / use_indicator_library / indicator_matched_topics
+#    透传 is_indicator_ref/scoring_ref 与自定义 notice 且跳过招标原文强制回引重对齐，并在 stats 记录 biz_line / use_indicator_library / indicator_matched_topics；
+# ⑤ E43：blind_bid_mode=True 时注入暗标 Prompt 铁律并执行保守 _apply_blind_bid_sanitization（仅确定性替换机构提示/自定义屏蔽词/手机邮箱，非明确历史业绩与外部编号不强改而入人工清单），并在 hide_logo_media 时隐去第二部分证照扫描图
 
 export_composed_bid_docx(blueprint: BidBlueprint | dict[str, Any], output_path: str | Path) -> Path
 # 按 skill_layout 动态渲染独立居中封面（gov_clean/navy_business/tech_modern）、原生 Heading 1/2/3 与可选 TOC 域、
 # XML 表格列宽与单元格边距；E39 起第二部分输出「2.0 资格总览索引表 + 2.1~2.N 逐项独立附页（自动嵌台账 PNG/JPG 原件扫描图，PDF 示装订框，缺失示 A4 全幅粘贴框）」；
+# E43：blind_bid_mode=True 时强制素颜输出（去装饰封面、清空页眉页脚、blind_toc_forbidden 时跳过 TOC \o、隐去 word/media/、并调用 _strip_docx_ooxml_special_styles 剥离 word/document.xml 与 word/styles.xml 全部 w:shd/b/i/u/highlight 并强制纯黑 000000）；
 # 依据 append_checklist_at_end 控制是否将内部待核对清单附于文末
 
 # core/redline.py —— 原位无损修订 Clean 定稿导出
@@ -479,6 +495,7 @@ class CompositeKnowledgeSnippetProvider:
 - E39 F8 初稿质量精修与资格逐项附页：`backend/routers/composer.py` 在 `export_composed_bid_docx` 完成台账原件扫描图嵌入后、持久化 `blueprint_json` 前清洗剔除 `cert_row.attachment_path` 物理路径（保留 `matched_cert_id`/`has_embedded_image`/`role_label`），确保宿主机路径永不外泄；
 - E40 合规底座双锁（网关三出口脱敏 + 内网模型锁 + 上传零 OCR 统计）：`backend/schemas.py` 新增 `PrivacyStatsOut` 并扩展 `BidTaskOut`/`ExtractChecklistOut`/`QaAttachmentOut` 可选 `privacy_stats`；`POST /api/checks`、`POST /api/extract` 与 `POST /api/qa/sessions/{id}/attachments` 返回 `privacy_stats` 且原盘文件保持逐字节不变；`backend/routers/model_config.py` 在 `STRICT_INNER_MODEL_ONLY=1` 时放行私网网段、`models.yaml` `envs.prod` 主机及 `INNER_MODEL_EXTRA_HOSTS` 白名单，拦截公网地址并返回 `HTTP 422 MODEL_HOST_FORBIDDEN`；`backend/worker.py::resolve_effective_llm_client` 在 strict 下忽略并告警存量公网 `UserModelConfig`、强制钉死 `prod` 内网网关；
 - E41 双业务线专精 Skills 与常见指标标准应答库：`backend/models.py` 为 `composer_skills` 新增 `biz_line`（`general|security|maas`）及老库 `ensure_composer_skills_columns` 加列迁移；`backend/routers/composer.py` `ensure_builtin_composer_skills` 幂等为存量租户补种「网络安全与数据安全专精版」与「并行MaaS算力服务专精版」、新增 `GET /api/composer/indicators`（`BizLineIndicatorOverviewOut`）透出指标库与典型评分标准参考，并于 `POST /api/composer/generate` 新增 `use_indicator_library: bool = Form(default=False)`（开关开启或 `Skill.biz_line != 'general'` 时构造 `IndicatorLibraryProvider` 并与 V2 方案库叠加，在 `skeleton_v1` 与 `knowledge_draft_v2` 双模式均可注入）；
+- E43 暗标信号识别与暗标防废标双模式：`backend/schemas.py` 新增 `BlindBidRequirementItemOut`/`BlindBidInfoOut` 并扩展 `ExtractChecklistOut.blind_bid_info`、`ComposeDraftSummaryOut.blind_bid_mode`；`backend/routers/extract.py` 无/有模型两路均透出 `blind_bid_info`；`backend/worker.py::_run_pipeline` Stage 3 接入 `scan_blind_bid_compliance` 并以 `source_module='BLIND_BID'` 入库 `BidFinding`（并在 `stats_payload` 记录 `is_blind_bid`/`blind_toc_forbidden`/`blind_bid_finding_count`）；`backend/routers/composer.py::generate_composed_draft` 新增 `blind_bid_mode: bool = Form(default=False)`、`blind_rules_json: Optional[str] = Form(default=None)`、`blind_custom_words_json: Optional[str] = Form(default=None)`（审计日志仅记开关/规则键与屏蔽词数量，严禁写明文屏蔽词）；
 - 其余鉴权、多租户隔离、SSE 进度流、文件存储布局与统一错误格式约定保持不变。
 
 ---
@@ -519,3 +536,4 @@ class CompositeKnowledgeSnippetProvider:
 | 2026-11-18 | E39 F8 初稿质量精修与资格证明逐项附页增强卡：`core/bid_composer.py` 新增 `_draft_chapter_with_llm` 单章瞬时失败最多 2 次自动重试（`PipelineCancelled` 直通穿透）、`_strip_duplicate_leading_title` 剥离重复章标题首行、`_is_procedural_topic` / `_extract_pdf_scoring_items` 清除目录与投标须知/澄清/计分方法噪音并精准提取 PDF 评分细则、解除 L483/L486/L603/L645 四处截断（偏离表分批 ≤12 条全量覆写），以及第二部分同名证照按角色合并去重（`必交资格 / 加分参考`）与「2.0 总览索引表 + 2.1~2.N 逐项独立附页（自动居中嵌入 PNG/JPG 原件扫描图，PDF 示装订框，缺省示 A4 全幅粘贴框）」；`backend/routers/composer.py` 在持久化 `blueprint_json` 前剥离宿主机 `attachment_path`；`BidComposerView.vue` 第二部分增加角色级别与附页形态预览列 | 实现 + 验收 |
 | 2026-11-18 | E40 合规底座双锁卡：新增 `core/privacy_sanitizer.py`（18 位 GB 11643 身份证校验 + 语境银行卡/对公账号等长幂等掩码、`scan_document_file` 强制 `ocr_images=False`）；`core/llm_gateway.py` 于 `chat()`/`chat_stream()`/`embed()` 三个总出口统一挂载脱敏（保全 `image_url` 多模态结构、`PRIVACY_SANITIZE_ENABLED` 开关、`total_usage()` 记录 `privacy_id_masked`/`privacy_bank_masked`）并新增 `STRICT_INNER_MODEL_ONLY` + `INNER_MODEL_EXTRA_HOSTS` 内网防外泄锁定（放行私网/prod/白名单、禁 `demo` 回退、拒接公网 `UserModelConfig`）；`backend/routers/model_config.py` 新增公网拦截 `422 MODEL_HOST_FORBIDDEN`；`backend/worker.py::resolve_effective_llm_client` 忽略存量公网配置告警回退 `prod`；`backend/schemas.py`、`checks.py`、`extract.py`、`qa.py` 新增只读 `privacy_stats` 回显且原盘文件字节零改动；前端 `types.ts`、`CheckTaskList.vue`、`ExtractView.vue`、`QaChatView.vue` 同步提示已保护数量 | 实现 + 验收 |
 | 2026-11-18 | E41 双业务线专精 Skills 与常见指标标准应答库卡：新增 `core/indicator_library.py`（`common/security/maas` 三层指标架构 + `IndicatorLibraryProvider` 0-Token BM25/同义词三级门控与跨线隔离 + `CompositeKnowledgeSnippetProvider` + `get_biz_line_indicator_overview` 评分参考输出 + `_BID_MONEY_RE` 禁具体报价硬锁）；新增 `data/rules/indicator_library/{common,security,maas}_indicators.json` 与只产出草稿的 `scripts/build_indicator_library.py`；`core/composer_skills.py` 扩至 5 套内置预设并支持 `biz_line`；`core/bid_composer.py` 放行显式 `knowledge_provider` 于非 V2 模式生效、透传 `scoring_ref`/`notice`；`backend/models.py` 扩展 `composer_skills.biz_line` 与 `ensure_composer_skills_columns`；`backend/routers/composer.py` + `schemas.py` 幂等补种存量租户新 Skill、新增 `GET /api/composer/indicators`、扩展 `POST /api/composer/generate` `use_indicator_library` 接线；前端 `types.ts`、`index.ts`、`BidComposerView.vue` 完成业务线徽标、指标开关与典型评分标准预览卡片（零新增 Element Plus 组件） | 实现 + 验收 |
+| 2026-11-18 | E43 暗标信号识别与暗标防废标双模式卡：`core/tender_extractor.py` 新增 `extract_blind_bid_requirements` 并挂入 `build_review_checklist['blind_bid_info']`；`core/qualification_scanner.py` 新增 `scan_blind_bid_compliance`（`source_module='BLIND_BID'`，全图禁令判 `veto`、仅禁 Logo 诚实降级 `BLIND_BID_NEED_MANUAL`，含 OOXML `w:shd`/粗斜体/`TOC` 检查）；`core/bid_composer.py` 为 `compose_bid_blueprint`/`export_composed_bid_docx` 新增 `blind_bid_mode`/`blind_rules`/`blind_custom_words`/`bidder_hints`、保守 `_apply_blind_bid_sanitization` 及 `_strip_docx_ooxml_special_styles` 素颜渲染（清零页眉页脚/底纹/粗斜体/`TOC`/扫描图片）；`backend/schemas.py`/`extract.py`/`worker.py`/`composer.py` 贯通暗标检测入库与脱敏审计；前端 `types.ts`/`index.ts`/`ExtractView.vue`/`BidComposerView.vue` 完成暗标红线警告一键跳转与 6 项屏蔽规则+自定义词工作台（零新增 Element Plus 组件） | 实现 + 验收 |

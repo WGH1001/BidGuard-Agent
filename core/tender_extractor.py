@@ -1120,6 +1120,7 @@ def build_review_checklist(file_path: str) -> dict:
         scoring_tables=scoring_tables,
         page_ctx=page_ctx,
     )
+    blind_bid_info = extract_blind_bid_requirements(text, page_ctx=page_ctx)
     return {
         'file': file_path,
         'source_type': doc.source_type,
@@ -1137,6 +1138,7 @@ def build_review_checklist(file_path: str) -> dict:
         'scoring_hits': _attach_pages(locate_keyword_sections(text, ('评分细则', '评分标准', '评分办法'))),
         'scoring_tables': scoring_tables,
         'required_certificates': required_certificates,
+        'blind_bid_info': blind_bid_info,
     }
 
 
@@ -1353,3 +1355,307 @@ def extract_scoring_tables(file_path: str) -> list[dict]:
                     break
 
     return items
+
+
+# ── E43 · 暗标要求 0-Token 确定性提取器 ─────────────────────────────────────
+_BLIND_KEYWORD_RE = re.compile(r'暗标|盲评|盲审')
+_BLIND_NEG_RE = re.compile(
+    r'(?:非|不采用|不实行|不设|无需|不需要|不启用|未采用|未实行|无须|不适用|不要求|取消)'
+    r'\s*(?:技术\s*(?:部分)?)?(?:暗标|盲评|盲审)'
+    r'|(?:是否(?:采用|实行|使用)?\s*(?:技术\s*)?(?:暗标|盲评|盲审)|(?:技术\s*)?(?:暗标|盲评|盲审)(?:评审|方式|要求)?)'
+    r'\s*[：:\s|｜/]+(?:否|无|不适用)(?![定决则认论])'
+    r'|(?:暗标|盲评|盲审)[^。\n]{0,8}[（(]\s*(?:否|无|不适用|未采用)\s*[）)]'
+)
+_BLIND_DECL_POS_RE = re.compile(
+    r'(?:技术标?|评审|评标|编制|投标文件|采购|项目)?[^。\n]{0,12}'
+    r'(?:采用|实行|实施|为|按)[^。\n]{0,8}(?:暗标|盲评|盲审)'
+    r'|(?:暗标|盲评|盲审)\s*(?:部分|要求|评审|编制|规定|制作|注意事项)'
+)
+
+_BLIND_IDENTITY_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    (
+        'hide_bidder_name',
+        re.compile(
+            r'(?:不得|严禁|禁止|不能|不允许|不可|隐去|匿去|避免|不准)[^。\n]{0,24}'
+            r'(?:投标人(?:名称|全称|简称)?|投标单位|单位名称|公司名称|企业名称|机构名称|'
+            r'任何.{0,8}身份(?:信息|标识)?|反映投标人|体现投标人|表明投标人)'
+        ),
+        '禁止出现投标人/单位名称或身份标识',
+    ),
+    (
+        'hide_logo_media',
+        re.compile(
+            r'(?:不得|严禁|禁止|不能|不允许|不可|隐去|匿去|不准)[^。\n]{0,24}'
+            r'(?:LOGO|Logo|logo|商标|企业标识|公司标识|徽标|水印|印章|公章|签章|任何图片|图片|图像|照片|截图)'
+        ),
+        '禁止出现 Logo/商标/印章或图片标识',
+    ),
+    (
+        'hide_person_name',
+        re.compile(
+            r'(?:不得|严禁|禁止|不能|不允许|不可|隐去|匿去|不准)[^。\n]{0,24}'
+            r'(?:人员.{0,6}姓名|真实姓名|法人姓名|法定代表人|项目经理(?:姓名)?|授权代表(?:姓名)?|签字|签名)'
+        ),
+        '禁止出现人员真实姓名或签字信息',
+    ),
+    (
+        'hide_contact_info',
+        re.compile(
+            r'(?:不得|严禁|禁止|不能|不允许|不可|隐去|匿去|不准)[^。\n]{0,24}'
+            r'(?:联系方式|联系电话|手机号?|电话|传真|邮箱|电子邮箱|网址|通信地址|办公地址|地址|邮编)'
+        ),
+        '禁止出现电话/邮箱/地址等联系方式',
+    ),
+    (
+        'hide_external_project',
+        re.compile(
+            r'(?:不得|严禁|禁止|不能|不允许|不可|隐去|匿去|不准)[^。\n]{0,24}'
+            r'(?:非本项目.{0,8}(?:名称|编号)|外部项目|其他项目(?:名称|编号)|无关项目编号)'
+        ),
+        '禁止出现非本项目名称或编号线索',
+    ),
+    (
+        'hide_past_cases',
+        re.compile(
+            r'(?:不得|严禁|禁止|不能|不允许|不可|隐去|匿去|不准)[^。\n]{0,24}'
+            r'(?:历史项目|过往项目|业绩案例|类似业绩|过往业绩|合同业绩|已完成项目)'
+        ),
+        '禁止出现历史项目或业绩案例名称',
+    ),
+)
+
+_BLIND_ALL_IMAGE_BAN_RE = re.compile(
+    r'(?:不得|严禁|禁止|不能|不允许|不可|不准)[^。\n]{0,16}'
+    r'(?:出现|插入|使用|包含|含有|带有|附带)[^。\n]{0,10}'
+    r'(?:任何\s*)?(?:图片|图像|照片|图画|截图|图形)'
+)
+_BLIND_LOGO_ONLY_IMAGE_RE = re.compile(
+    r'LOGO|Logo|logo|商标|企业标识|公司标识|徽标|印章|公章|水印|体现投标人|反映投标人'
+)
+
+_BLIND_STYLE_TOKEN_RE = re.compile(
+    r'底纹|阴影|加粗|粗体|斜体|下划线|边框|底色|背景色|彩色|字体颜色|特殊\s*(?:样式|标记|符号|字体|排版)|页面.{0,6}修饰|水印|艺术字'
+)
+_BLIND_STYLE_BAN_RE = re.compile(
+    r'(?:不得|严禁|禁止|不能|不允许|不可|不准|不得设置|不得使用)[^。\n]{0,28}'
+    r'(?:底纹|阴影|加粗|粗体|斜体|下划线|边框|底色|背景色|彩色|字体颜色|'
+    r'特殊\s*(?:样式|标记|符号|字体|排版)|页面.{0,6}修饰|水印|艺术字|页眉|页脚)'
+)
+_BLIND_TOC_FORBIDDEN_RE = re.compile(
+    r'(?:不得|严禁|禁止|不能|不允许|不可|不准)[^。\n]{0,16}(?:设置|生成|出现|使用|包含|添加|保留)?[^。\n]{0,6}目录(?!时)'
+    r'|(?:删除|取消|清理|去掉|移除|不设)[^。\n]{0,6}目录(?!(?:前应|时))'
+)
+_BLIND_TOC_POLICY_RE = re.compile(r'目录')
+_BLIND_FORMAT_CONSTRAINT_RE = re.compile(
+    r'(?:统一.{0,8}(?:字体|字号|行距|格式|版式|页边距)|'
+    r'(?:字体|字号|行距|页边距|页码).{0,14}(?:统一|固定为|不得改变|要求为)|'
+    r'(?:仿宋|宋体|黑体|楷体).{0,10}(?:小四|四号|五号|磅))'
+)
+_BLIND_RULE_ORDER = (
+    'hide_bidder_name',
+    'hide_logo_media',
+    'hide_person_name',
+    'hide_contact_info',
+    'hide_external_project',
+    'hide_past_cases',
+)
+
+
+def _extract_blind_clause_no(text: str, seg_start: int, seg_text: str) -> str:
+    """尝试从当前句首或前邻 100 字符窗口吸附条款编号。"""
+    head_m = re.match(
+        r'^\s*(条款\s*\d+(?:\.\d+)*|\d+(?:\.\d+)+|（[一二三四五六七八九十\d]+）|\(\d+\)|第[一二三四五六七八九十]+条)',
+        seg_text,
+    )
+    if head_m:
+        return head_m.group(1).strip()
+    win_start = max(0, seg_start - 100)
+    win = text[win_start:seg_start]
+    tail_hits = re.findall(
+        r'(条款\s*\d+(?:\.\d+)*|\d+(?:\.\d+)+|第[一二三四五六七八九十百]+条)',
+        win,
+    )
+    if tail_hits:
+        return tail_hits[-1].strip()
+    return ''
+
+
+def extract_blind_bid_requirements(
+    text: str,
+    *,
+    page_ctx: Any = None,
+) -> dict[str, Any]:
+    """E43 · 0-Token 确定性提取招标文件中的暗标/盲评要求。
+
+    过滤「不采用暗标」「非暗标项目」「是否采用暗标：否」等否定表达；
+    对所有命中句执行 verify_quote 原文连续子串核验，并绑定页码与推荐屏蔽规则。
+    """
+    empty: dict[str, Any] = {
+        'is_blind_bid': False,
+        'requirements': [],
+        'recommended_rules': [],
+        'toc_forbidden': False,
+        'style_forbidden': False,
+        'no_images_strict': False,
+        'image_ban_scope': 'none',
+    }
+    if not text or not text.strip():
+        return empty
+
+    from core.quote_verifier import verify_quote
+    resolve_page_fn = None
+    if page_ctx is not None:
+        from core.response_checker import resolve_unified_page
+        resolve_page_fn = resolve_unified_page
+
+    has_positive_blind_kw = False
+    has_identity_ban = False
+    has_strong_style_ban = False
+    toc_forbidden = False
+    style_forbidden = False
+    no_images_strict = False
+    logo_only_image = False
+
+    candidates: list[dict[str, Any]] = []
+    matched_rules: set[str] = set()
+    seen_quotes: set[str] = set()
+
+    for seg_m in re.finditer(r'[^。；;\n\r]+', text):
+        raw_seg = seg_m.group(0)
+        seg = raw_seg.strip()
+        if len(seg) < 4:
+            continue
+        seg_start = seg_m.start() + (len(raw_seg) - len(raw_seg.lstrip()))
+        lookahead_ctx = text[seg_start:min(len(text), seg_m.end() + 20)]
+
+        # 1. 否定暗标句过滤（支持逗号拆分：如“商务标为非暗标，技术标采用暗标”；及跨行表单“是否采用暗标\n否”）
+        if _BLIND_NEG_RE.search(lookahead_ctx) and not _BLIND_NEG_RE.search(seg):
+            continue
+        if _BLIND_NEG_RE.search(seg):
+            kept_subs = [
+                sub.strip()
+                for sub in re.split(r'[，,]+', seg)
+                if sub.strip() and not _BLIND_NEG_RE.search(sub)
+            ]
+            if not kept_subs:
+                continue
+            seg = '，'.join(kept_subs)
+            first_sub_off = text.find(kept_subs[0], seg_start, seg_m.end())
+            if first_sub_off != -1:
+                seg_start = first_sub_off
+
+        # 2. 识别各类触发条件
+        kw_hit = bool(_BLIND_KEYWORD_RE.search(seg))
+        decl_hit = bool(_BLIND_DECL_POS_RE.search(seg))
+
+        id_hits: list[tuple[str, str]] = []
+        for rule_key, pat, summary in _BLIND_IDENTITY_PATTERNS:
+            if pat.search(seg):
+                id_hits.append((rule_key, summary))
+
+        style_hit = bool(_BLIND_STYLE_BAN_RE.search(seg))
+        style_token_count = len(set(_BLIND_STYLE_TOKEN_RE.findall(seg)))
+        toc_ban_hit = bool(_BLIND_TOC_FORBIDDEN_RE.search(seg))
+        toc_fmt_hit = bool(
+            _BLIND_TOC_POLICY_RE.search(seg)
+            and (kw_hit or re.search(r'(?:统一|格式|字体|生成|保留|删除|清理)', seg))
+        )
+        fmt_hit = bool(_BLIND_FORMAT_CONSTRAINT_RE.search(seg))
+
+        if not (kw_hit or decl_hit or id_hits or style_hit or toc_ban_hit or (kw_hit and toc_fmt_hit) or (kw_hit and fmt_hit)):
+            continue
+
+        # 图片禁令细粒度判定（区分"禁所有图片" vs "仅禁Logo/公章图"）
+        if _BLIND_ALL_IMAGE_BAN_RE.search(seg):
+            if _BLIND_LOGO_ONLY_IMAGE_RE.search(seg):
+                logo_only_image = True
+            else:
+                no_images_strict = True
+        elif any(rk == 'hide_logo_media' for rk, _ in id_hits):
+            logo_only_image = True
+
+        # 记录强暗标判定信号
+        if kw_hit or decl_hit:
+            has_positive_blind_kw = True
+        if any(rk in ('hide_bidder_name', 'hide_person_name', 'hide_contact_info') for rk, _ in id_hits):
+            has_identity_ban = True
+        if style_hit and (style_token_count >= 2 or kw_hit):
+            has_strong_style_ban = True
+
+        if style_hit:
+            style_forbidden = True
+        if toc_ban_hit:
+            toc_forbidden = True
+
+        for rk, _ in id_hits:
+            matched_rules.add(rk)
+
+        # 决定条款归类（按优先级拆成确定性类别）
+        if id_hits:
+            cat = 'no_identity'
+            summary = '；'.join(s for _, s in id_hits)
+            rec_rule = id_hits[0][0]
+        elif style_hit:
+            cat = 'no_special_style'
+            summary = '暗标禁止使用底纹、阴影、加粗、斜体、下划线、边框等特殊样式'
+            rec_rule = None
+        elif toc_ban_hit or toc_fmt_hit:
+            cat = 'toc_policy'
+            summary = '暗标禁止设置/需清理目录' if toc_ban_hit else '暗标目录须按统一格式或招标要求处理'
+            rec_rule = None
+        else:
+            cat = 'format_constraint'
+            summary = '技术标暗标编制及版式限制条款' if (kw_hit or decl_hit) else '统一暗标字体/行距/版式约束'
+            rec_rule = None
+
+        quote = seg[:220]
+        if quote in seen_quotes:
+            continue
+        seen_quotes.add(quote)
+
+        verified = bool(verify_quote(quote, text))
+        page = resolve_page_fn(seg_start, page_ctx)[0] if resolve_page_fn is not None else None
+        candidates.append({
+            'category': cat,
+            'summary': summary,
+            'clause_no': _extract_blind_clause_no(text, seg_start, seg),
+            'quote': quote if verified else '',
+            'quote_verified': verified,
+            'offset': seg_start,
+            'page': page,
+            'recommended_rule': rec_rule,
+        })
+
+    is_blind_bid = bool(has_positive_blind_kw or has_identity_ban or has_strong_style_ban)
+    if not is_blind_bid:
+        return empty
+
+    # 过滤掉纯正文普通格式条款，仅保留 verified 或明确暗标关联项
+    requirements = [c for c in candidates if c.get('quote_verified') and c.get('quote')]
+    if not requirements:
+        # 仅保留真实有原文命中的条款；若全是孤立词未过核验则降级不误报
+        return empty
+
+    # 暗标模式下默认兜底至少推荐名称/标识/人员/联系方式四类基础保护，或保留全部已匹配规则
+    if not matched_rules:
+        matched_rules.update({'hide_bidder_name', 'hide_logo_media', 'hide_person_name', 'hide_contact_info'})
+    else:
+        matched_rules.update({'hide_bidder_name', 'hide_logo_media'})
+
+    recommended_rules = [rk for rk in _BLIND_RULE_ORDER if rk in matched_rules]
+    if no_images_strict:
+        image_ban_scope = 'all_images'
+    elif logo_only_image:
+        image_ban_scope = 'logo_only'
+    else:
+        image_ban_scope = 'none'
+
+    return {
+        'is_blind_bid': True,
+        'requirements': requirements,
+        'recommended_rules': recommended_rules,
+        'toc_forbidden': bool(toc_forbidden),
+        'style_forbidden': bool(style_forbidden),
+        'no_images_strict': bool(no_images_strict),
+        'image_ban_scope': image_ban_scope,
+    }

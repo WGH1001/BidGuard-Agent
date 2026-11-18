@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import shutil
 from typing import Any, Optional
@@ -20,6 +21,7 @@ from backend.models import (
     BidRuleConfig,
     CompanyCertificate,
     ComposerSkill,
+    Tenant,
 )
 from backend.schemas import (
     BizLineIndicatorOverviewOut,
@@ -42,6 +44,8 @@ from backend.worker import (
 )
 from core.bid_composer import (
     LocalKnowledgeSnippetProvider,
+    _normalize_blind_rules,
+    _normalize_custom_words,
     compose_bid_blueprint,
     export_composed_bid_docx,
 )
@@ -202,6 +206,7 @@ def _to_summary_out(row: BidComposeDraft) -> ComposeDraftSummaryOut:
         skill_name=str(stats.get('skill_name') or bp.get('skill_name') or ''),
         biz_line=normalize_skill_biz_line(stats.get('biz_line') or 'general'),
         use_indicator_library=bool(stats.get('use_indicator_library', False)),
+        blind_bid_mode=bool(bp.get('blind_bid_mode') or stats.get('blind_bid_applied', False)),
         title=row.title,
         status=str(row.status or 'completed'),
         progress=int(row.progress if row.progress is not None else 100),
@@ -493,6 +498,24 @@ def import_skill_from_file(
 
 # ── 标书编制任务（支持 async_run=True 后台异步运行 & 切页保活）────────────────
 
+def _parse_blind_json_list(raw_json: Optional[str], field_name: str) -> Optional[list[str]]:
+    if raw_json is None or not str(raw_json).strip():
+        return None
+    try:
+        parsed = json.loads(raw_json)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'INVALID_BLIND_CONFIG', 'message': f"{field_name} JSON 格式非法：{exc}"},
+        ) from exc
+    if not isinstance(parsed, list):
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'INVALID_BLIND_CONFIG', 'message': f"{field_name} 必须为字符串数组"},
+        )
+    return [str(x).strip() for x in parsed if str(x or '').strip()]
+
+
 @router.post('/generate', response_model=ComposeDraftDetailOut)
 def generate_composed_draft(
     tender_file: Optional[UploadFile] = File(default=None),
@@ -504,17 +527,25 @@ def generate_composed_draft(
     skill_id: Optional[int] = Form(default=None),
     use_ai: bool = Form(default=True),
     use_indicator_library: bool = Form(default=False),
+    blind_bid_mode: bool = Form(default=False),
+    blind_rules_json: Optional[str] = Form(default=None),
+    blind_custom_words_json: Optional[str] = Form(default=None),
     async_run: bool = Form(default=False),
     current_user: AuthUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ComposeDraftDetailOut:
-    """E37 + E38：上传招标书或复用体检任务，结合选定写作 Skill 与可选 AI 撰写标书初稿（支持异步后台执行）。"""
+    """E37 + E38 + E43：上传招标书或复用体检任务，结合选定写作 Skill 与可选暗标双模式撰写标书初稿。"""
     mode_clean = (compose_mode or 'skeleton_v1').strip()
     if mode_clean not in ('skeleton_v1', 'knowledge_draft_v2'):
         raise HTTPException(
             status_code=422,
             detail={'code': 'INVALID_COMPOSE_MODE', 'message': f"非法编制模式: {mode_clean}"},
         )
+
+    parsed_blind_rules = _parse_blind_json_list(blind_rules_json, 'blind_rules_json')
+    parsed_custom_words = _parse_blind_json_list(blind_custom_words_json, 'blind_custom_words_json')
+    active_blind_rules = _normalize_blind_rules(bool(blind_bid_mode), parsed_blind_rules)
+    clean_custom_words = _normalize_custom_words(parsed_custom_words) if blind_bid_mode else []
 
     tenant_id = int(current_user.tenant_id)
     user_id = current_user.get('id')
@@ -599,6 +630,9 @@ def generate_composed_draft(
             'skill_name': selected_skill.name if selected_skill else '',
             'biz_line': skill_biz_line,
             'use_indicator_library': should_use_indicator_lib,
+            'blind_bid_applied': bool(blind_bid_mode),
+            'blind_rules': list(active_blind_rules),
+            'blind_custom_word_count': len(clean_custom_words),
         },
         started_at=_utc_now(),
     )
@@ -709,6 +743,16 @@ def generate_composed_draft(
                 else:
                     effective_provider = ind_provider
 
+            tenant_row = sess.query(Tenant).filter_by(id=tenant_id).first()
+            tenant_name = str(tenant_row.name or '').strip() if tenant_row else ''
+            bidder_hints: list[str] = []
+            if (
+                tenant_name
+                and len(tenant_name) >= 4
+                and tenant_name not in ('默认租户', '默认部门', '系统默认部门', 'Default Tenant')
+            ):
+                bidder_hints.append(tenant_name)
+
             blueprint = compose_bid_blueprint(
                 tender_abs,
                 ledger_certs=certs,
@@ -722,6 +766,10 @@ def generate_composed_draft(
                 client=llm_client,
                 skill=skill_snapshot,
                 use_ai=use_ai,
+                blind_bid_mode=bool(blind_bid_mode),
+                blind_rules=active_blind_rules,
+                blind_custom_words=clean_custom_words,
+                bidder_hints=bidder_hints,
                 progress_cb=_on_prog,
                 cancel_check=lambda: worker.check_cancelled(job_key, cancel_ev),
             )
@@ -773,6 +821,9 @@ def generate_composed_draft(
                     'skill_name': bp_dict.get('skill_name'),
                     'ai_status': bp_dict.get('ai_status'),
                     'knowledge_count': len(saved_k_paths),
+                    'blind_bid_mode': bool(blind_bid_mode),
+                    'blind_rules': list(bp_dict.get('blind_rules') or []),
+                    'blind_custom_word_count': int(bp_stats.get('blind_custom_word_count') or 0),
                 },
             )
         except PipelineCancelled:

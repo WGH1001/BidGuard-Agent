@@ -395,6 +395,27 @@ export interface CertLedgerSummaryOut {
   reference_date_source: 'open_date' | 'today' | string
 }
 
+export interface BlindBidRequirementItemOut {
+  category: string
+  summary: string
+  clause_no: string
+  quote: string
+  quote_verified: boolean
+  offset: number
+  page?: number | null
+  recommended_rule?: string | null
+}
+
+export interface BlindBidInfoOut {
+  is_blind_bid: boolean
+  requirements: BlindBidRequirementItemOut[]
+  recommended_rules: string[]
+  toc_forbidden: boolean
+  style_forbidden: boolean
+  no_images_strict?: boolean
+  image_ban_scope?: string
+}
+
 export interface ExtractChecklistOut {
   filename: string
   source_type: string
@@ -415,6 +436,7 @@ export interface ExtractChecklistOut {
   llm_structured: MarkedClauseItem[]
   required_certificates?: RequiredCertItemOut[]
   cert_ledger_summary?: CertLedgerSummaryOut | null
+  blind_bid_info?: BlindBidInfoOut | null
   privacy_stats?: PrivacyStatsOut | null
 }
 
@@ -1038,6 +1060,8 @@ export interface ComposeBlueprintData {
   manual_checklist: ComposeManualItem[]
   cert_match_summary: Record<string, unknown>
   stats: Record<string, unknown>
+  blind_bid_mode?: boolean
+  blind_rules?: string[]
 }
 
 export interface ComposeDraftSummaryOut {
@@ -1048,6 +1072,7 @@ export interface ComposeDraftSummaryOut {
   skill_name?: string
   biz_line?: string
   use_indicator_library?: boolean
+  blind_bid_mode?: boolean
   title: string
   status?: string
   progress?: number
