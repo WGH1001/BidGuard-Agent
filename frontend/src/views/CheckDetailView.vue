@@ -247,6 +247,36 @@ function writeStoredCollapsed(key: string, collapsed: boolean): void {
 const durationCollapsed = ref(readStoredCollapsed(DURATION_COLLAPSED_KEY))
 const scoreCollapsed = ref(readStoredCollapsed(SCORE_COLLAPSED_KEY))
 const forceExpandScoreOnce = ref(route.query.panel === 'score')
+const scoreFocusPulse = ref(false)
+const findingsFocusPulse = ref(false)
+let focusPulseTimer: number | null = null
+let lastHandledFocusSeq = 0
+
+function triggerCardFocusScroll(target: 'score' | 'findings'): void {
+  if (focusPulseTimer !== null) {
+    window.clearTimeout(focusPulseTimer)
+    focusPulseTimer = null
+  }
+  scoreFocusPulse.value = false
+  findingsFocusPulse.value = false
+  void nextTick(() => {
+    const elId = target === 'score' ? 'bg-check-score-card' : 'bg-check-findings-anchor'
+    const el = document.getElementById(elId)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+    if (target === 'score') {
+      scoreFocusPulse.value = true
+    } else {
+      findingsFocusPulse.value = true
+    }
+    focusPulseTimer = window.setTimeout(() => {
+      scoreFocusPulse.value = false
+      findingsFocusPulse.value = false
+      focusPulseTimer = null
+    }, 1700)
+  })
+}
 
 function toggleDurationCollapsed(): void {
   durationCollapsed.value = !durationCollapsed.value
@@ -891,39 +921,75 @@ async function commitRenameDetailTask(): Promise<void> {
   await handleRenameTask(task, nextTitle)
 }
 
-watch(
-  () => [route.query.task_id, route.query.panel],
-  ([rawId, rawPanel]) => {
-    if (rawPanel === 'score') {
-      forceExpandScoreOnce.value = true
-      scoreCollapsed.value = false
-    }
-    const targetId = Number(rawId || 0)
-    if (targetId > 0 && currentTask.value?.id !== targetId) {
+async function focusCheckPanelTarget(rawId: unknown, rawPanel: unknown, withScroll = true): Promise<void> {
+  if (route.path !== '/checks') return
+  const panelStr = typeof rawPanel === 'string' ? rawPanel : ''
+  if (panelStr === 'score') {
+    forceExpandScoreOnce.value = true
+    scoreCollapsed.value = false
+    writeStoredCollapsed(SCORE_COLLAPSED_KEY, false)
+  }
+  const targetId = Number(rawId || 0)
+  if (targetId > 0) {
+    if (currentTask.value?.id !== targetId) {
       const hit = tasks.value.find((t) => t.id === targetId)
       if (hit) {
-        void selectTask(hit)
+        await selectTask(hit)
       } else {
-        void checksApi.detail(targetId).then((d) => {
+        try {
+          const d = await checksApi.detail(targetId)
           currentTask.value = d.task
           findings.value = d.findings || []
           appStore.setActiveTaskId(d.task.id)
-          void loadScoreEstimate(d.task.id)
-        }).catch(() => undefined)
+          await loadScoreEstimate(d.task.id)
+        } catch {
+          return
+        }
       }
+    } else if (panelStr === 'score') {
+      await loadScoreEstimate(targetId)
+    } else {
+      await selectTask(currentTask.value)
     }
+  }
+  if (withScroll && (panelStr === 'score' || targetId > 0)) {
+    triggerCardFocusScroll(panelStr === 'score' ? 'score' : 'findings')
+  }
+}
+
+watch(
+  () => [route.query.task_id, route.query.panel],
+  ([rawId, rawPanel]) => {
+    void focusCheckPanelTarget(rawId, rawPanel, true)
   },
 )
 
-onMounted(() => {
+watch(
+  () => notificationStore.focusRequest.seq,
+  (seq) => {
+    if (!seq || seq <= lastHandledFocusSeq || notificationStore.focusRequest.path !== '/checks') return
+    lastHandledFocusSeq = seq
+    const q = notificationStore.focusRequest.query || {}
+    void focusCheckPanelTarget(q.task_id, q.panel, true)
+  },
+)
+
+onMounted(async () => {
   detailTickTimer = setInterval(() => {
     nowTick.value = Date.now()
   }, 1000)
-  void loadTaskList(true)
+  await loadTaskList(true)
+  if (route.query.panel === 'score' || Number(route.query.task_id || 0) > 0) {
+    triggerCardFocusScroll(route.query.panel === 'score' ? 'score' : 'findings')
+  }
 })
 
 onActivated(() => {
-  if (currentTask.value) {
+  const qTaskId = Number(route.query.task_id || 0)
+  const qPanel = route.query.panel
+  if (qTaskId > 0 || qPanel === 'score') {
+    void focusCheckPanelTarget(qTaskId, qPanel, true)
+  } else if (currentTask.value) {
     void selectTask(currentTask.value)
   } else {
     void loadTaskList(true)
@@ -934,6 +1000,10 @@ onBeforeUnmount(() => {
   if (detailTickTimer) {
     clearInterval(detailTickTimer)
     detailTickTimer = null
+  }
+  if (focusPulseTimer !== null) {
+    window.clearTimeout(focusPulseTimer)
+    focusPulseTimer = null
   }
   stopScorePoll()
 })
@@ -1216,7 +1286,12 @@ onBeforeUnmount(() => {
         </section>
 
         <!-- 标书评分预估与提分诊断面板 -->
-        <el-card shadow="never" class="bg-panel score-est-card">
+        <el-card
+          id="bg-check-score-card"
+          shadow="never"
+          class="bg-panel score-est-card"
+          :class="{ 'bg-focus-flash': scoreFocusPulse }"
+        >
           <template #header>
             <div class="sec-head-row">
               <div class="sec-title-grp">
@@ -1561,11 +1636,13 @@ onBeforeUnmount(() => {
         </el-card>
 
         <!-- 风险卡列表 -->
-        <RiskCard
-          :task-id="currentTask.id"
-          :findings="findings"
-          @updated="handleFindingUpdated"
-        />
+        <div id="bg-check-findings-anchor" :class="{ 'bg-focus-flash': findingsFocusPulse }">
+          <RiskCard
+            :task-id="currentTask.id"
+            :findings="findings"
+            @updated="handleFindingUpdated"
+          />
+        </div>
 
         <!-- 报价回填弹窗（price_status == 'NEED_MANUAL' 时自动弹出） -->
         <PriceManualDialog

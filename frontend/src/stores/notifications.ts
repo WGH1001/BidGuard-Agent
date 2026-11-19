@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue'
+import { computed, h, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { ElNotification } from 'element-plus/es/components/notification/index'
 import router from '@/router'
@@ -91,10 +91,15 @@ export const useNotificationStore = defineStore('notifications', () => {
   const activeScopeKey = ref<string>('')
   const trackedJobs = ref<TrackedBackgroundJob[]>([])
   const notifications = ref<TaskNotificationItem[]>([])
+  const focusRequest = ref<{ seq: number; path: string; query?: Record<string, string> }>({
+    seq: 0,
+    path: '',
+  })
 
   const seenDedupKeys = new Set<string>()
   let pollTimer: number | null = null
   let pollingBusy = false
+  let focusSeq = 0
 
   const runningCount = computed(() => trackedJobs.value.length)
   const unreadCount = computed(() => notifications.value.filter((n) => !n.read).length)
@@ -187,6 +192,12 @@ export const useNotificationStore = defineStore('notifications', () => {
   }
 
   function navigateToTarget(routePath: string, routeQuery?: Record<string, string>): void {
+    focusSeq += 1
+    focusRequest.value = {
+      seq: focusSeq,
+      path: routePath,
+      query: routeQuery ? { ...routeQuery } : undefined,
+    }
     void router.push({
       path: routePath,
       query: routeQuery || undefined,
@@ -240,14 +251,39 @@ export const useNotificationStore = defineStore('notifications', () => {
 
     const statusTag =
       payload.tone === 'error' ? '执行异常' : payload.tone === 'warning' ? '需关注' : '已完成'
-    ElNotification({
+    let toastHandle: { close: () => void } | null = null
+    let activated = false
+    const activateFromToast = (): void => {
+      if (activated) return
+      activated = true
+      toastHandle?.close()
+      openNotification(item)
+    }
+    toastHandle = ElNotification({
       title: `【${kindLabel}】${statusTag}`,
-      message: `${cleanTitle}：${payload.summary}（点击查看详情）`,
+      customClass: 'bg-notif-clickable',
+      message: h('div', { class: 'bg-notif-msg' }, [
+        h('div', { class: 'bg-notif-text' }, `${cleanTitle}：${payload.summary}`),
+        h('div', { class: 'bg-notif-foot' }, [
+          h(
+            'button',
+            {
+              type: 'button',
+              class: 'bg-notif-cta',
+              onClick: (ev: MouseEvent) => {
+                ev.stopPropagation()
+                activateFromToast()
+              },
+            },
+            '点击查看详情 →',
+          ),
+        ]),
+      ]),
       type: payload.tone,
       position: 'top-right',
-      duration: 6500,
+      duration: 7500,
       onClick: () => {
-        openNotification(item)
+        activateFromToast()
       },
     })
   }
@@ -353,6 +389,7 @@ export const useNotificationStore = defineStore('notifications', () => {
                 summary: '投标文件初稿已生成，可前往预览并下载 .docx',
                 tone: 'success',
                 routePath: '/composer',
+                routeQuery: { draft_id: String(draft.id) },
                 dedupSuffix: `completed:${draft.created_at || ''}`,
               })
             } else if (dStatus === 'cancelled') {
@@ -365,6 +402,7 @@ export const useNotificationStore = defineStore('notifications', () => {
                 summary: draft.error_msg || '标书初稿生成失败',
                 tone: 'error',
                 routePath: '/composer',
+                routeQuery: { draft_id: String(draft.id) },
                 dedupSuffix: `failed:${draft.created_at || ''}`,
               })
             }
@@ -385,6 +423,7 @@ export const useNotificationStore = defineStore('notifications', () => {
                 summary: `最高净文本相似度 ${rep.max_similarity_pct}%（风险等级：${rep.risk_level}）`,
                 tone: rep.risk_level === 'high' ? 'warning' : 'success',
                 routePath: '/similarity',
+                routeQuery: { report_id: String(rep.id) },
                 dedupSuffix: `completed:${rep.created_at || ''}`,
               })
             } else if (rStatus === 'cancelled') {
@@ -397,6 +436,7 @@ export const useNotificationStore = defineStore('notifications', () => {
                 summary: rep.error_msg || '多标书交叉比对失败',
                 tone: 'error',
                 routePath: '/similarity',
+                routeQuery: { report_id: String(rep.id) },
                 dedupSuffix: `failed:${rep.created_at || ''}`,
               })
             }
@@ -409,6 +449,7 @@ export const useNotificationStore = defineStore('notifications', () => {
               summary: `结论：${rad.conclusion?.recommendation || '已完成'}（疑似控标参数 ${rad.suspicious_params?.length || 0} 处）`,
               tone: rad.conclusion?.recommendation === '疑似控标高' ? 'warning' : 'success',
               routePath: '/radar',
+              routeQuery: { task_id: String(rad.task_id) },
               dedupSuffix: `done:${rad.task_id}`,
             })
           }
@@ -464,6 +505,7 @@ export const useNotificationStore = defineStore('notifications', () => {
   return {
     trackedJobs,
     notifications,
+    focusRequest,
     runningCount,
     unreadCount,
     syncUserScope,

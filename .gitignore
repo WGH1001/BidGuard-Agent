@@ -20,3 +20,4 @@ data/*.db-wal
 *.media.ocr.json
 data/corpus/sim_bids/
 data/corpus/truebids/
+docs/submission/

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { checksApi, radarApi, validateUploadFile } from '@/api'
@@ -9,8 +10,28 @@ import { useNotificationStore } from '@/stores/notifications'
 
 defineOptions({ name: 'RadarView' })
 
+const route = useRoute()
 const authStore = useAuthStore()
 const notificationStore = useNotificationStore()
+const radarFocusPulse = ref(false)
+let radarFocusTimer: number | null = null
+let lastHandledRadarSeq = 0
+
+function scrollRadarDetailFocus(): void {
+  if (radarFocusTimer !== null) {
+    window.clearTimeout(radarFocusTimer)
+    radarFocusTimer = null
+  }
+  radarFocusPulse.value = false
+  void nextTick(() => {
+    document.getElementById('bg-radar-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    radarFocusPulse.value = true
+    radarFocusTimer = window.setTimeout(() => {
+      radarFocusPulse.value = false
+      radarFocusTimer = null
+    }, 1700)
+  })
+}
 
 const loading = ref(false)
 const detailLoading = ref(false)
@@ -163,6 +184,7 @@ async function handleRescan(taskId: number): Promise<void> {
       summary: `重新扫描结论：${res.conclusion?.recommendation || '已完成'}（疑似参数 ${res.suspicious_params?.length || 0} 处）`,
       tone: res.conclusion?.recommendation === '疑似控标高' ? 'warning' : 'success',
       routePath: '/radar',
+      routeQuery: { task_id: String(res.task_id) },
       dedupSuffix: `rescan:${Date.now()}`,
     })
   } catch {
@@ -313,6 +335,7 @@ async function handleRunRadar(): Promise<void> {
             : `成功完成 ${successCount} 份招标文件的投前控标雷达评估`,
         tone: latest?.conclusion?.recommendation === '疑似控标高' ? 'warning' : 'success',
         routePath: '/radar',
+        routeQuery: latest?.task_id ? { task_id: String(latest.task_id) } : undefined,
         dedupSuffix: `scan:${Date.now()}`,
       })
     }
@@ -342,13 +365,69 @@ function exclusiveTypeCls(exType: string): string {
   return 'warning'
 }
 
-onMounted(() => {
+async function focusRadarTaskTarget(rawTaskId: unknown): Promise<void> {
+  if (route.path !== '/radar') return
+  const taskId = Number(rawTaskId || 0)
+  if (Number.isFinite(taskId) && taskId > 0) {
+    try {
+      const res = await radarApi.detail(taskId)
+      scanResult.value = res
+      saveToSessionStorage(res)
+    } catch {
+      // ignore missing/deleted record
+    }
+  }
+  scrollRadarDetailFocus()
+}
+
+watch(
+  () => route.query.task_id,
+  (rawTaskId) => {
+    if (Number(rawTaskId || 0) > 0) {
+      void focusRadarTaskTarget(rawTaskId)
+    }
+  },
+)
+
+watch(
+  () => notificationStore.focusRequest.seq,
+  (seq) => {
+    if (!seq || seq <= lastHandledRadarSeq || notificationStore.focusRequest.path !== '/radar') return
+    lastHandledRadarSeq = seq
+    const qId = notificationStore.focusRequest.query?.task_id
+    void loadHistoryList(false).then(() => focusRadarTaskTarget(qId))
+  },
+)
+
+onMounted(async () => {
   restoreFromSessionStorage()
-  void loadHistoryList(true)
+  await loadHistoryList(true)
+  if (Number(route.query.task_id || 0) > 0) {
+    await focusRadarTaskTarget(route.query.task_id)
+  }
   window.addEventListener('bidguard-auth-changed', handleAuthChanged)
 })
 
+onActivated(() => {
+  const hasNewFocus =
+    notificationStore.focusRequest.path === '/radar' &&
+    notificationStore.focusRequest.seq > lastHandledRadarSeq
+  if (hasNewFocus) {
+    lastHandledRadarSeq = notificationStore.focusRequest.seq
+  }
+  const qTask = Number(
+    route.query.task_id || (hasNewFocus ? notificationStore.focusRequest.query?.task_id : 0) || 0,
+  )
+  if (qTask > 0 && (hasNewFocus || scanResult.value?.task_id !== qTask)) {
+    void loadHistoryList(false).then(() => focusRadarTaskTarget(qTask))
+  }
+})
+
 onBeforeUnmount(() => {
+  if (radarFocusTimer !== null) {
+    window.clearTimeout(radarFocusTimer)
+    radarFocusTimer = null
+  }
   window.removeEventListener('bidguard-auth-changed', handleAuthChanged)
 })
 </script>
@@ -552,8 +631,9 @@ onBeforeUnmount(() => {
       <template v-if="scanResult">
         <!-- 结论横幅（强制带"疑似"标注，明确声明不替用户拍板） -->
         <section
+          id="bg-radar-detail"
           class="conclusion-banner bg-panel"
-          :class="recommendationBannerCls(scanResult.conclusion.recommendation)"
+          :class="[recommendationBannerCls(scanResult.conclusion.recommendation), { 'bg-focus-flash': radarFocusPulse }]"
         >
           <div class="cb-top">
             <div class="cb-badge-row">

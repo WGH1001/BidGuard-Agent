@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
@@ -30,6 +30,25 @@ defineOptions({ name: 'BidComposerView' })
 const route = useRoute()
 const notificationStore = useNotificationStore()
 const mainTab = ref<'compose' | 'clean'>('compose')
+const draftFocusPulse = ref(false)
+let draftFocusTimer: number | null = null
+let lastHandledComposerSeq = 0
+
+function scrollComposerDetailFocus(): void {
+  if (draftFocusTimer !== null) {
+    window.clearTimeout(draftFocusTimer)
+    draftFocusTimer = null
+  }
+  draftFocusPulse.value = false
+  void nextTick(() => {
+    document.getElementById('bg-composer-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    draftFocusPulse.value = true
+    draftFocusTimer = window.setTimeout(() => {
+      draftFocusPulse.value = false
+      draftFocusTimer = null
+    }, 1700)
+  })
+}
 
 // ── Skills 状态与 GitHub/Gitee/本地导入弹窗 ───────────────────────────────
 const skillList = ref<ComposerSkillOut[]>([])
@@ -233,6 +252,7 @@ function scheduleDraftPoll(draftId: number): void {
           summary: '投标文件初稿已生成，可前往预览并下载 .docx',
           tone: 'success',
           routePath: '/composer',
+          routeQuery: { draft_id: String(detail.id) },
           dedupSuffix: `completed:${detail.created_at || ''}`,
         })
       } else if (detail.status === 'failed') {
@@ -243,6 +263,7 @@ function scheduleDraftPoll(draftId: number): void {
           summary: detail.error_msg || '标书初稿生成失败',
           tone: 'error',
           routePath: '/composer',
+          routeQuery: { draft_id: String(detail.id) },
           dedupSuffix: `failed:${detail.created_at || ''}`,
         })
       }
@@ -513,6 +534,7 @@ async function handleGenerateDraft(): Promise<void> {
         progress: detail.progress,
         stageDetail: detail.stage_detail || '标书编制中…',
         routePath: '/composer',
+        routeQuery: { draft_id: String(detail.id) },
       })
       scheduleDraftPoll(detail.id)
     } else {
@@ -523,6 +545,7 @@ async function handleGenerateDraft(): Promise<void> {
         summary: '投标文件初稿已生成，可前往预览并下载 .docx',
         tone: 'success',
         routePath: '/composer',
+        routeQuery: { draft_id: String(detail.id) },
         dedupSuffix: `completed:${detail.created_at || ''}`,
       })
     }
@@ -731,22 +754,72 @@ function applyRouteQueryPrefill(): void {
   }
 }
 
+async function focusDraftTarget(rawDraftId: unknown): Promise<void> {
+  if (route.path !== '/composer') return
+  const draftId = Number(rawDraftId || 0)
+  if (!Number.isFinite(draftId) || draftId <= 0) return
+  mainTab.value = 'compose'
+  await openDraftDetail(draftId).catch(() => undefined)
+  scrollComposerDetailFocus()
+}
+
 watch(
-  () => [route.query.taskId, route.query.compose_scope, route.query.topic, route.query.guidance],
+  () => [route.query.taskId, route.query.compose_scope, route.query.topic, route.query.guidance, route.query.draft_id],
   () => {
     applyRouteQueryPrefill()
+    if (Number(route.query.draft_id || 0) > 0) {
+      void focusDraftTarget(route.query.draft_id)
+    }
+  },
+)
+
+watch(
+  () => notificationStore.focusRequest.seq,
+  (seq) => {
+    if (!seq || seq <= lastHandledComposerSeq || notificationStore.focusRequest.path !== '/composer') return
+    lastHandledComposerSeq = seq
+    const qDraft = Number(notificationStore.focusRequest.query?.draft_id || 0)
+    if (qDraft > 0) {
+      void loadDrafts().then(() => focusDraftTarget(qDraft))
+    } else {
+      mainTab.value = 'compose'
+      scrollComposerDetailFocus()
+    }
   },
 )
 
 onMounted(async () => {
   applyRouteQueryPrefill()
   await Promise.all([loadSkills(), loadDrafts(), loadTasks()])
+  if (Number(route.query.draft_id || 0) > 0) {
+    await focusDraftTarget(route.query.draft_id)
+  }
   if (cleanTaskId.value) {
     await loadAcceptedForClean(cleanTaskId.value)
   }
 })
 
+onActivated(() => {
+  applyRouteQueryPrefill()
+  const hasNewFocus =
+    notificationStore.focusRequest.path === '/composer' &&
+    notificationStore.focusRequest.seq > lastHandledComposerSeq
+  if (hasNewFocus) {
+    lastHandledComposerSeq = notificationStore.focusRequest.seq
+  }
+  const qDraft = Number(
+    route.query.draft_id || (hasNewFocus ? notificationStore.focusRequest.query?.draft_id : 0) || 0,
+  )
+  if (qDraft > 0 && (hasNewFocus || activeDraft.value?.id !== qDraft)) {
+    void loadDrafts().then(() => focusDraftTarget(qDraft))
+  }
+})
+
 onUnmounted(() => {
+  if (draftFocusTimer !== null) {
+    window.clearTimeout(draftFocusTimer)
+    draftFocusTimer = null
+  }
   stopDraftPoll()
 })
 </script>
@@ -1186,7 +1259,12 @@ onUnmounted(() => {
           </el-card>
 
           <!-- 右侧蓝图详情 / 异步进度 / 折叠待办核对抽屉 -->
-          <el-card shadow="never" class="detail-pane">
+          <el-card
+            id="bg-composer-detail"
+            shadow="never"
+            class="detail-pane"
+            :class="{ 'bg-focus-flash': draftFocusPulse }"
+          >
             <el-empty v-if="!activeDraft" description="请选择左侧草稿或生成新的标书初稿" />
 
             <template v-else-if="isRunningStatus(activeDraft.status)">

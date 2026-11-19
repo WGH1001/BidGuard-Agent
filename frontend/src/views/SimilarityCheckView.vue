@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onActivated, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { similarityApi, validateUploadFile } from '@/api'
@@ -15,7 +16,27 @@ import {
 
 defineOptions({ name: 'SimilarityCheckView' })
 
+const route = useRoute()
 const notificationStore = useNotificationStore()
+const reportFocusPulse = ref(false)
+let reportFocusTimer: number | null = null
+let lastHandledSimSeq = 0
+
+function scrollSimilarityDetailFocus(): void {
+  if (reportFocusTimer !== null) {
+    window.clearTimeout(reportFocusTimer)
+    reportFocusTimer = null
+  }
+  reportFocusPulse.value = false
+  void nextTick(() => {
+    document.getElementById('bg-similarity-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    reportFocusPulse.value = true
+    reportFocusTimer = window.setTimeout(() => {
+      reportFocusPulse.value = false
+      reportFocusTimer = null
+    }, 1700)
+  })
+}
 
 interface PendingBidItem {
   id: string
@@ -120,6 +141,7 @@ function schedulePoll(reportId: number): void {
           summary: `最高净文本相似度 ${detail.max_similarity_pct}%（风险等级：${detail.risk_level}）`,
           tone: detail.risk_level === 'high' ? 'warning' : 'success',
           routePath: '/similarity',
+          routeQuery: { report_id: String(detail.id) },
           dedupSuffix: `completed:${detail.created_at || ''}`,
         })
       } else if (detail.status === 'failed') {
@@ -130,6 +152,7 @@ function schedulePoll(reportId: number): void {
           summary: detail.error_msg || '多标书交叉比对失败',
           tone: 'error',
           routePath: '/similarity',
+          routeQuery: { report_id: String(detail.id) },
           dedupSuffix: `failed:${detail.created_at || ''}`,
         })
       }
@@ -221,6 +244,7 @@ async function handleRunCompare(): Promise<void> {
         progress: detail.progress,
         stageDetail: detail.stage_detail || '交叉比对分析中…',
         routePath: '/similarity',
+        routeQuery: { report_id: String(detail.id) },
       })
       schedulePoll(detail.id)
     } else {
@@ -231,6 +255,7 @@ async function handleRunCompare(): Promise<void> {
         summary: `最高净文本相似度 ${detail.max_similarity_pct}%（风险等级：${detail.risk_level}）`,
         tone: detail.risk_level === 'high' ? 'warning' : 'success',
         routePath: '/similarity',
+        routeQuery: { report_id: String(detail.id) },
         dedupSuffix: `completed:${detail.created_at || ''}`,
       })
     }
@@ -330,11 +355,63 @@ const filteredPairs = computed(() => {
   return pairs.filter((p) => pairKey(p.a_label, p.b_label) === selectedPairKey.value)
 })
 
-onMounted(() => {
-  void fetchHistory()
+async function focusSimilarityReportTarget(rawReportId: unknown): Promise<void> {
+  if (route.path !== '/similarity') return
+  const reportId = Number(rawReportId || 0)
+  if (!Number.isFinite(reportId) || reportId <= 0) {
+    scrollSimilarityDetailFocus()
+    return
+  }
+  await loadReportDetail(reportId).catch(() => undefined)
+  scrollSimilarityDetailFocus()
+}
+
+watch(
+  () => route.query.report_id,
+  (rawReportId) => {
+    if (Number(rawReportId || 0) > 0) {
+      void focusSimilarityReportTarget(rawReportId)
+    }
+  },
+)
+
+watch(
+  () => notificationStore.focusRequest.seq,
+  (seq) => {
+    if (!seq || seq <= lastHandledSimSeq || notificationStore.focusRequest.path !== '/similarity') return
+    lastHandledSimSeq = seq
+    const qId = notificationStore.focusRequest.query?.report_id
+    void fetchHistory().then(() => focusSimilarityReportTarget(qId))
+  },
+)
+
+onMounted(async () => {
+  await fetchHistory()
+  if (Number(route.query.report_id || 0) > 0) {
+    await focusSimilarityReportTarget(route.query.report_id)
+  }
+})
+
+onActivated(() => {
+  const hasNewFocus =
+    notificationStore.focusRequest.path === '/similarity' &&
+    notificationStore.focusRequest.seq > lastHandledSimSeq
+  if (hasNewFocus) {
+    lastHandledSimSeq = notificationStore.focusRequest.seq
+  }
+  const qReport = Number(
+    route.query.report_id || (hasNewFocus ? notificationStore.focusRequest.query?.report_id : 0) || 0,
+  )
+  if (qReport > 0 && (hasNewFocus || activeReport.value?.id !== qReport)) {
+    void fetchHistory().then(() => focusSimilarityReportTarget(qReport))
+  }
 })
 
 onUnmounted(() => {
+  if (reportFocusTimer !== null) {
+    window.clearTimeout(reportFocusTimer)
+    reportFocusTimer = null
+  }
   stopPolling()
 })
 </script>
@@ -462,7 +539,7 @@ onUnmounted(() => {
         </div>
       </aside>
 
-      <main class="bg-panel sim-detail-pane">
+      <main id="bg-similarity-detail" class="bg-panel sim-detail-pane" :class="{ 'bg-focus-flash': reportFocusPulse }">
         <el-empty
           v-if="!activeReport"
           description="请上传至少 2 份投标文件发起比对，或从左侧选择历史记录查看分析结果"
