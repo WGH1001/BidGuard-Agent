@@ -10,6 +10,8 @@ import type {
   BidTaskOut,
   BidTaskStats,
   PriceManualBackfillOut,
+  ScoreCriterionItemOut,
+  ScoreEstimateOut,
 } from '@/api/types'
 import { useAppStore } from '@/stores/app'
 
@@ -66,6 +68,10 @@ const pageSize = ref(12)
 const currentTask = ref<BidTaskOut | null>(null)
 const findings = ref<BidFindingOut[]>([])
 const priceModalVisible = ref(false)
+const scoreEstimate = ref<ScoreEstimateOut | null>(null)
+const triggeringScore = ref(false)
+const exportingScore = ref(false)
+let scorePollTimer: ReturnType<typeof setInterval> | null = null
 
 const taskListRef = ref<InstanceType<typeof CheckTaskList> | null>(null)
 const sseRef = ref<InstanceType<typeof SseProgress> | null>(null)
@@ -283,16 +289,123 @@ async function loadTaskList(selectFirst = false): Promise<void> {
 
 async function selectTask(task: BidTaskOut): Promise<void> {
   cancelRenameDetailTask()
+  stopScorePoll()
   appStore.setActiveTaskId(task.id)
   detailLoading.value = true
   try {
     const detail = await checksApi.detail(task.id)
     currentTask.value = detail.task
     findings.value = detail.findings || []
+    await loadScoreEstimate(detail.task.id)
     checkAutoPopupPriceManual(detail.task)
   } finally {
     detailLoading.value = false
   }
+}
+
+function stopScorePoll(): void {
+  if (scorePollTimer) {
+    clearInterval(scorePollTimer)
+    scorePollTimer = null
+  }
+}
+
+function scheduleScorePoll(taskId: number): void {
+  stopScorePoll()
+  scorePollTimer = setInterval(async () => {
+    if (!currentTask.value || currentTask.value.id !== taskId) {
+      stopScorePoll()
+      return
+    }
+    try {
+      const snap = await checksApi.getScoreEstimate(taskId)
+      scoreEstimate.value = snap
+      if (!['queued', 'running'].includes(snap.status)) {
+        stopScorePoll()
+        if (snap.status === 'completed') {
+          ElMessage.success('标书评分预估与提分诊断已完成')
+        } else if (snap.status === 'failed' && snap.error_msg) {
+          ElMessage.warning(snap.error_msg)
+        }
+      }
+    } catch {
+      stopScorePoll()
+    }
+  }, 2000)
+}
+
+async function loadScoreEstimate(taskId: number): Promise<void> {
+  try {
+    const snap = await checksApi.getScoreEstimate(taskId)
+    scoreEstimate.value = snap
+    if (['queued', 'running'].includes(snap.status)) {
+      scheduleScorePoll(taskId)
+    }
+  } catch {
+    scoreEstimate.value = null
+  }
+}
+
+async function handleRunScoreEstimate(): Promise<void> {
+  if (!currentTask.value || triggeringScore.value) return
+  if (isRunningTask.value) {
+    ElMessage.warning('请等待防废标核验流水线完成后再执行评分预估')
+    return
+  }
+  triggeringScore.value = true
+  try {
+    const res = await checksApi.runScoreEstimate(currentTask.value.id, true)
+    scoreEstimate.value = res
+    if (['queued', 'running'].includes(res.status)) {
+      ElMessage.info('标书评分预估已在后台启动，正在实时刷新进度…')
+      scheduleScorePoll(currentTask.value.id)
+    } else if (res.status === 'completed') {
+      ElMessage.success('标书评分预估与提分诊断已完成')
+    }
+  } finally {
+    triggeringScore.value = false
+  }
+}
+
+async function handleDownloadScoreReport(): Promise<void> {
+  if (!currentTask.value || exportingScore.value) return
+  exportingScore.value = true
+  try {
+    await checksApi.downloadScoreEstimateReport(
+      currentTask.value.id,
+      `${currentTask.value.title}_标书预估得分与提分诊断报告.docx`,
+    )
+    ElMessage.success('已下载《标书预估得分与提分诊断报告.docx》')
+  } finally {
+    exportingScore.value = false
+  }
+}
+
+function scoreStatusLabel(row: ScoreCriterionItemOut): string {
+  if (row.status === 'evaluated') return '已评出'
+  if (row.status === 'pending_open_bid') return '待开标确定'
+  if (row.status === 'veto_risk') return '否决风险'
+  if (row.status_reason === 'ambiguous_deduction_rule') return '复杂规则待核'
+  if (row.status_reason === 'llm_call_failed') return '模型超时待复核'
+  return '待开启模型'
+}
+
+function scoreStatusTagType(row: ScoreCriterionItemOut): 'success' | 'warning' | 'danger' | 'info' {
+  if (row.status === 'evaluated') return 'success'
+  if (row.status === 'veto_risk') return 'danger'
+  if (row.status === 'pending_open_bid') return 'info'
+  return 'warning'
+}
+
+function scoreCategoryLabel(cat: string): string {
+  const map: Record<string, string> = {
+    price: '价格部分',
+    qualification: '资质证书',
+    business: '商务业绩',
+    service: '售后运维',
+    technical: '技术方案',
+  }
+  return map[cat] || cat
 }
 
 function checkAutoPopupPriceManual(task: BidTaskOut): void {
@@ -534,6 +647,7 @@ onBeforeUnmount(() => {
     clearInterval(detailTickTimer)
     detailTickTimer = null
   }
+  stopScorePoll()
 })
 
 </script>
@@ -797,6 +911,255 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </section>
+
+        <!-- E42：标书评分预估与提分诊断面板 -->
+        <el-card shadow="never" class="bg-panel score-est-card">
+          <template #header>
+            <div class="sec-head-row">
+              <div class="sec-title-grp">
+                <span class="sec-main-title">标书评分预估与提分诊断（E42）</span>
+                <el-tag
+                  v-if="scoreEstimate && scoreEstimate.status === 'completed'"
+                  size="small"
+                  :type="scoreEstimate.llm_status === 'done' ? 'success' : 'info'"
+                >
+                  {{
+                    scoreEstimate.llm_status === 'done'
+                      ? '局部窗 AI + 确定性引擎已评估'
+                      : '0-Token 确定性预筛模式'
+                  }}
+                </el-tag>
+              </div>
+              <div class="sec-act-grp">
+                <el-button
+                  type="primary"
+                  size="small"
+                  :loading="triggeringScore || (scoreEstimate?.status === 'running' || scoreEstimate?.status === 'queued')"
+                  :disabled="isRunningTask"
+                  @click="handleRunScoreEstimate"
+                >
+                  {{
+                    scoreEstimate?.status === 'completed'
+                      ? '重新评估标书得分'
+                      : scoreEstimate?.status === 'running' || scoreEstimate?.status === 'queued'
+                        ? '正在评估中…'
+                        : '一键发起评分预估'
+                  }}
+                </el-button>
+                <el-button
+                  v-if="scoreEstimate?.status === 'completed'"
+                  type="success"
+                  size="small"
+                  plain
+                  :loading="exportingScore"
+                  @click="handleDownloadScoreReport"
+                >
+                  下载诊断报告 (.docx)
+                </el-button>
+              </div>
+            </div>
+          </template>
+
+          <!-- 三条防幻觉红线之三：常驻显眼免责声明（严禁省略或弱化） -->
+          <el-alert
+            type="warning"
+            :closable="false"
+            show-icon
+            class="score-disclaimer-banner"
+            title="AI 质量自评预估（非最终评委实际打分）"
+            description="本预估仅基于招标评分细则与我方投标书局部证据窗口进行技术/商务质量诊断与查漏补缺，价格分取决于开标现场各投标人报价基准，不代表评标委员会最终打分承诺。"
+          />
+
+          <div
+            v-if="scoreEstimate && (scoreEstimate.status === 'running' || scoreEstimate.status === 'queued')"
+            class="score-running-box"
+          >
+            <div class="srb-txt">
+              <b>{{ scoreEstimate.stage_detail || '正在按评分细则逐项检索投标正文并计算预估得分…' }}</b>
+            </div>
+            <el-progress :percentage="scoreEstimate.progress || 15" :stroke-width="8" striped striped-flow />
+          </div>
+
+          <el-alert
+            v-else-if="scoreEstimate && scoreEstimate.status === 'failed'"
+            type="error"
+            :closable="false"
+            show-icon
+            class="mt-10"
+            :title="`评分预估未完成：${scoreEstimate.error_msg || '执行中断，请点击右上角重新评估'}`"
+          />
+
+          <template v-else-if="scoreEstimate && scoreEstimate.status === 'completed'">
+            <!-- 分值合计≠100 诚实告警（HANDOVER §5.1 已知段落型评分细则粒度制约） -->
+            <el-alert
+              v-if="scoreEstimate.score_scale_warning"
+              type="info"
+              :closable="false"
+              show-icon
+              class="mt-10"
+              :title="scoreEstimate.score_scale_warning"
+            />
+
+            <!-- 一票否决风险先导警示（联动 F2/F3/F4/E43 暗标） -->
+            <el-alert
+              v-if="scoreEstimate.has_veto_risk || scoreEstimate.veto_alerts.length > 0"
+              type="error"
+              :closable="false"
+              show-icon
+              class="mt-10"
+              :title="`存在疑似一票否决项（共 ${scoreEstimate.veto_alerts.length} 项 —— 请优先清零废标风险，切勿仅凭正文得分盲目封标）`"
+            >
+              <ul class="score-veto-list">
+                <li
+                  v-for="(va, vIdx) in scoreEstimate.veto_alerts.slice(0, 6)"
+                  :key="`va_${vIdx}`"
+                >
+                  <b>[{{ va.source_module }} · {{ va.code }}]</b>
+                  {{ va.message }}（建议：{{ va.suggestion }}）
+                </li>
+              </ul>
+            </el-alert>
+
+            <!-- 顶部四格核心指标总览 -->
+            <div class="score-summary-grid">
+              <div class="ssg-item primary">
+                <div class="ssg-label">非价格项预估得分 / 已评估满分</div>
+                <div class="ssg-val mono-num">
+                  {{ scoreEstimate.assessed_estimated_score }}
+                  <span class="ssg-sub">/ {{ scoreEstimate.assessed_max_score }} 分</span>
+                </div>
+                <div class="ssg-foot">
+                  得分率：{{ scoreEstimate.assessed_ratio_pct != null ? `${scoreEstimate.assessed_ratio_pct}%` : '—' }}
+                </div>
+              </div>
+              <div class="ssg-item">
+                <div class="ssg-label">价格分（待开标确定）</div>
+                <div class="ssg-val mono-num">
+                  {{ scoreEstimate.price_pending_max_score }}
+                  <span class="ssg-sub">分</span>
+                </div>
+                <div class="ssg-foot">依赖开标现场评标基准价（禁捏造）</div>
+              </div>
+              <div class="ssg-item">
+                <div class="ssg-label">待模型/人工确认分值</div>
+                <div class="ssg-val mono-num">
+                  {{ scoreEstimate.need_llm_max_score }}
+                  <span class="ssg-sub">分</span>
+                </div>
+                <div class="ssg-foot">提取满分合计 {{ scoreEstimate.items_sum_max_score }} 分</div>
+              </div>
+              <div class="ssg-item" :class="{ danger: scoreEstimate.veto_alerts.length > 0 }">
+                <div class="ssg-label">一票否决红线预警</div>
+                <div class="ssg-val mono-num">
+                  {{ scoreEstimate.veto_alerts.length }}
+                  <span class="ssg-sub">项</span>
+                </div>
+                <div class="ssg-foot">含 F2/F3/F4 及 E43 暗标合规</div>
+              </div>
+            </div>
+
+            <!-- 重点提分抓手 Top-5 -->
+            <div v-if="scoreEstimate.top_priorities.length > 0" class="score-priority-box">
+              <div class="spb-head">
+                <b>重点提分行动抓手（按可挽回分值空间从高到低排序）</b>
+                <el-button
+                  size="small"
+                  type="primary"
+                  link
+                  @click="router.push({ path: '/composer', query: { taskId: String(currentTask.id) } })"
+                >
+                  前往 F8 标书编制中心定向补强 →
+                </el-button>
+              </div>
+              <div class="spb-list">
+                <div
+                  v-for="(pr, pIdx) in scoreEstimate.top_priorities"
+                  :key="pr.criterion_id"
+                  class="spb-row"
+                >
+                  <span class="spb-rank mono-num">TOP {{ pIdx + 1 }}</span>
+                  <span class="spb-factor">{{ pr.factor }}</span>
+                  <el-tag size="small" type="danger" effect="plain">
+                    可挽回 +{{ pr.gap_score }} 分（满分 {{ pr.max_score }}）
+                  </el-tag>
+                  <span class="spb-action">{{ pr.action_summary }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 分项评分细则明细表 -->
+            <el-table :data="scoreEstimate.items" border size="small" class="score-items-table">
+              <el-table-column label="维度" width="95">
+                <template #default="{ row }">
+                  <el-tag size="small" effect="plain">
+                    {{ scoreCategoryLabel((row as ScoreCriterionItemOut).category) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="评分因素与标准" min-width="180">
+                <template #default="{ row }">
+                  <div class="sit-factor">{{ (row as ScoreCriterionItemOut).factor }}</div>
+                  <div class="sit-sec">{{ (row as ScoreCriterionItemOut).section }}</div>
+                </template>
+              </el-table-column>
+              <el-table-column label="满分" width="76" align="right">
+                <template #default="{ row }">
+                  <span class="mono-num">{{ (row as ScoreCriterionItemOut).max_score }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="预估得分" width="90" align="right">
+                <template #default="{ row }">
+                  <b v-if="(row as ScoreCriterionItemOut).estimated_score != null" class="mono-num">
+                    {{ (row as ScoreCriterionItemOut).estimated_score }}
+                  </b>
+                  <span v-else class="muted-txt">—</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="评估状态" width="120">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="scoreStatusTagType(row as ScoreCriterionItemOut)">
+                    {{ scoreStatusLabel(row as ScoreCriterionItemOut) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="失分原因与提分建议" min-width="260">
+                <template #default="{ row }">
+                  <div class="sit-reason">
+                    <b>原因：</b>{{ ((row as ScoreCriterionItemOut).deduction_reasons || []).join('；') || '—' }}
+                  </div>
+                  <div class="sit-sug">
+                    <b>建议：</b>{{ ((row as ScoreCriterionItemOut).improvement_suggestions || []).join('；') || '—' }}
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="投标书正文依据" min-width="220">
+                <template #default="{ row }">
+                  <el-collapse
+                    v-if="((row as ScoreCriterionItemOut).evidence_quotes || []).some((q) => q.quote_verified && q.quote)"
+                  >
+                    <el-collapse-item title="展开核验摘录与页码" :name="(row as ScoreCriterionItemOut).criterion_id">
+                      <div
+                        v-for="(eq, eqIdx) in ((row as ScoreCriterionItemOut).evidence_quotes || []).filter((q) => q.quote_verified && q.quote)"
+                        :key="`eq_${eqIdx}`"
+                        class="sit-quote-item"
+                      >
+                        <el-tag size="small" type="info" class="mr-4">
+                          {{ eq.page ? `P${eq.page}` : (eq.offset != null ? `@char${eq.offset}` : '正文') }}
+                        </el-tag>
+                        <span>{{ eq.quote }}</span>
+                      </div>
+                    </el-collapse-item>
+                  </el-collapse>
+                  <span v-else class="muted-txt">原文未直引</span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </template>
+
+          <div v-else class="score-idle-hint">
+            尚未生成评分预估结果。点击右上角「一键发起评分预估」，系统将按招标《评分细则》逐条评估我方标书正文质量并给出提分抓手。
+          </div>
+        </el-card>
 
         <!-- 风险卡列表 -->
         <RiskCard
@@ -1078,6 +1441,200 @@ onBeforeUnmount(() => {
 
 .cw-empty {
   padding: 80px 24px;
+}
+
+.score-est-card {
+  margin-bottom: 14px;
+}
+
+.sec-head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.sec-title-grp {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sec-main-title {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--txt-strong);
+}
+
+.sec-act-grp {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.score-disclaimer-banner {
+  border-left: 4px solid #f59e0b;
+}
+
+.mt-10 {
+  margin-top: 10px;
+}
+
+.score-running-box {
+  margin-top: 12px;
+  padding: 12px;
+  background: #f8fafc;
+  border-radius: 6px;
+}
+
+.srb-txt {
+  margin-bottom: 6px;
+  font-size: 12.5px;
+}
+
+.score-veto-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.score-summary-grid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.ssg-item {
+  padding: 10px 12px;
+  border: 1px solid var(--border-line);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.ssg-item.primary {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.ssg-item.danger {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.ssg-label {
+  font-size: 12px;
+  color: var(--txt-muted);
+}
+
+.ssg-val {
+  margin: 4px 0 2px;
+  font-size: 20px;
+  font-weight: 900;
+  color: var(--txt-strong);
+}
+
+.ssg-sub {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--txt-muted);
+}
+
+.ssg-foot {
+  font-size: 11px;
+  color: var(--txt-muted);
+}
+
+.score-priority-box {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  background: #fffbeb;
+}
+
+.spb-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  font-size: 12.5px;
+}
+
+.spb-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.spb-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.spb-rank {
+  font-size: 11px;
+  font-weight: 800;
+  color: #b45309;
+  background: #fde68a;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.spb-factor {
+  font-weight: 700;
+  color: var(--txt-strong);
+}
+
+.spb-action {
+  color: #475569;
+}
+
+.score-items-table {
+  margin-top: 12px;
+}
+
+.sit-factor {
+  font-weight: 700;
+  color: var(--txt-strong);
+}
+
+.sit-sec {
+  font-size: 11px;
+  color: var(--txt-muted);
+}
+
+.sit-reason {
+  font-size: 12px;
+  color: #334155;
+  margin-bottom: 3px;
+}
+
+.sit-sug {
+  font-size: 12px;
+  color: #0f766e;
+}
+
+.sit-quote-item {
+  font-size: 11.5px;
+  line-height: 1.45;
+  margin-bottom: 4px;
+}
+
+.muted-txt {
+  color: var(--txt-muted);
+  font-size: 12px;
+}
+
+.score-idle-hint {
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--txt-muted);
 }
 
 @media (max-width: 1280px) {

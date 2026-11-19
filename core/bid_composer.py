@@ -524,7 +524,11 @@ def _is_procedural_topic(text: str) -> bool:
     return False
 
 
-def _extract_pdf_scoring_items(excerpts: list[str]) -> list[tuple[str, str, str]]:
+def _extract_pdf_scoring_items(
+    excerpts: list[str],
+    *,
+    include_price: bool = False,
+) -> list[tuple[str, str, str]]:
     """从 PDF `评分细则` 文本块中抽取具体评分因素与分值（如 `实施方案 0-9 分`）。"""
     extracted: list[tuple[str, str, str]] = []
     seen: set[str] = set()
@@ -552,7 +556,7 @@ def _extract_pdf_scoring_items(excerpts: list[str]) -> list[tuple[str, str, str]
             factor_title = ''.join(title_parts).strip()
             if len(factor_title) < 2 or factor_title in ('合计', '总分', '小计'):
                 continue
-            if '价格' in factor_title:
+            if not include_price and '价格' in factor_title:
                 continue
             # 向下采集最多 6 行作为评分细节摘要
             desc_parts: list[str] = []

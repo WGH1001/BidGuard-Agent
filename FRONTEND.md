@@ -36,6 +36,7 @@
 | | `GET /api/checks/{id}/findings?source_module=&severity=` | `{total, items}` |
 | | `POST /api/checks/{id}/findings/{fid}/feedback`（`{feedback:'accepted'/'rejected', feedback_note}`） | 采纳/驳回回写 |
 | | `POST /api/checks/{id}/price-manual`（`{items:[{name,qty,unit_price,total_price}], table_total, bid_total, bid_total_upper, price_cap}`，金额全字符串） | NEED_MANUAL 回填：后端 PriceSandbox 复算并**替换全部 F2 findings**，返回 `findings`（有算术错时非空） |
+| | `POST /api/checks/{id}/score-estimate?async_run=`、`GET /api/checks/{id}/score-estimate`、`GET /api/checks/{id}/score-estimate/export` | E42 标书评分预估与提分诊断：发起/重评（主任务运行中 409 `CHECK_TASK_RUNNING`）、轮询快照（含重启遗留态懒收敛）与导出《标书预估得分与提分诊断报告.docx》 |
 | | `DELETE /api/checks/{id}` | 校验运行中任务并级联清理落盘文件 |
 | 偏离表 | `GET/POST /api/deviation/{task_id}`（在途核验时返回 `409 CHECK_TASK_RUNNING`） | 返回 `{output_filename, download_url, total_rows, no_deviation_count, negative_deviation_count, missing_count, contradiction_count}` |
 | | `GET /api/deviation/{task_id}/download` | docx 文件流 |
@@ -80,7 +81,7 @@ event: error      data: {"task_id":1,"status":"failed","error_msg":"..."}
 
 1. `DashboardView`：/api/dashboard（ECharts：4 统计卡 + 六大防线矩阵热力/仪表 + 截标倒计时列表 + 在途任务台账）；
 2. `ExtractView`：/api/extract 上传 → 五张清单五 Tab 核对（★/▲ 标记条款、无标记措辞模式 A/B、审查区定位、评分细则表、**所需证照与台账对账**，含 E43 **暗标红线预警横幅** + 条款出处列表 + 一键携带建议规则跳转 `/composer?blind=1`，及多文件排队与 localStorage LRU 缓存）；
-3. `CheckDetailView`（最重）：/api/checks 全组 + SSE——6 步流水线进度条、风险卡列表（按 severity 分级配色，采纳/驳回按钮）、报价回填弹窗、投标书原件下载、标红预览及「导出 Clean 修订正本」入口；
+3. `CheckDetailView`（最重）：/api/checks 全组 + SSE——6 步流水线进度条、风险卡列表（按 severity 分级配色，采纳/驳回按钮）、报价回填弹窗、**E42 标书评分预估与提分诊断面板（顶部常驻「AI 质量自评预估（非最终评委实际打分）」免责声明、分值合计失衡告警、F2/F3/F4/E43 暗标一票否决先导警示、非价格分预估/价格分待开标四宫格指标、Top-5 提分抓手与一键跳 `/composer` 补写、分项明细与 `verify_quote` 原文依据折叠面板及 `.docx` 诊断报告下载）**、投标书原件下载、标红预览及「导出 Clean 修订正本」入口；
 4. `DeviationView`：/api/deviation 预览统计 + 偏离表五维指标卡筛选 + 在途 409 防锁死与一键导出下载；
 5. `RadarView`：/api/radar 上传 → 疑似参数卡片流 + 结论横幅（"疑似"标注）+ 单条重扫与开标日期显化；
 6. `QaChatView`：/api/qa 全组——会话侧栏（KeepAlive 切页防丢）+ 多文件/图片附件上传 + 消息流（ReAct 思考轨迹 SSE 流式直播 + 7 工具折叠面板 + quotes 溯源卡 + 0-Token 动态快捷追问）；

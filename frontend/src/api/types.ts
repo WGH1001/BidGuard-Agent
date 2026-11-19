@@ -193,6 +193,7 @@ export interface BidTaskOut {
     [key: string]: unknown
   } | null
   llm_usage_json?: Record<string, unknown> | null
+  score_estimate_json?: ScoreEstimateOut | Record<string, unknown> | null
   privacy_stats?: PrivacyStatsOut | null
   duration_json?: TaskDurationRecord | null
   started_at?: string | null
@@ -252,6 +253,76 @@ export interface RunTaskTriggerOut {
   task_id: number
   status: string
   message: string
+}
+
+export type ScoreItemStatusType = 'evaluated' | 'pending_open_bid' | 'veto_risk' | 'need_llm'
+
+export interface ScoreEvidenceQuoteOut {
+  quote: string
+  quote_verified: boolean
+  offset?: number | null
+  page?: number | null
+}
+
+export interface ScoreVetoAlertOut {
+  source_module: string
+  code: string
+  severity: string
+  clause_no: string
+  message: string
+  suggestion: string
+  consequence: string
+}
+
+export interface ScoreCriterionItemOut {
+  criterion_id: string
+  section: string
+  factor: string
+  category: string
+  evaluation_mode: string
+  max_score: string
+  estimated_score?: string | null
+  status: ScoreItemStatusType
+  status_reason?: string | null
+  score_ratio_pct?: number | null
+  deduction_reasons: string[]
+  improvement_suggestions: string[]
+  evidence_quotes: ScoreEvidenceQuoteOut[]
+}
+
+export interface ScorePriorityItemOut {
+  criterion_id: string
+  factor: string
+  category: string
+  max_score: string
+  estimated_score?: string | null
+  gap_score: string
+  status: string
+  action_summary: string
+  f8_composer_hint: string
+}
+
+export interface ScoreEstimateOut {
+  task_id: number
+  status: 'not_started' | 'queued' | 'running' | 'completed' | 'failed'
+  progress: number
+  stage_detail: string
+  error_msg?: string | null
+  disclaimer: string
+  llm_status: string
+  has_veto_risk: boolean
+  veto_alerts: ScoreVetoAlertOut[]
+  total_declared_max_score: string
+  items_sum_max_score: string
+  assessed_max_score: string
+  assessed_estimated_score: string
+  assessed_ratio_pct?: number | null
+  price_pending_max_score: string
+  need_llm_max_score: string
+  score_scale_warning?: string | null
+  items: ScoreCriterionItemOut[]
+  top_priorities: ScorePriorityItemOut[]
+  updated_at?: string | null
 }
 
 // ── 3. 总览大盘 (/api/dashboard) ─────────────────────────────────────────

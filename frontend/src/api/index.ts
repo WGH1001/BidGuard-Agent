@@ -43,6 +43,7 @@ import type {
   PriceManualBackfillRequest,
   QaAskRequest,
   QaAskResponseOut,
+  ScoreEstimateOut,
   QaLastTurnWithdrawOut,
   QaSessionCreatePayload,
   QaSessionOut,
@@ -230,6 +231,21 @@ export const checksApi = {
   },
   priceManual(taskId: number, payload: PriceManualBackfillRequest): Promise<PriceManualBackfillOut> {
     return post<PriceManualBackfillOut>(`/checks/${taskId}/price-manual`, payload)
+  },
+  runScoreEstimate(taskId: number, asyncRun = true): Promise<ScoreEstimateOut> {
+    return post<ScoreEstimateOut>(`/checks/${taskId}/score-estimate`, undefined, {
+      params: { async_run: asyncRun },
+      timeout: 300000,
+    })
+  },
+  getScoreEstimate(taskId: number): Promise<ScoreEstimateOut> {
+    return get<ScoreEstimateOut>(`/checks/${taskId}/score-estimate`)
+  },
+  downloadScoreEstimateReport(
+    taskId: number,
+    fallbackName = `${taskId}_标书预估得分与提分诊断报告.docx`,
+  ): Promise<string> {
+    return downloadFromApi(`/checks/${taskId}/score-estimate/export`, fallbackName)
   },
   remove(taskId: number): Promise<OkResponse> {
     return del<OkResponse>(`/checks/${taskId}`)

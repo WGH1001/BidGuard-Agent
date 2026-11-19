@@ -11,12 +11,18 @@ import shutil
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from backend.auth import AuthUser, get_current_user, record_audit
 from backend.database import PROJECT_ROOT, SessionLocal, get_db
-from backend.models import BidCheckTask, BidFinding, QaSession, ensure_bid_check_tasks_columns
+from backend.models import (
+    BidCheckTask,
+    BidFinding,
+    QaSession,
+    ensure_bid_check_tasks_columns,
+    ensure_bid_check_tasks_e42_columns,
+)
 from backend.schemas import (
     BidFindingOut,
     BidTaskDetailOut as _BaseBidTaskDetailOut,
@@ -30,8 +36,21 @@ from backend.schemas import (
     PriceManualBackfillRequest,
     PrivacyStatsOut,
     RunTaskTriggerOut,
+    ScoreEstimateOut,
 )
-from backend.worker import _cleanup_task_deviation_artifacts, _utc_now, get_worker
+from backend.worker import (
+    PipelineCancelled,
+    _cleanup_task_deviation_artifacts,
+    _utc_now,
+    get_worker,
+    resolve_effective_llm_client,
+    resolve_project_path,
+)
+from core.bid_scorer import (
+    SCORE_DISCLAIMER_TEXT,
+    estimate_bid_score,
+    export_score_estimate_docx,
+)
 from core.price_sandbox import PriceSandbox
 from core.privacy_sanitizer import merge_privacy_stats, scan_document_file
 
@@ -166,6 +185,7 @@ def _task_to_out(t: BidCheckTask) -> BidTaskOut:
         price_manual_json=t.price_manual_json,
         config_json=t.config_json,
         llm_usage_json=t.llm_usage_json,
+        score_estimate_json=getattr(t, 'score_estimate_json', None),
         privacy_stats=p_stats_out,
         started_at=t.started_at.isoformat() if getattr(t, 'started_at', None) else None,
         finished_at=t.finished_at.isoformat() if getattr(t, 'finished_at', None) else None,
@@ -745,14 +765,15 @@ def delete_check_task(
     db.commit()
 
     worker.broadcaster.clear(task_id)
+    worker.request_cancel(f"score:{task_id}")
 
     # 清理上传目录及 OCR 伴生缓存文件
     task_upload_dir = (_UPLOADS_ROOT / str(tenant_id) / str(task_id)).resolve()
     if task_upload_dir.is_dir() and str(task_upload_dir).startswith(str(_UPLOADS_ROOT)):
         shutil.rmtree(task_upload_dir, ignore_errors=True)
 
-    # 清理导出的偏离表、红线批注件与交付压缩包产物
-    for sub in ('deviation', 'redline', 'deliver'):
+    # 清理导出的偏离表、红线批注件、评分报告与交付压缩包产物
+    for sub in ('deviation', 'redline', 'deliver', 'score'):
         out_dir = (PROJECT_ROOT / 'output' / sub).resolve()
         if out_dir.is_dir():
             for artifact in out_dir.glob(f"{task_id}_*"):
@@ -769,3 +790,298 @@ def delete_check_task(
         target=f"task:{task_id}",
     )
     return OkResponse(ok=True, message=f"任务 #{task_id} 已删除")
+
+
+# ── E42 · 标书评分预估与提分建议端点 ─────────────────────────────────────────
+_SCORE_OUTPUT_ROOT = (PROJECT_ROOT / 'output' / 'score').resolve()
+
+
+def _to_score_estimate_out(task: BidCheckTask) -> ScoreEstimateOut:
+    raw = getattr(task, 'score_estimate_json', None)
+    upd = task.updated_at.isoformat() if task.updated_at else None
+    if not isinstance(raw, dict) or not raw:
+        return ScoreEstimateOut(
+            task_id=task.id,
+            status='not_started',
+            progress=0,
+            stage_detail='尚未发起标书评分预估',
+            disclaimer=SCORE_DISCLAIMER_TEXT,
+            updated_at=upd,
+        )
+    payload = dict(raw)
+    payload['task_id'] = task.id
+    payload['disclaimer'] = SCORE_DISCLAIMER_TEXT
+    payload.setdefault('updated_at', upd)
+    return ScoreEstimateOut(**payload)
+
+
+@router.post('/{task_id}/score-estimate', response_model=ScoreEstimateOut)
+def trigger_score_estimate(
+    task_id: int,
+    async_run: bool = Query(default=False),
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ScoreEstimateOut:
+    """E42 §2.2.3：发起或重跑标书评分预估与提分诊断（支持 async_run 后台异步与同步模式）。"""
+    ensure_bid_check_tasks_e42_columns(db.get_bind())
+    tenant_id = int(current_user.tenant_id)
+    user_id = current_user.get('id')
+    task = _get_tenant_task_or_404(db, task_id, tenant_id)
+
+    worker = get_worker()
+    job_key = f"score:{task.id}"
+    if task.status in ('extracting', 'checking', 'grading') or (
+        task.id in worker._in_flight and not worker.is_cancel_requested(task.id)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={'code': 'CHECK_TASK_RUNNING', 'message': '防废标体检流水线正在运行中，请等待体检完成后再评估得分'},
+        )
+    if job_key in worker._in_flight and not worker.is_cancel_requested(job_key):
+        raise HTTPException(
+            status_code=409,
+            detail={'code': 'SCORE_ESTIMATE_RUNNING', 'message': '该任务正在执行标书评分预估，请勿重复提交'},
+        )
+
+    tender_abs = resolve_project_path(task.tender_path)
+    bid_abs = resolve_project_path(task.bid_path)
+    if not tender_abs.is_file() or not bid_abs.is_file():
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'SOURCE_FILES_MISSING', 'message': '招标文件或投标文件原件不存在，无法执行评分预估'},
+        )
+
+    init_snap: dict[str, Any] = {
+        'status': 'queued' if async_run else 'running',
+        'progress': 5,
+        'stage_detail': '评分预估已入队…' if async_run else '正在启动标书评分预估…',
+        'error_msg': None,
+        'disclaimer': SCORE_DISCLAIMER_TEXT,
+    }
+    task.score_estimate_json = init_snap
+    task.updated_at = _utc_now()
+    db.commit()
+
+    target_task_id = int(task.id)
+    sync_error_box: list[Exception] = []
+
+    def _run_score_job(cancel_ev) -> None:
+        sess: Session = worker.session_factory()
+        last_pct = 5
+        try:
+            t_row = sess.query(BidCheckTask).filter_by(id=target_task_id).first()
+            if t_row is None:
+                return
+            t_row.score_estimate_json = {
+                **dict(t_row.score_estimate_json or {}),
+                'status': 'running',
+                'progress': 10,
+                'stage_detail': '正在加载体检风险结果与招标评分细则…',
+                'error_msg': None,
+                'disclaimer': SCORE_DISCLAIMER_TEXT,
+            }
+            t_row.updated_at = _utc_now()
+            sess.commit()
+
+            all_findings = (
+                sess.query(BidFinding)
+                .filter(BidFinding.task_id == target_task_id, BidFinding.feedback != 'rejected')
+                .order_by(BidFinding.id.asc())
+                .all()
+            )
+            f2_rows = [f for f in all_findings if f.source_module == 'F2']
+            f3_rows = [f for f in all_findings if f.source_module == 'F3']
+            f4_rows = [f for f in all_findings if f.source_module == 'F4']
+            blind_rows = [
+                f for f in all_findings
+                if f.source_module == 'BLIND_BID' or str(f.code or '').startswith('BLIND_BID_')
+            ]
+            stats_snap = dict(t_row.stats_json or {})
+            f2_res_snap: Optional[dict[str, Any]] = None
+            if f2_rows or stats_snap.get('price_status'):
+                f2_res_snap = {
+                    'status': stats_snap.get('price_status', 'OK'),
+                    'findings': [
+                        {
+                            'code': f.code,
+                            'severity': f.severity,
+                            'message': f.message,
+                        }
+                        for f in f2_rows
+                    ],
+                }
+
+            llm_client, _ = resolve_effective_llm_client(sess, user_id)
+
+            def _on_prog(pct: int, detail: str) -> None:
+                nonlocal last_pct
+                worker.check_cancelled(job_key, cancel_ev)
+                if pct - last_pct < 8:
+                    return
+                last_pct = pct
+                try:
+                    cur = sess.query(BidCheckTask).filter_by(id=target_task_id).first()
+                    if cur is not None:
+                        cur.score_estimate_json = {
+                            **dict(cur.score_estimate_json or {}),
+                            'status': 'running',
+                            'progress': min(96, max(10, int(pct))),
+                            'stage_detail': str(detail)[:240],
+                            'disclaimer': SCORE_DISCLAIMER_TEXT,
+                        }
+                        cur.updated_at = _utc_now()
+                        sess.commit()
+                except Exception:
+                    sess.rollback()
+
+            result_dict = estimate_bid_score(
+                tender_abs,
+                bid_abs,
+                f2_res=f2_res_snap,
+                f3_findings=f3_rows,
+                f4_findings=f4_rows,
+                blind_bid_findings=blind_rows,
+                client=llm_client,
+                progress_cb=_on_prog,
+                cancel_check=lambda: worker.check_cancelled(job_key, cancel_ev),
+            )
+            worker.check_cancelled(job_key, cancel_ev)
+            now_utc = _utc_now()
+            result_dict['updated_at'] = now_utc.isoformat()
+
+            t_row = sess.query(BidCheckTask).filter_by(id=target_task_id).first()
+            if t_row is None:
+                return
+            t_row.score_estimate_json = result_dict
+            t_row.updated_at = now_utc
+            sess.commit()
+
+            record_audit(
+                sess,
+                action='score_estimate',
+                tenant_id=tenant_id,
+                user_id=user_id,
+                target=f"task:{target_task_id}",
+                detail_json={
+                    'assessed_estimated_score': result_dict.get('assessed_estimated_score'),
+                    'assessed_max_score': result_dict.get('assessed_max_score'),
+                    'price_pending_max_score': result_dict.get('price_pending_max_score'),
+                    'veto_count': len(result_dict.get('veto_alerts') or []),
+                    'llm_status': result_dict.get('llm_status'),
+                },
+            )
+        except PipelineCancelled:
+            sess.rollback()
+            t_row = sess.query(BidCheckTask).filter_by(id=target_task_id).first()
+            if t_row is not None:
+                t_row.score_estimate_json = {
+                    **dict(t_row.score_estimate_json or {}),
+                    'status': 'failed',
+                    'stage_detail': '用户中断',
+                    'error_msg': '用户中断评分预估',
+                    'disclaimer': SCORE_DISCLAIMER_TEXT,
+                }
+                t_row.updated_at = _utc_now()
+                sess.commit()
+        except Exception as exc:
+            sess.rollback()
+            t_row = sess.query(BidCheckTask).filter_by(id=target_task_id).first()
+            if t_row is not None:
+                t_row.score_estimate_json = {
+                    **dict(t_row.score_estimate_json or {}),
+                    'status': 'failed',
+                    'stage_detail': '评分预估执行异常',
+                    'error_msg': str(exc)[:300],
+                    'disclaimer': SCORE_DISCLAIMER_TEXT,
+                }
+                t_row.updated_at = _utc_now()
+                sess.commit()
+            if not async_run:
+                sync_error_box.append(exc)
+        finally:
+            sess.close()
+
+    worker.submit_background_job(job_key, _run_score_job, sync=(not async_run))
+    if not async_run and sync_error_box:
+        raise HTTPException(
+            status_code=500,
+            detail={'code': 'SCORE_ESTIMATE_FAILED', 'message': f"标书评分预估失败：{sync_error_box[0]}"},
+        )
+
+    db.expire_all()
+    fresh_task = _get_tenant_task_or_404(db, target_task_id, tenant_id)
+    return _to_score_estimate_out(fresh_task)
+
+
+@router.get('/{task_id}/score-estimate', response_model=ScoreEstimateOut)
+def get_score_estimate(
+    task_id: int,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ScoreEstimateOut:
+    """E42 §2.2.3：获取标书评分预估快照（对重启遗留的 queued/running 状态执行自动懒恢复）。"""
+    ensure_bid_check_tasks_e42_columns(db.get_bind())
+    tenant_id = int(current_user.tenant_id)
+    task = _get_tenant_task_or_404(db, task_id, tenant_id)
+
+    worker = get_worker()
+    job_key = f"score:{task.id}"
+    raw = getattr(task, 'score_estimate_json', None)
+    if (
+        isinstance(raw, dict)
+        and raw.get('status') in ('queued', 'running')
+        and job_key not in worker._in_flight
+    ):
+        recovered = dict(raw)
+        recovered['status'] = 'failed'
+        recovered['stage_detail'] = '服务重启中断'
+        recovered['error_msg'] = '服务重启中断评分预估，请重新发起'
+        recovered['disclaimer'] = SCORE_DISCLAIMER_TEXT
+        task.score_estimate_json = recovered
+        task.updated_at = _utc_now()
+        db.commit()
+
+    return _to_score_estimate_out(task)
+
+
+@router.get('/{task_id}/score-estimate/export')
+def export_score_estimate_report(
+    task_id: int,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """E42 §2.2.3：生成并下载《标书预估得分与提分诊断报告.docx》（含强标注免责声明）。"""
+    ensure_bid_check_tasks_e42_columns(db.get_bind())
+    tenant_id = int(current_user.tenant_id)
+    task = _get_tenant_task_or_404(db, task_id, tenant_id)
+
+    raw = getattr(task, 'score_estimate_json', None)
+    if not isinstance(raw, dict) or raw.get('status') != 'completed':
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'SCORE_ESTIMATE_NOT_FOUND', 'message': '尚未完成标书评分预估，请先发起评分预估后再导出诊断报告'},
+        )
+
+    _SCORE_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    out_file = (_SCORE_OUTPUT_ROOT / f"{task.id}_标书预估得分与提分诊断报告.docx").resolve()
+    if not out_file.is_relative_to(_SCORE_OUTPUT_ROOT):
+        raise HTTPException(status_code=422, detail={'code': 'PATH_TRAVERSAL', 'message': '非法输出路径'})
+
+    export_score_estimate_docx(raw, out_file, task_title=task.title)
+    record_audit(
+        db,
+        action='export_score_estimate',
+        tenant_id=tenant_id,
+        user_id=current_user.get('id'),
+        target=f"task:{task.id}",
+        detail_json={
+            'assessed_estimated_score': raw.get('assessed_estimated_score'),
+            'assessed_max_score': raw.get('assessed_max_score'),
+        },
+    )
+    safe_title = re.sub(r'[\\/:*?"<>|]+', '_', task.title or f"task_{task.id}")[:60]
+    return FileResponse(
+        path=str(out_file),
+        media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        filename=f"{safe_title}_标书预估得分与提分诊断报告.docx",
+    )

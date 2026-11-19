@@ -114,6 +114,7 @@ class BidCheckTask(Base):
     price_manual_json = Column(JSON, nullable=True)
     config_json = Column(JSON, nullable=True, default=dict)
     llm_usage_json = Column(JSON, nullable=True, default=dict)
+    score_estimate_json = Column(JSON, nullable=True)
     # E11 新增：任务启动时间、结束时间与分阶段耗时 JSON 文本（{"f1_ms","f2_ms","f3_ms","f4_ms","grading_ms","total_ms"}）
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
@@ -149,7 +150,7 @@ class BidFinding(Base):
         nullable=False,
         index=True,
     )
-    source_module = Column(String(16), nullable=False, default='F1')  # 'F1'|'F2'|'F3'|'F4'|'F6'
+    source_module = Column(String(16), nullable=False, default='F1')  # 'F1'|'F2'|'F3'|'F4'|'F6'|'BLIND_BID'
     code = Column(String(64), nullable=False, default='')
     severity = Column(String(16), nullable=False, default='error')    # 'error'|'warning'|'info'
     category = Column(String(64), nullable=True)
@@ -555,6 +556,20 @@ _E41_COMPOSER_SKILL_NEW_COLS = (
     ('biz_line', "VARCHAR(32) NOT NULL DEFAULT 'general'", "VARCHAR(32) NOT NULL DEFAULT 'general'"),
 )
 
+_E42_TASK_NEW_COLS = (
+    ('score_estimate_json', 'JSON', 'JSON'),
+)
+
+
+def ensure_bid_check_tasks_e42_columns(bind_or_conn: Any, *, auto_commit: bool = True) -> list[str]:
+    """E42 §2.2：老库 bid_check_tasks 表平滑补齐 score_estimate_json 列。"""
+    return _ensure_table_columns_generic(
+        bind_or_conn,
+        'bid_check_tasks',
+        _E42_TASK_NEW_COLS,
+        auto_commit=auto_commit,
+    )
+
 
 def ensure_similarity_reports_columns(bind_or_conn: Any, *, auto_commit: bool = True) -> list[str]:
     """E38：老库 similarity_reports 自动补齐异步进度与 AI 深层研判列。"""
@@ -590,6 +605,7 @@ def ensure_composer_skills_columns(bind_or_conn: Any, *, auto_commit: bool = Tru
 def _auto_migrate_bid_check_tasks_after_create(target, connection, **kwargs):
     """在 Base.metadata.create_all（含 init_db 启动时）完成后自动探测老库并补齐各阶段新列。"""
     ensure_bid_check_tasks_columns(connection, auto_commit=False)
+    ensure_bid_check_tasks_e42_columns(connection, auto_commit=False)
     ensure_qa_sessions_columns(connection, auto_commit=False)
     ensure_user_model_configs_columns(connection, auto_commit=False)
     ensure_company_certificates_columns(connection, auto_commit=False)
@@ -613,11 +629,11 @@ def apply_sqlite_pragmas(engine: Any) -> None:
         try:
             cursor.execute('PRAGMA journal_mode=WAL')
             cursor.execute('PRAGMA busy_timeout=5000')
-            # E11：对已有本地 SQLite 老库连接时顺带探测表结构并平滑补齐耗时列
+            # E11 / E42：对已有本地 SQLite 老库连接时顺带探测表结构并平滑补齐耗时列与评分预估列
             cursor.execute("PRAGMA table_info(bid_check_tasks)")
             cols = {row[1] for row in cursor.fetchall()}
             if cols:
-                for col_name, _pg_t, sq_t in _E11_TASK_NEW_COLS:
+                for col_name, _pg_t, sq_t in (_E11_TASK_NEW_COLS + _E42_TASK_NEW_COLS):
                     if col_name not in cols:
                         cursor.execute(f"ALTER TABLE bid_check_tasks ADD COLUMN {col_name} {sq_t}")
             # E24：同步探测补齐 qa_sessions.attachments_json 与 user_model_configs.supports_vision

@@ -51,10 +51,10 @@ BidGuard-Agent/
 ├── config/
 │   ├── models.yaml                      # 模型网关 demo=智谱 / prod=内网私有化
 │   └── regulation_sources.yaml          # E4：8 部法律官方 URL（crawl 数据源）
-├── core/                                # 24 个功能模块（F1~F8 + 写作 Skills + 指标库 + 合规脱敏 + 混合检索 + 法规库 + 交叉比对，逐项状态见 §3）
+├── core/                                # 25 个功能模块（F1~F8 + 评分预估 + 写作 Skills + 指标库 + 合规脱敏 + 混合检索 + 法规库 + 交叉比对，逐项状态见 §3）
 ├── backend/                             # main + models(14表) + schemas + 13 组路由
 ├── frontend/                            # Vue3 + TS：15 个视图全部落地
-├── tests/                               # 47 个测试文件（test_*.py）330 项全绿
+├── tests/                               # 48 个测试文件（test_*.py）334 项全绿
 ├── scripts/                             # build_f1_baseline.py / build_indicator_library.py / eval_f1_llm.py / probe_reasoning_efforts.py
 ├── data/
 │   ├── corpus/m0_samples/               # 11 份语料 + baseline / ground_truth / llm_eval 三本账（§4）
@@ -68,9 +68,9 @@ BidGuard-Agent/
 
 ## 2. 当前基线（截至 2026-11-18）
 
-- **开发阶段**：3 周排期全部完成 + 四十二轮可用强化（E1~E41 已入库，`E43 · 暗标信号识别与暗标防废标双模式卡` 已完成全量实现与验证，留在工作区待确认 commit；E42 待 E43 入库后串行启动）
-- **Git 最新功能 Commit**：`960c995`（E41 双业务线专精 Skills 与指标标准应答库）；工作区保留 **E43**（及同步文档/卡）待确认 commit；前序主线：`377e37d`（E40）/ `c196c84`（E39）/ `7b7d511`（E38）/ `caef678`（E36+E37）
-- **测试基线**：**330 项 pytest 全绿（零回归）**（在 `960c995` 325 项基线基础上：`tests/test_e43_blind_bid_detection_and_export.py` 新增 5 项，14 张表校验通过）+ `npm --prefix frontend run build`（`vue-tsc --noEmit && vite build` 1865 模块零错误构建成功，`components.d.ts` 零变动）—— 第一验收线已演进至 **330 项**
+- **开发阶段**：3 周排期全部完成 + 四十三轮可用强化（E1~E41、E43 已入库，`E42 · 标书评分预估与提分建议卡` 已完成全量实现与验证，留在工作区待确认 commit）
+- **Git 最新功能 Commit**：`093013d`（E43 暗标信号识别与暗标防废标双模式）；工作区保留 **E42**（及同步文档/卡）待确认 commit；前序主线：`960c995`（E41）/ `377e37d`（E40）/ `c196c84`（E39）/ `7b7d511`（E38）/ `caef678`（E36+E37）
+- **测试基线**：**334 项 pytest 全绿（零回归）**（在 `093013d` 330 项基线基础上：`tests/test_e42_bid_score_estimation.py` 新增 4 项，14 张表校验通过）+ `npm --prefix frontend run build`（`vue-tsc --noEmit && vite build` 1865 模块零错误构建成功，`components.d.ts` 零变动）—— 第一验收线已演进至 **334 项**
 - **模型网关基线**：`config/models.yaml` 当前工作区设为 `default_env: prod`（内网私有网关 `http://10.0.2.81:3000/v1`，`GLM-5.3-Flash`，`timeout: 60`）；并行提供 `demo` 环境（智谱开放平台 `glm-5.3-flash`、`embedding: embedding-3` 激活 L2 混合检索、`timeout: 60`），`LLMClient` 统一控重试与 TUN/私有 IP 报错排查提示
 - **运行环境**：本机开发用项目自带 `.venv`（依赖已全量钉死）；生产走 Docker 四容器（`docker compose up -d --build`，默认宿主机 `APP_PORT=8000` + `POSTGRES_PORT=15432`，与老项目 `8080` + `5432` 并行共存不冲突）
 - **快速验收命令**：
@@ -82,7 +82,7 @@ BidGuard-Agent/
 
 ---
 
-## 3. 核心模块实现清单（`core/` 下 24 个功能文件逐项状态）
+## 3. 核心模块实现清单（`core/` 下 25 个功能文件逐项状态）
 
 | 序号 | 文件路径 | 所属模块 | 一句话职责说明 | 当前状态与实测验收数据 |
 |---|---|---|---|---|
@@ -110,6 +110,7 @@ BidGuard-Agent/
 | 22 | `core/composer_skills.py` | **E38/E41 写作 Skill 规范库** | 内置 5 套标书写作与动态版式 Skill（E38 通用 3 套 + E41 新增`网络安全与数据安全专精版`/`并行MaaS算力服务专精版` 含 `biz_line`）；支持 YAML Frontmatter+Markdown 与 JSON 双格式规范化解析与安全钳位（字号/行距/颜色/目标字数）、SSRF 域名白名单及 GitHub→Gitee 离线优雅降级导入 | **已验收**（E38 + E41 全套单测与 API 全绿） |
 | 23 | `core/privacy_sanitizer.py` | **E40 合规脱敏引擎** | 0-Token 确定性等长幂等掩码（18 位 GB 11643 身份证校验 + 语境银行卡/对公账号掩码，排除项目编号/标准号/金额/无关联标签），原物理文件逐字节不改写；`scan_document_file` 强制 `ocr_images=False` 快速扫描计数，`sanitize_chat_messages` 保全 `image_url` 多模态结构 | **已验收**（E40 单测与实弹探针全绿） |
 | 24 | `core/indicator_library.py` | **E41 指标标准应答库** | 0-Token 三层（`common` 通用底座 + `security`/`maas` 专精）标准指标检索引擎，实现 `KnowledgeSnippetProvider` 协议（BM25+同义词+关键词三级门控、严格跨业务线隔离）与 `CompositeKnowledgeSnippetProvider`（指标优先+历史库互补）；内置 `_BID_MONEY_RE` 禁具体报价数字硬锁，并提供 `get_biz_line_indicator_overview` 透出典型评分标准与高分提示 | **已验收**（E41 单测与 04/02 包实弹探针全绿） |
+| 25 | `core/bid_scorer.py` | **E42 标书评分预估与提分诊断** | 评分细则统一抽取（`collect_scoring_criteria_items` 融合 `.docx` 100 分评分表、`scoring_prose` 与 PDF 括号型/三列尾分型评分细则并复用 `_extract_pdf_scoring_items(..., include_price=True)`，诚实输出 `score_scale_warning`）、三分层评估（`price_formula` 诚实标 `pending_open_bid` 置 `None`、`objective_deduction` `Decimal` 扣减与模糊规则 `ambiguous_deduction_rule` 降级、`subjective_quality` Top-3 局部证据窗口 + `Decimal` `[0, max_score]` 钳位 + `verify_quote` 强制溯源与 `client=None` 0-Token 降级）、F2/F3/F4/E43 `BLIND_BID_*` 一票否决先导聚合（`veto_alerts`）、Top-5 提分抓手排序与《标书预估得分与提分诊断报告.docx》导出（封面与页眉双重免责声明） | **已验收**（E42 单测与亳州/滁州/江苏固废真语料实弹探针全绿） |
 
 ---
 
@@ -158,7 +159,8 @@ BidGuard-Agent/
 14. **F8 二期 · 企业自有 `.docx` 投标母版上传与样式套打（单独立卡 Backlog）**：按 2026-11-18 架构边界裁决，一期（E38）由「Skill 版式约束 + AI 动态控制」承担排版；后续单独立卡支持企业上传自带封面/页眉页脚/预设样式表的 `.docx` 母版文件，将动态章节与表格无损套入母版占位符导出。
 15. **~~E40 · 合规底座双锁卡~~ 已验收入库（`377e37d`）**：全局 `core/privacy_sanitizer.py` + `core/llm_gateway.py` 三出口（`chat`/`chat_stream`/`embed`）统一脱敏（仅限 GB 11643 18 位身份证与语境银行卡/对公账号，原文件逐字节不改写）、上传接口零 OCR `privacy_stats` 回显，以及 `STRICT_INNER_MODEL_ONLY` 内网模型防外泄双锁（拦截公网 `422 MODEL_HOST_FORBIDDEN`、放行私网/`prod`/白名单并忽略存量公网配置）。
 16. **~~E41 · 双业务线专精 Skills 与常见指标标准应答库卡~~ 已验收入库（`960c995`）**：落实领导【重点】需求 3（常见指标与对应内容自动化输出）+ 需求 5（不同业务线核心指标、评分标准自动化输出与参考）。新增 `core/indicator_library.py` 三层检索与 `scripts/build_indicator_library.py` 0-Token 抽提脚本、`data/rules/indicator_library/` 三库（`review_status: pending_human_review`，实测安易 04/02 口径纠偏与槽位护栏）、扩充 `网络安全与数据安全专精版`/`并行MaaS算力服务专精版` 内置预设与 `composer_skills.biz_line` 平滑迁移、`GET /api/composer/indicators` 与非 V2 模式接线及前端评分参考预览卡片。
-17. **~~E43 · 暗标信号识别与暗标防废标双模式卡~~ 已实现验证（工作区待确认 commit）**：F1 0-Token 提取暗标/盲评禁令（过滤否定句与混合否定从句，严格区分全图禁令 vs 仅禁 Logo），体检流水线以 `source_module='BLIND_BID'` 输出违规与诚实 `NEED_MANUAL` 图像核查提示；F8 增加「按通用方式 vs 按暗标生成」双模式与 6 项屏蔽规则+自定义词+OOXML 素颜渲染（零 `w:shd`/粗斜体/高亮/页眉页脚/禁止目录 `TOC`/扫描图片）。后续按顺序推进已定稿的 **E42 标书评分预估与提分建议卡**。
+17. **~~E43 · 暗标信号识别与暗标防废标双模式卡~~ 已验收入库（`093013d`）**：F1 0-Token 提取暗标/盲评禁令（过滤否定句与混合否定从句，严格区分全图禁令 vs 仅禁 Logo），体检流水线以 `source_module='BLIND_BID'` 输出违规与诚实 `NEED_MANUAL` 图像核查提示；F8 增加「按通用方式 vs 按暗标生成」双模式与 6 项屏蔽规则+自定义词+OOXML 素颜渲染（零 `w:shd`/粗斜体/高亮/页眉页脚/禁止目录 `TOC`/扫描图片）。
+18. **~~E42 · 标书评分预估与提分建议卡~~ 已实现验证（工作区待确认 commit）**：落实领导业务 2「标书评分预估（根据标书正文质量进行评估）」。新增 `core/bid_scorer.py`（统一 `.docx`/`.pdf` 评分细则并诚实输出 `score_scale_warning`，按 `price_formula`/`objective_deduction`/`subjective_quality` 三分层评估，`Decimal` 钳位与 `verify_quote` 强制溯源，聚合 F2/F3/F4/E43 `BLIND_BID_*` 一票否决预警与 Top-5 提分抓手，导出封面与页眉双免责声明 `.docx` 报告）、`BidCheckTask.score_estimate_json` 平滑加列（14 表不变）、`/api/checks/{task_id}/score-estimate*` 三端点（含重启遗留态懒收敛）及 `CheckDetailView.vue` 常驻免责声明诊断面板。
 
 ---
 
@@ -211,14 +213,15 @@ BidGuard-Agent/
 | E39 | F8 初稿质量精修与资格证明逐项附页增强卡：`core/bid_composer.py` 新增单章瞬时失败最多 2 次自动重试（`PipelineCancelled` 直通穿透）、`_strip_duplicate_leading_title` 剥离重复章标题首行、`_is_procedural_topic` / `_extract_pdf_scoring_items` 过滤目录与投标须知/澄清/计分方法噪音并精准抓取 PDF 评分细则、解除章节/主题/表行与偏离表（分批 ≤12 条覆盖全量待核对条目）四处截断；第二部分同名证照按角色合并去重（`必交资格 / 加分参考`）并改造为「2.0 总览索引表 + 2.1~2.N 逐项独立附页（自动居中嵌入台账 PNG/JPG 原件扫描图，PDF 示装订框，缺省示 A4 全幅粘贴框）」；`backend/routers/composer.py` 持久化 `blueprint_json` 前清洗宿主 `attachment_path`；`BidComposerView.vue` 第二部分增加角色级别与附页形态预览 | **已验收入库（`c196c84`）** | **317 项** + `vue-tsc` + `vite build` |
 | E40 | 合规底座双锁卡：新增 `core/privacy_sanitizer.py`（18 位 GB 11643 身份证校验与语境银行账号/分组等长幂等掩码、`scan_document_file` 强制 `ocr_images=False`）；在 `core/llm_gateway.py` `chat()`/`chat_stream()`/`embed()` 三出口统一挂载脱敏（保全 `image_url` 多模态、`PRIVACY_SANITIZE_ENABLED` 开关、`total_usage()` 记录脱敏计数）与 `STRICT_INNER_MODEL_ONLY` + `INNER_MODEL_EXTRA_HOSTS` 内网锁定（放行私网/`prod`/白名单、禁 `demo` 回退、拒接公网 `UserModelConfig`）；`model_config.py` 公网拦截 `422 MODEL_HOST_FORBIDDEN`；`worker.py::resolve_effective_llm_client` 忽略存量公网配置告警回退 `prod`；`/api/checks`、`/api/extract`、`/api/qa/sessions/{id}/attachments` 与前端 `CheckTaskList.vue`/`ExtractView.vue`/`QaChatView.vue` 透传并展示只读 `privacy_stats` 且原文件字节零改动 | **已验收入库（`377e37d`）** | **321 项** + `vue-tsc` + `vite build` |
 | E41 | 双业务线专精 Skills 与常见指标标准应答库卡：新增 `core/indicator_library.py`（`common/security/maas` 三层叠加与严格跨线隔离、`IndicatorLibraryProvider` 0-Token BM25/同义词三级门控、`CompositeKnowledgeSnippetProvider` 指标优先+历史库互补、`get_biz_line_indicator_overview` 评分参考透出及 `_BID_MONEY_RE` 禁具体报价硬锁）；新增 `data/rules/indicator_library/{common,security,maas}_indicators.json`（含 `scoring_ref` 与 `review_status: pending_human_review`）及 `scripts/build_indicator_library.py` 0-Token 草稿抽提脚本；`core/composer_skills.py` 扩至 5 套内置预设并支持 `biz_line`；`core/bid_composer.py` 放行显式 `knowledge_provider` 于非 V2 模式生效、透传 `notice`/`scoring_ref`；`backend/models.py` 为 `composer_skills` 新增 `biz_line` 与 `ensure_composer_skills_columns`；`backend/routers/composer.py` 幂等补种存量租户新 Skill、新增 `GET /api/composer/indicators` 及 `/generate` `use_indicator_library` 接线；前端 `types.ts`/`index.ts`/`BidComposerView.vue` 同步业务线徽标、开关与典型评分标准预览卡片 | **已验收入库（`960c995`）** | **325 项** + `vue-tsc` + `vite build` |
-| E43 | 暗标信号识别与暗标防废标双模式卡：`core/tender_extractor.py` 新增 0-Token `extract_blind_bid_requirements`（过滤否定句与混合否定从句、区分全图禁令 vs 仅禁 Logo、强制 `verify_quote` 并接入 `build_review_checklist['blind_bid_info']`）；`core/qualification_scanner.py` 新增 `scan_blind_bid_compliance`（全图禁令判 `BLIND_BID_IDENTITY_LEAK` `veto`、仅禁 Logo 诚实降级 `BLIND_BID_NEED_MANUAL`，含 `.docx` 页眉页脚/底纹 `w:shd`/粗斜体/高亮/TOC 域扫描）；`backend/worker.py` 在 Stage 3 以专属 `source_module='BLIND_BID'` 入库发现并更新 `stats_payload`；`core/bid_composer.py` 为 `compose_bid_blueprint`/`export_composed_bid_docx` 新增双模式与 6 项规则+自定义屏蔽词、保守 `_apply_blind_bid_sanitization` 及 `_strip_docx_ooxml_special_styles` 素颜输出（去装饰封面/页眉页脚/底纹/粗斜体/禁止目录 `TOC`/扫描图片）；`backend/schemas.py`、`extract.py`、`composer.py`（审计日志仅记屏蔽词计数不记明文）与前端 `types.ts`/`index.ts`/`ExtractView.vue`/`BidComposerView.vue` 全链路闭环（零新增 Element Plus 组件） | **工作区已完成待确认 commit** | **330 项** + `vue-tsc` + `vite build` |
+| E43 | 暗标信号识别与暗标防废标双模式卡：`core/tender_extractor.py` 新增 0-Token `extract_blind_bid_requirements`（过滤否定句与混合否定从句、区分全图禁令 vs 仅禁 Logo、强制 `verify_quote` 并接入 `build_review_checklist['blind_bid_info']`）；`core/qualification_scanner.py` 新增 `scan_blind_bid_compliance`（全图禁令判 `BLIND_BID_IDENTITY_LEAK` `veto`、仅禁 Logo 诚实降级 `BLIND_BID_NEED_MANUAL`，含 `.docx` 页眉页脚/底纹 `w:shd`/粗斜体/高亮/TOC 域扫描）；`backend/worker.py` 在 Stage 3 以专属 `source_module='BLIND_BID'` 入库发现并更新 `stats_payload`；`core/bid_composer.py` 为 `compose_bid_blueprint`/`export_composed_bid_docx` 新增双模式与 6 项规则+自定义屏蔽词、保守 `_apply_blind_bid_sanitization` 及 `_strip_docx_ooxml_special_styles` 素颜输出（去装饰封面/页眉页脚/底纹/粗斜体/禁止目录 `TOC`/扫描图片）；`backend/schemas.py`、`extract.py`、`composer.py`（审计日志仅记屏蔽词计数不记明文）与前端 `types.ts`/`index.ts`/`ExtractView.vue`/`BidComposerView.vue` 全链路闭环（零新增 Element Plus 组件） | **已验收入库（`093013d`）** | **330 项** + `vue-tsc` + `vite build` |
+| E42 | 标书评分预估与提分建议卡：`core/bid_composer.py` 为 `_extract_pdf_scoring_items` 扩展 `include_price: bool = False`；新增 `core/bid_scorer.py`（`collect_scoring_criteria_items` 统一 `.docx` 评分表、`scoring_prose` 与 PDF 括号型/三列尾分型评分细则并输出 `score_scale_warning`；`estimate_bid_score` 三分层质量评估 + `Decimal` `[0, max_score]` 钳位 + `verify_quote` 强制溯源 + `client=None` 0-Token 降级 + `veto_alerts` 聚合 F2/F3/F4/E43 `BLIND_BID_*` 一票否决 + `top_priorities` Top-5 提分抓手；`export_score_estimate_docx` 封面与页眉双重标注「AI 质量自评预估（非最终评委实际打分）」）；`backend/models.py` 为 `BidCheckTask` 新增 `score_estimate_json` 与 `ensure_bid_check_tasks_e42_columns`（14 表不变）；`backend/schemas.py` + `backend/routers/checks.py` 新增 `POST/GET /api/checks/{task_id}/score-estimate`（含 `409 CHECK_TASK_RUNNING`/`SCORE_ESTIMATE_RUNNING` 与重启遗留态懒收敛）与 `GET /api/checks/{task_id}/score-estimate/export`；前端 `types.ts`/`index.ts`/`CheckDetailView.vue` 新增常驻免责声明的评分预估与提分诊断面板（零新增 Element Plus 组件） | **工作区已完成待确认 commit** | **334 项** + `vue-tsc` + `vite build` |
 | chore | requirements 全量钉死（`59e6b64`）、基础镜像 digest 钉死、弹窗会话记忆 | `90a1947` | — |
 
 ---
 
 ## 7. 协作纪律与工程红线（完整版见 `AGENTS.md`）
 
-1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线已演进至 **330 项**（含 E43 5 项及 14 表检验）。
+1. **一卡一验、全绿入库**：每张卡跑通全量 pytest 零回归方可 commit；当前第一验收线已演进至 **334 项**（含 E42 4 项及 14 表检验）。
 2. **凡能算的绝不进大模型（0 Token 优先）**；金额全程 `Decimal` 禁 `float`（ROUND_HALF_UP 量化 0.01）。
 3. **LLM 只吃局部窗口 + 强制 `quote_verifier` 溯源**；严禁整本标书直塞。
 4. **宁缺毋滥显式降级**：无法对齐必返回 NEED_MANUAL；找不到位置绝不乱锚（E5 五级定位链 + 置信护栏）；页码诚实回退字符偏移并标"不一定准确"。
@@ -249,6 +252,6 @@ BidGuard-Agent/
 ## 9. 本文档信息来源
 
 1. `docs/cards/` B1~E43 全部任务卡与验收记录；`派发归档/` 各阶段派发包全文
-2. Git 提交链（`git log --oneline`，已演进至 `960c995` E41 终版；E43 已完成全量验证留在工作区待确认 commit）；330 项 pytest + `vue-tsc` + `vite build`（1865 模块）实测回执
+2. Git 提交链（`git log --oneline`，已演进至 `093013d` E43 终版；E42 已完成全量验证留在工作区待确认 commit）；334 项 pytest + `vue-tsc` + `vite build`（1865 模块）实测回执
 3. `data/corpus/m0_samples/` 三本账 + `语料清单.md`、`data/corpus/sim_bids/_README.md`；`data/corpus/regulations/` 法规种子
 4. `E:\agent\Contract-Review-Agent\HANDOVER_V2.md`（文档骨架参照）

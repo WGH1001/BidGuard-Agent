@@ -191,6 +191,7 @@ class BidTaskOut(BaseModel):
     price_manual_json: Optional[dict[str, Any]] = None
     config_json: Optional[dict[str, Any]] = None
     llm_usage_json: Optional[dict[str, Any]] = None
+    score_estimate_json: Optional[dict[str, Any]] = None
     privacy_stats: Optional[PrivacyStatsOut] = None
     delivered_at: Optional[str] = None
     created_at: Optional[str] = None
@@ -247,6 +248,74 @@ class RunTaskTriggerOut(BaseModel):
     task_id: int
     status: str
     message: str
+
+
+class ScoreEvidenceQuoteOut(BaseModel):
+    quote: str = ''
+    quote_verified: bool = False
+    offset: Optional[int] = None
+    page: Optional[int] = None
+
+
+class ScoreVetoAlertOut(BaseModel):
+    source_module: str
+    code: str
+    severity: str = 'error'
+    clause_no: str = ''
+    message: str
+    suggestion: str = ''
+    consequence: str = 'veto'
+
+
+class ScoreCriterionItemOut(BaseModel):
+    criterion_id: str
+    section: str = ''
+    factor: str
+    category: str
+    evaluation_mode: str
+    max_score: str
+    estimated_score: Optional[str] = None
+    status: Literal['evaluated', 'pending_open_bid', 'veto_risk', 'need_llm'] = 'need_llm'
+    status_reason: Optional[str] = None
+    score_ratio_pct: Optional[float] = None
+    deduction_reasons: list[str] = Field(default_factory=list)
+    improvement_suggestions: list[str] = Field(default_factory=list)
+    evidence_quotes: list[ScoreEvidenceQuoteOut] = Field(default_factory=list)
+
+
+class ScorePriorityItemOut(BaseModel):
+    criterion_id: str
+    factor: str
+    category: str
+    max_score: str
+    estimated_score: Optional[str] = None
+    gap_score: str
+    status: str
+    action_summary: str
+    f8_composer_hint: str = ''
+
+
+class ScoreEstimateOut(BaseModel):
+    task_id: int
+    status: Literal['not_started', 'queued', 'running', 'completed', 'failed'] = 'completed'
+    progress: int = 100
+    stage_detail: str = ''
+    error_msg: Optional[str] = None
+    disclaimer: str = 'AI 质量自评预估（非最终评委实际打分）'
+    llm_status: str = 'skipped'
+    has_veto_risk: bool = False
+    veto_alerts: list[ScoreVetoAlertOut] = Field(default_factory=list)
+    total_declared_max_score: str = '100.00'
+    items_sum_max_score: str = '0.00'
+    assessed_max_score: str = '0.00'
+    assessed_estimated_score: str = '0.00'
+    assessed_ratio_pct: Optional[float] = None
+    price_pending_max_score: str = '0.00'
+    need_llm_max_score: str = '0.00'
+    score_scale_warning: Optional[str] = None
+    items: list[ScoreCriterionItemOut] = Field(default_factory=list)
+    top_priorities: list[ScorePriorityItemOut] = Field(default_factory=list)
+    updated_at: Optional[str] = None
 
 
 # ── 4. /api/extract 契约 ─────────────────────────────────────────────────
