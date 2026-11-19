@@ -479,6 +479,7 @@ class BidTaskWorker:
         self._lock = threading.Condition(threading.Lock())
         self._in_flight: set[int | str] = set()
         self._cancel_flags: dict[int | str, threading.Event] = {}
+        self._deleted_task_ids: set[int | str] = set()
         self._f1_heartbeat_interval_sec: float = _DEFAULT_F1_HEARTBEAT_SEC
         self._shutdown = False
 
@@ -486,10 +487,39 @@ class BidTaskWorker:
     def _norm_job_key(task_id: int | str) -> int | str:
         return task_id if isinstance(task_id, str) else int(task_id)
 
+    def _is_current_run(self, task_id: int | str, cancel_ev: Optional[threading.Event]) -> bool:
+        """检查当前运行实例是否仍然有效（未被删除、未被用户中断、且未被新一轮重跑替代）。"""
+        tid = self._norm_job_key(task_id)
+        with self._lock:
+            if tid in self._deleted_task_ids:
+                return False
+            if cancel_ev is not None:
+                if cancel_ev.is_set():
+                    return False
+                cur_ev = self._cancel_flags.get(tid)
+                if cur_ev is not None and cur_ev is not cancel_ev:
+                    return False
+            return True
+
+    def mark_deleted(self, task_id: int | str) -> None:
+        """标记任务已被删除并使在途线程即刻失效，防止旧线程写库或阻塞清理。"""
+        tid = self._norm_job_key(task_id)
+        with self._lock:
+            self._deleted_task_ids.add(tid)
+            ev = self._cancel_flags.get(tid)
+            if ev is not None:
+                ev.set()
+            elif tid in self._in_flight:
+                ev = threading.Event()
+                ev.set()
+                self._cancel_flags[tid] = ev
+            self._lock.notify_all()
+
     def register_task_execution(self, task_id: int | str) -> threading.Event:
         """为指定任务（整数 task_id 或字符串 job_key 如 composer:1）注册取消信号并标记在途。"""
         tid = self._norm_job_key(task_id)
         with self._lock:
+            self._deleted_task_ids.discard(tid)
             ev = threading.Event()
             self._cancel_flags[tid] = ev
             self._in_flight.add(tid)
@@ -527,10 +557,11 @@ class BidTaskWorker:
             return bool(ev is not None and ev.is_set())
 
     def check_cancelled(self, task_id: int | str, ev: Optional[threading.Event] = None) -> None:
-        """协作式取消检查点：命中即抛出 _PipelineCancelled(BaseException)。"""
-        if ev is not None and ev.is_set():
+        """协作式取消检查点：命中中断、已删除或被新一轮运行取代时立即抛出 _PipelineCancelled(BaseException)。"""
+        tid = self._norm_job_key(task_id)
+        if not self._is_current_run(tid, ev):
             raise _PipelineCancelled('用户中断')
-        if self.is_cancel_requested(task_id):
+        if self.is_cancel_requested(tid):
             raise _PipelineCancelled('用户中断')
 
     def submit_background_job(
@@ -609,6 +640,10 @@ class BidTaskWorker:
         with self._lock:
             if self._shutdown or (tid in self._in_flight and not self.is_cancel_requested(tid)):
                 return
+            self._deleted_task_ids.discard(tid)
+            # 若旧一轮已被请求中断且正在快速收敛退出，短暂让位避免并发写库竞争
+            if tid in self._in_flight and self.is_cancel_requested(tid):
+                self._lock.wait(timeout=0.4)
             ev = threading.Event()
             self._cancel_flags[tid] = ev
             self._in_flight.add(tid)
@@ -621,7 +656,17 @@ class BidTaskWorker:
             self.unregister_task_execution(tid, ev)
             raise
 
-    def _emit_stage(self, session: Session, task: BidCheckTask, status: str, progress: int, detail: str) -> None:
+    def _emit_stage(
+        self,
+        session: Session,
+        task: BidCheckTask,
+        status: str,
+        progress: int,
+        detail: str,
+        cancel_ev: Optional[threading.Event] = None,
+    ) -> None:
+        if not self._is_current_run(task.id, cancel_ev):
+            raise _PipelineCancelled('用户中断')
         now_utc = _utc_now()
         task.status = status
         task.progress = int(progress)
@@ -1250,8 +1295,10 @@ class BidTaskWorker:
                         )
                     )
 
+            self.check_cancelled(task_id, cancel_ev)
             session.add_all(new_findings)
-            session.flush()
+            # 先提交 BidFinding 与进度时间戳释放数据库行锁，再执行耗时较长的文件写入与 F5 偏离表预生成
+            session.commit()
             duration_record['grading_ms'] = max(0, int(round((time.perf_counter() - t_grading) * 1000)))
 
             stage_sum_ms = sum(
@@ -1339,7 +1386,10 @@ class BidTaskWorker:
         except _PipelineCancelled:
             session.rollback()
             with self._lock:
-                is_latest_run = self._cancel_flags.get(task_id) is cancel_ev
+                is_latest_run = (
+                    self._cancel_flags.get(task_id) is cancel_ev
+                    and self._norm_job_key(task_id) not in self._deleted_task_ids
+                )
             if not is_latest_run:
                 return
             _cleanup_task_deviation_artifacts(task_id)
@@ -1384,6 +1434,13 @@ class BidTaskWorker:
             )
         except Exception as exc:
             session.rollback()
+            with self._lock:
+                is_latest_run = (
+                    self._cancel_flags.get(task_id) is cancel_ev
+                    and self._norm_job_key(task_id) not in self._deleted_task_ids
+                )
+            if not is_latest_run:
+                return
             err_msg = f"{type(exc).__name__}: {exc}"
             stage_sum_ms = sum(
                 v for k, v in duration_record.items() if k != 'total_ms' and isinstance(v, int)

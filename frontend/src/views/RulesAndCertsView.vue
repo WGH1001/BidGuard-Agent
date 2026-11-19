@@ -819,7 +819,7 @@ onMounted(() => {
           <div v-loading="loadingRules" class="rule-pane">
             <div class="rp-top-bar">
               <div>
-                <h3>部门默认防废标体检基准参数（F2 / F3 确定性核验底座）</h3>
+                <h3>部门默认防废标体检基准参数</h3>
                 <p>配置最高投标限价、计划开标日、采购人名称、社保证明必含月份与自定义红线禁用词。</p>
               </div>
               <el-button type="primary" :loading="savingRules" @click="handleSaveRuleConfig">
@@ -842,12 +842,12 @@ onMounted(() => {
               </div>
 
               <div class="rf-field">
-                <label>默认计划开标日期 (YYYY-MM-DD · F3 证照有效期核验基准日)</label>
+                <label>默认计划开标日期（YYYY-MM-DD · 证照有效期核验基准日）</label>
                 <el-input v-model="ruleForm.open_date" placeholder="例如：2026-11-05" />
               </div>
 
               <div class="rf-field">
-                <label>本项目采购人 / 招标单位全称（F3 跨项目串名扫描防自伤保护）</label>
+                <label>本项目采购人 / 招标单位全称（跨项目串名扫描防自伤保护）</label>
                 <el-input v-model="ruleForm.buyer_name" placeholder="例如：某省政务云管理中心" />
               </div>
             </div>
@@ -885,7 +885,7 @@ onMounted(() => {
                 size="small"
                 style="width: 100%"
               >
-                <el-table-column label="禁用关键词 / 历史外部单位名称 (keyword)" min-width="260">
+                <el-table-column label="禁用关键词 / 历史外部单位名称" min-width="260">
                   <template #default="{ row }">
                     <el-input
                       v-model="row.keyword"
@@ -895,23 +895,23 @@ onMounted(() => {
                   </template>
                 </el-table-column>
 
-                <el-table-column label="严重级别 (severity)" width="180">
+                <el-table-column label="严重级别" width="180">
                   <template #default="{ row }">
                     <el-select v-model="row.severity" size="small" style="width: 100%">
-                      <el-option label="error · 废标红线" value="error" />
-                      <el-option label="warning · 扣分预警" value="warning" />
-                      <el-option label="info · 一般提示" value="info" />
+                      <el-option label="废标红线" value="error" />
+                      <el-option label="扣分预警" value="warning" />
+                      <el-option label="一般提示" value="info" />
                     </el-select>
                   </template>
                 </el-table-column>
 
-                <el-table-column label="评分后果 (consequence)" width="190">
+                <el-table-column label="评分后果" width="190">
                   <template #default="{ row }">
                     <el-select v-model="row.consequence" size="small" style="width: 100%">
-                      <el-option label="veto · ★一票否决" value="veto" />
-                      <el-option label="deduction · ▲重要扣分" value="deduction" />
-                      <el-option label="bonus · ▲重要加分" value="bonus" />
-                      <el-option label="none · 无评分后果" value="none" />
+                      <el-option label="★ 一票否决" value="veto" />
+                      <el-option label="▲ 重要扣分" value="deduction" />
+                      <el-option label="▲ 重要加分" value="bonus" />
+                      <el-option label="无评分后果" value="none" />
                     </el-select>
                   </template>
                 </el-table-column>
@@ -934,7 +934,7 @@ onMounted(() => {
             <div class="rp-top-bar">
               <div>
                 <h3>企业常备投标证照与信创互认证书效期台账</h3>
-                <p>自动计算距今剩余有效天数；距离到期不足预警天数（warn_days）的行自动以橙色高亮预警。</p>
+                <p>自动计算距今剩余有效天数；距离到期不足预警天数的行自动以橙色高亮预警。</p>
               </div>
 
               <div class="cert-actions">
@@ -1512,7 +1512,7 @@ onMounted(() => {
     </div>
 
     <!-- 新增自定义业务线弹窗 -->
-    <el-dialog v-model="lineDialogVisible" title="新增自定义业务线指标库" width="480px">
+    <el-dialog v-model="lineDialogVisible" title="新增自定义业务线指标库" width="480px" append-to-body>
       <el-form label-position="top">
         <el-form-item label="业务线英文标识 (line · 如 cloud_ops / gov_data)" required>
           <el-input
@@ -1548,6 +1548,7 @@ onMounted(() => {
       v-model="entryDialogVisible"
       :title="editingIndicatorId === null ? '新增企业标准指标应答' : `编辑标准指标 (${editingIndicatorId})`"
       width="680px"
+      append-to-body
     >
       <div class="ind-anti-forgery-alert">
         <b>防造假红线锁已启用：</b>标准指标库严禁写入具体人民币投标报价数字（如
@@ -1639,6 +1640,7 @@ onMounted(() => {
       v-model="certDialogVisible"
       :title="editingCertId === null ? '新增企业投标证照' : '编辑企业投标证照'"
       width="520px"
+      append-to-body
     >
       <el-form label-position="top">
         <el-form-item label="证照名称" required>

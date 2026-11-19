@@ -28,9 +28,9 @@ interface PipelineStageNode {
 
 const PIPELINE_STAGES: PipelineStageNode[] = [
   { key: 'created', stepNo: '01', title: '双书入库', desc: '招标书与投标书解析就绪', thresholdPct: 5 },
-  { key: 'extracting', stepNo: '02', title: 'F1 红线提取', desc: '资格/符合/★▲强制条款抽取', thresholdPct: 20 },
-  { key: 'checking_det', stepNo: '03', title: 'F2/F3 确定性沙盒', desc: '报价算术与证照/串名 0-Token 扫描', thresholdPct: 45 },
-  { key: 'checking', stepNo: '04', title: 'F4 双书逐条勾稽', desc: '★条款漏答与书内前后矛盾核验', thresholdPct: 65 },
+  { key: 'extracting', stepNo: '02', title: '红线提取', desc: '资格/符合/★▲强制条款抽取', thresholdPct: 20 },
+  { key: 'checking_det', stepNo: '03', title: '确定性沙盒', desc: '报价算术与证照/串名核验', thresholdPct: 45 },
+  { key: 'checking', stepNo: '04', title: '双书逐条勾稽', desc: '★条款漏答与书内前后矛盾核验', thresholdPct: 65 },
   { key: 'grading', stepNo: '05', title: '废标风险定级', desc: '一票否决项与扣分项归类锁账', thresholdPct: 85 },
   { key: 'delivered', stepNo: '06', title: '体检交付就绪', desc: '生成风险清单与偏离表底座', thresholdPct: 100 },
 ]

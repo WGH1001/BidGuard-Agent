@@ -84,7 +84,7 @@ async function handleLogin(): Promise<void> {
   <div class="bg-login-screen">
     <!-- 左翼：工业蓝图防废标六道安全锁展示舱 -->
     <section class="login-blueprint-pane">
-      <div class="bp-top-tag">BIDGUARD-AGENT · 卖方投标防废标专版</div>
+      <div class="bp-top-tag">智标 · 标书合规审查与智能编制 Agent</div>
       <h1 class="bp-headline">封标前最后一道安全锁<br />与投前控标雷达系统</h1>
       <p class="bp-lead">
         专为系统集成商、弱电工程商与装备制造投标团队打造。先结构化抽取招标红线再逐条勾稽核销，
@@ -93,25 +93,25 @@ async function handleLogin(): Promise<void> {
 
       <div class="bp-matrix-grid">
         <div class="bp-cell">
-          <span class="bp-code">F1 零漏检提取</span>
+          <span class="bp-code">红线零漏检提取</span>
           <p>拆解资格项、符合项、★/▲强制参数与评分细则表，攻克 200 页长文档注意力衰减</p>
         </div>
         <div class="bp-cell">
-          <span class="bp-code">F2 报价算术沙盒</span>
-          <p>0-Token Decimal 精算单价×数量、分项累加、人民币大小写与最高限价，差 1 分必报</p>
+          <span class="bp-code">报价算术沙盒</span>
+          <p>精确核算单价×数量、分项累加、人民币大小写与最高限价，差 1 分必报</p>
         </div>
         <div class="bp-cell">
-          <span class="bp-code">F3 证照与串名扫描</span>
-          <p>核验营业执照/ISO有效期、社保证明所属月份区间，全文排查残留其他项目单位名</p>
+          <span class="bp-code">证照与串名扫描</span>
+          <p>核验营业执照与资质有效期、社保证明所属月份区间，全文排查残留其他项目单位名</p>
         </div>
         <div class="bp-cell">
-          <span class="bp-code">F4/F5 勾稽与偏离表</span>
-          <p>检出 ★ 漏应答与质保期前后承诺矛盾，一键导出带真实页码/偏移的 Word 偏离表</p>
+          <span class="bp-code">双书勾稽与偏离表</span>
+          <p>检出 ★ 漏应答与质保期前后承诺矛盾，一键导出带真实页码与定位的 Word 偏离表</p>
         </div>
       </div>
 
       <div class="bp-footer-note">
-        合规声明：本系统定位于印前体检与风险提示工具，全部引用强制经过 verify_quote 逐字溯源校验。
+        合规声明：本系统定位于印前体检与风险提示工具，全部引用均强制经过全文逐字溯源校验。
       </div>
     </section>
 
@@ -119,7 +119,7 @@ async function handleLogin(): Promise<void> {
     <section class="login-vault-pane">
       <div class="vault-card">
         <div class="vault-hd">
-          <h2>登录投标防废标工作台</h2>
+          <h2>登录智标工作台</h2>
           <p>
             {{
               showDemoLogin
@@ -131,7 +131,7 @@ async function handleLogin(): Promise<void> {
 
         <form class="vault-form" @submit.prevent="handleLogin">
           <div class="field-block">
-            <label>登录账号 (Username)</label>
+            <label>登录账号</label>
             <el-input
               v-model.trim="form.username"
               :placeholder="showDemoLogin ? '请输入用户名（如 liming / admin）' : '请输入登录账号'"
@@ -140,7 +140,7 @@ async function handleLogin(): Promise<void> {
           </div>
 
           <div class="field-block">
-            <label>安全密码 (Password)</label>
+            <label>安全密码</label>
             <el-input
               v-model="form.password"
               type="password"
@@ -158,7 +158,7 @@ async function handleLogin(): Promise<void> {
             :loading="loading"
             @click="handleLogin"
           >
-            进入防废标体检工作台 →
+            进入智标工作台 →
           </el-button>
         </form>
 

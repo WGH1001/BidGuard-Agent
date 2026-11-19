@@ -402,8 +402,18 @@ def trigger_check_pipeline(
     tenant_id = int(current_user.tenant_id)
     task = _get_tenant_task_or_404(db, task_id, tenant_id)
 
-    _cleanup_task_deviation_artifacts(task.id)
     worker = get_worker()
+    if (
+        task.status in ('extracting', 'checking', 'grading')
+        and task.id in worker._in_flight
+        and not worker.is_cancel_requested(task.id)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={'code': 'TASK_ALREADY_RUNNING', 'message': '防废标核验正在运行中，请勿重复启动'},
+        )
+
+    _cleanup_task_deviation_artifacts(task.id)
     worker.submit_check_task(task.id, sync=sync)
     db.expire_all()
     task = _get_tenant_task_or_404(db, task_id, tenant_id)
@@ -759,13 +769,14 @@ def delete_check_task(
             detail={'code': 'TASK_RUNNING', 'message': '运行中任务请先中断后再删除'},
         )
 
+    worker.mark_deleted(task_id)
+    worker.request_cancel(f"score:{task_id}")
+    worker.broadcaster.clear(task_id)
+
     db.query(QaSession).filter_by(task_id=task_id).delete(synchronize_session=False)
     db.query(BidFinding).filter_by(task_id=task_id).delete(synchronize_session=False)
     db.delete(task)
     db.commit()
-
-    worker.broadcaster.clear(task_id)
-    worker.request_cancel(f"score:{task_id}")
 
     # 清理上传目录及 OCR 伴生缓存文件
     task_upload_dir = (_UPLOADS_ROOT / str(tenant_id) / str(task_id)).resolve()

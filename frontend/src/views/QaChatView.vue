@@ -1097,11 +1097,27 @@ onBeforeUnmount(() => {
   <div v-loading="loadingInit" class="qa-chat-layout">
     <!-- 左栏：Antigravity 风格 Pinned Conversations + Projects 树形导航（多会话并发互不阻塞） -->
     <aside class="qa-sidebar bg-panel">
+      <div class="qs-workspace-hd">
+        <div class="qsw-left">
+          <span class="qsw-dot"></span>
+          <span class="qsw-title">专家问答工作台</span>
+        </div>
+        <button
+          type="button"
+          class="qsw-new-btn"
+          :disabled="creatingForTaskId !== null"
+          title="在当前项目下开启新对话"
+          @click="handleCreateSessionInActiveProject"
+        >
+          <span>+ 新建对话</span>
+        </button>
+      </div>
+
       <div class="qs-scroll">
-        <!-- Pinned Conversations -->
+        <!-- 置顶对话 -->
         <div v-if="pinnedSessions.length > 0" class="qs-section">
           <div class="qs-section-hd">
-            <span class="qs-section-title">Pinned Conversations</span>
+            <span class="qs-section-title">置顶对话</span>
             <span class="qs-count-pill mono-num">{{ pinnedSessions.length }}</span>
           </div>
 
@@ -1152,7 +1168,9 @@ onBeforeUnmount(() => {
                         title="重命名会话"
                         @click.stop="startRenameSession(s, 'sidebar')"
                       >
-                        ✎
+                        <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5">
+                          <path d="M11.3 2.5a1.5 1.5 0 0 1 2.2 2.2L5.3 12.9l-2.8.6.6-2.8 8.2-8.2Z" />
+                        </svg>
                       </button>
                       <button
                         type="button"
@@ -1160,7 +1178,9 @@ onBeforeUnmount(() => {
                         title="取消置顶"
                         @click.stop="togglePinSession(s)"
                       >
-                        📌
+                        <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
+                          <path d="M9.8 2.2a.75.75 0 0 1 1.06 0l2.94 2.94a.75.75 0 0 1-.48 1.28l-1.9.16-2.2 2.2.38 1.9a.75.75 0 0 1-1.26.68L6.2 9.22 3.47 11.95a.6.6 0 0 1-.85-.85L5.35 8.37 3.21 6.23a.75.75 0 0 1 .68-1.26l1.9.38 2.2-2.2.16-1.9a.75.75 0 0 1 .22-.47l1.43 1.42Z" />
+                        </svg>
                       </button>
                       <button
                         type="button"
@@ -1176,7 +1196,9 @@ onBeforeUnmount(() => {
                 </template>
               </div>
               <div class="tsc-proj">
-                <span class="folder-glyph">📁</span>
+                <svg class="folder-glyph-svg" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4">
+                  <path d="M2 4a1 1 0 0 1 1-1h3.2l1.1 1.2H13a1 1 0 0 1 1 1v6.3a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4Z" />
+                </svg>
                 <span class="tsc-proj-name" :title="resolveProjectLabel(s.task_id)">
                   {{ resolveProjectLabel(s.task_id) }}
                 </span>
@@ -1185,11 +1207,11 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <!-- Projects Tree -->
+        <!-- 项目问答库 -->
         <div class="qs-section">
           <div class="qs-section-hd">
             <div class="qs-sec-left">
-              <span class="qs-section-title">Projects</span>
+              <span class="qs-section-title">项目问答库</span>
               <span v-if="activeRunningCount > 0" class="running-badge mono-num">
                 {{ activeRunningCount }} 并发生成中
               </span>
@@ -1242,7 +1264,9 @@ onBeforeUnmount(() => {
                 @click="toggleProjectGroup(grp.taskId)"
               >
                 <span class="proj-caret" :class="{ open: isGroupExpanded(grp.taskId) }">▸</span>
-                <span class="folder-glyph">📁</span>
+                <svg class="folder-glyph-svg" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.45">
+                  <path d="M2 4a1 1 0 0 1 1-1h3.2l1.1 1.2H13a1 1 0 0 1 1 1v6.3a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4Z" />
+                </svg>
                 <span class="proj-name" :title="`#${grp.taskId} ${grp.title}`">
                   {{ grp.taskId > 0 ? `#${grp.taskId} ${grp.title}` : grp.title }}
                 </span>
@@ -1311,15 +1335,19 @@ onBeforeUnmount(() => {
                           title="重命名会话"
                           @click.stop="startRenameSession(s, 'sidebar')"
                         >
-                          ✎
+                          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M11.3 2.5a1.5 1.5 0 0 1 2.2 2.2L5.3 12.9l-2.8.6.6-2.8 8.2-8.2Z" />
+                          </svg>
                         </button>
                         <button
                           type="button"
                           class="tsc-icon-btn"
-                          title="置顶到 Pinned Conversations"
+                          title="置顶该对话"
                           @click.stop="togglePinSession(s)"
                         >
-                          📌
+                          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4">
+                            <path d="M9.8 2.2l4 4-1.7.3-2.1 2.1.4 1.8-1.1 1.1-2.2-2.2-3.4 3.4-.6-.6 3.4-3.4-2.2-2.2 1.1-1.1 1.8.4 2.1-2.1.5-1.5Z" />
+                          </svg>
                         </button>
                         <button
                           type="button"
@@ -1368,7 +1396,7 @@ onBeforeUnmount(() => {
     <section class="qa-stage bg-panel">
       <div class="qst-header">
         <div class="qst-title-line">
-          <h2>F7 · 标书专家多轮 ReAct 追问工作台</h2>
+          <h2>标书专家多轮追问工作台</h2>
           <template v-if="activeSession">
             <input
               v-if="editingSessionId === activeSession.id && editingSource === 'header'"
@@ -1445,9 +1473,67 @@ onBeforeUnmount(() => {
 .qa-sidebar {
   display: flex;
   flex-direction: column;
-  padding: 12px 10px;
+  padding: 0 10px 12px;
   height: 100%;
   overflow: hidden;
+  background: linear-gradient(180deg, #fafbfd 0%, #ffffff 42px);
+}
+
+.qs-workspace-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 11px 6px 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border-line);
+}
+
+.qsw-left {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.qsw-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-soft);
+  flex-shrink: 0;
+}
+
+.qsw-title {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--txt-strong);
+  letter-spacing: 0.01em;
+}
+
+.qsw-new-btn {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(29, 78, 216, 0.28);
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.14s ease;
+  white-space: nowrap;
+}
+
+.qsw-new-btn:hover:not(:disabled) {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #ffffff;
+}
+
+.qsw-new-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .qs-scroll {
@@ -1616,10 +1702,14 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
-.folder-glyph {
-  font-size: 12px;
+.folder-glyph-svg {
   flex-shrink: 0;
-  opacity: 0.85;
+  color: var(--txt-muted);
+  opacity: 0.9;
+}
+
+.proj-row.selected .folder-glyph-svg {
+  color: var(--brand);
 }
 
 .proj-tree-list {
@@ -1723,6 +1813,7 @@ onBeforeUnmount(() => {
   padding: 6px 8px;
   border-radius: 7px;
   border: 1px solid transparent;
+  border-left: 2px solid transparent;
   cursor: pointer;
   transition: all 0.14s;
 }
@@ -1733,7 +1824,8 @@ onBeforeUnmount(() => {
 
 .tree-sess-row.active {
   background: var(--brand-soft);
-  border-color: rgba(29, 78, 216, 0.28);
+  border-color: rgba(29, 78, 216, 0.25);
+  border-left: 2.5px solid var(--brand);
 }
 
 .tsr-title {

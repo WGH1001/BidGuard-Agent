@@ -21,7 +21,7 @@ const routes: RouteRecordRaw[] = [
     path: '/login',
     name: 'login',
     component: LoginView,
-    meta: { public: true, title: '投标防废标工作台登录' },
+    meta: { public: true, title: '工作台登录' },
   },
   {
     path: '/',
@@ -38,7 +38,7 @@ const routes: RouteRecordRaw[] = [
     name: 'extract',
     component: ExtractView,
     meta: {
-      title: 'F1 招标红线与★条款提取',
+      title: '招标红线与★条款提取',
       moduleCode: 'F1',
     },
   },
@@ -56,7 +56,7 @@ const routes: RouteRecordRaw[] = [
     name: 'deviation',
     component: DeviationView,
     meta: {
-      title: 'F5 偏离表一键生成',
+      title: '偏离表一键生成',
       moduleCode: 'F5',
     },
   },
@@ -65,7 +65,7 @@ const routes: RouteRecordRaw[] = [
     name: 'radar',
     component: RadarView,
     meta: {
-      title: 'F6 投前控标雷达',
+      title: '投前控标雷达',
       moduleCode: 'F6',
     },
   },
@@ -74,7 +74,7 @@ const routes: RouteRecordRaw[] = [
     name: 'qa',
     component: QaChatView,
     meta: {
-      title: 'F7 标书专家追问',
+      title: '标书专家追问',
       moduleCode: 'F7',
     },
   },
@@ -158,6 +158,14 @@ router.beforeEach((to) => {
   }
 
   return true
+})
+
+router.afterEach((to) => {
+  const pageTitle = to.meta?.title as string | undefined
+  document.title =
+    to.path === '/login' || !pageTitle
+      ? '智标 · 标书合规审查智能体'
+      : `${pageTitle} - 智标 · 标书合规审查智能体`
 })
 
 export default router

@@ -150,15 +150,19 @@ def test_e43_blind_bid_signal_extraction_positive_negative_and_quote_verified(tm
     assert strict_info['no_images_strict'] is True
     assert strict_info['image_ban_scope'] == 'all_images'
 
-    # 否定句过滤（不得误报）
+    # 否定句及常规采购保密/进口/不可抗力/产品目录条款过滤（不得误报为暗标）
     for neg_text in (
         "本项目为非暗标项目，采用公开综合评分法。",
         "本项目不采用暗标评审，投标人正常装订封面与目录即可。",
         "前附表：是否采用暗标：否。",
         "前附表\n是否采用暗标评审\n否\n开标地点：第一开标室",
+        "本项目不允许采购进口产品，投标人应提供原厂合法供货承诺。",
+        "23.1 评标委员会及采购人不得向投标人或其他无关的人员透露评审情况。",
+        "11.3 受阻一方应在不可抗力事件发生后尽快用书面方式或传真通知对方。",
+        "档文件目录不可有漏装、错装情况出现，档案盒由供应商自备。",
     ):
         neg_info = extract_blind_bid_requirements(neg_text)
-        assert neg_info['is_blind_bid'] is False, f"否定句误触发：{neg_text}"
+        assert neg_info['is_blind_bid'] is False, f"否定句/常规采购条款误触发：{neg_text}"
         assert neg_info['requirements'] == []
         assert neg_info['toc_forbidden'] is False
         assert neg_info['style_forbidden'] is False

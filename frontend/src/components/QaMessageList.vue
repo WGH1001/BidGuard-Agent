@@ -203,7 +203,6 @@ defineExpose({
       >
         <!-- User 右侧气泡（回显本轮随附的附件胶囊） -->
         <div v-if="msg.role === 'user'" class="bubble user-bubble">
-          <div class="u-role-tag">我方提问</div>
           <div class="u-text">{{ msg.content }}</div>
           <div v-if="msg.attachments && msg.attachments.length > 0" class="u-att-pills">
             <span
@@ -219,7 +218,7 @@ defineExpose({
         <!-- Assistant 左侧气泡 -->
         <div v-else class="bubble assistant-bubble">
           <div class="a-head">
-            <span class="a-name">BidGuard 标书核验专家</span>
+            <span class="a-name">智标 · 标书合规专家</span>
             <div class="a-head-badges">
               <span
                 v-if="msg.grounded === false"
@@ -232,13 +231,13 @@ defineExpose({
                 v-if="msg.mode === 'keyword_fallback'"
                 class="sev-pill warning"
               >
-                离线检索模式 (0-Token)
+                离线检索模式
               </span>
               <span
                 v-else-if="msg.mode === 'react' && msg.grounded !== false"
                 class="sev-pill info"
               >
-                ReAct 多步检索模式
+                多步原文检索核验
               </span>
             </div>
           </div>
@@ -464,13 +463,13 @@ defineExpose({
             <button
               type="button"
               class="dock-tool-btn effort-trigger-btn"
-              title="切换大模型 ReAct 推理思考深度（单回合支持多工具并行，按挡位最高开放 7/8/12 个思考回合）"
+              title="切换大模型推理思考深度（单回合支持多工具并行，按挡位最高开放 7/8/12 个思考回合）"
               @click="effortMenuOpen = !effortMenuOpen; presetMenuOpen = false"
             >
               {{ currentEffortLabel }} ▾
             </button>
             <div v-if="effortMenuOpen" class="pop-menu effort-pop-menu">
-              <div class="pm-hd">选择 ReAct 推理思考深度：</div>
+              <div class="pm-hd">选择推理思考深度：</div>
               <button
                 v-for="opt in EFFORT_OPTIONS"
                 :key="opt.value"

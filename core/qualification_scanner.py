@@ -800,6 +800,7 @@ def _inspect_docx_blind_compliance(
     *,
     identity_terms: list[str],
     check_contact: bool,
+    has_business_qual_sections: bool = False,
 ) -> list[dict[str, Any]]:
     """检查 .docx OOXML 底纹/粗斜体/TOC 域/页眉页脚/图片附件。"""
     import zipfile
@@ -907,6 +908,12 @@ def _inspect_docx_blind_compliance(
                     'detail_json': {'check_type': 'media_strict_ban', 'media_files': media_files[:20]},
                 })
             elif image_ban_scope == 'logo_only' or 'hide_logo_media' in rec_rules:
+                combined_hint = (
+                    "（当前文档含《投标函/授权委托书/资格证明》商务章节：按招标要求上传的营业执照、"
+                    "授权公章与业绩合同扫描件属商务明标合规项；仅需核对独立封装的技术暗标章节中不含公司 Logo、水印或印章）"
+                    if has_business_qual_sections
+                    else "招标禁止出现 Logo/商标/公章等身份图片，0-Token 规则无法识别图片画面，请人工复核图片中不含任何单位标识。"
+                )
                 findings.append({
                     'source_module': 'BLIND_BID',
                     'code': 'BLIND_BID_NEED_MANUAL',
@@ -914,10 +921,14 @@ def _inspect_docx_blind_compliance(
                     'consequence': 'none',
                     'clause_no': '暗标图像人工复核',
                     'message': (
-                        f"NEED_MANUAL：检测到文档内嵌 {len(media_files)} 张图片（{preview}）。"
-                        "招标禁止出现 Logo/商标/公章等身份图片，0-Token 规则无法识别图片画面，请人工复核图片中不含任何单位标识。"
+                        f"NEED_MANUAL：检测到文档内嵌 {len(media_files)} 张图片（{preview}）。{combined_hint}"
                     ),
-                    'suggestion': '逐张核对文档配图与流程图，确认无公司 Logo、水印、印章或人员签名；必要时使用“暗标模式+隐去Logo”重新生成。',
+                    'suggestion': (
+                        '商务/资格审查要求提供的证照与公章扫件无需删除；仅需排查技术暗标正文配图与流程图，'
+                        '确认不含公司 Logo、水印、印章或人员签名；必要时使用“按暗标生成”单独导出技术暗标分册。'
+                        if has_business_qual_sections
+                        else '逐张核对文档配图与流程图，确认无公司 Logo、水印、印章或人员签名；必要时使用“暗标模式+隐去Logo”重新生成。'
+                    ),
                     'tender_quote': tq_img,
                     'bid_quote': '',
                     'quote_verified': False,
@@ -926,6 +937,7 @@ def _inspect_docx_blind_compliance(
                     'detail_json': {
                         'check_type': 'media_need_manual',
                         'needs_manual': True,
+                        'has_business_qual_sections': bool(has_business_qual_sections),
                         'media_files': media_files[:20],
                     },
                 })
@@ -1237,11 +1249,15 @@ def scan_blind_bid_compliance(
 
     # 4. .docx OOXML 深度检查
     if file_path is not None and file_path.suffix.lower() == '.docx':
+        has_biz_qual = bool(
+            text and re.search(r'(?:投标函|法定代表人(?:身份)?证明|授权委托书|资格证明文件|开标一览表)', text[:40000])
+        )
         docx_findings = _inspect_docx_blind_compliance(
             str(file_path),
             blind_bid_info,
             identity_terms=identity_terms,
             check_contact=check_contact,
+            has_business_qual_sections=has_biz_qual,
         )
         # 避免与正文重复叠加相同 TOC 发现
         if any(f['code'] == 'BLIND_BID_TOC_VIOLATION' for f in docx_findings):

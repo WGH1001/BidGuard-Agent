@@ -59,7 +59,9 @@ const listLoading = ref(false)
 const detailLoading = ref(false)
 const runningTrigger = ref(false)
 const cancellingTask = ref(false)
+const deletingTaskId = ref<number | null>(null)
 const renamingTask = ref(false)
+let selectReqSeq = 0
 const exportingClean = ref(false)
 const editingDetailTitle = ref(false)
 const detailTitleDraft = ref('')
@@ -272,13 +274,13 @@ const stageDurationItems = computed<StageDurationItem[]>(() => {
   if (!dur) return []
 
   const rawStages = [
-    { key: 'f1_ms', code: 'F1', label: '招标红线与★提取', ms: dur.f1_ms ?? null, color: '#2563eb' },
+    { key: 'f1_ms', code: '红线', label: '招标红线与★提取', ms: dur.f1_ms ?? null, color: '#2563eb' },
     ...(dur.f_parse_ms !== undefined && dur.f_parse_ms !== null
-      ? [{ key: 'f_parse_ms', code: '解析', label: '投标书解析与冷OCR', ms: dur.f_parse_ms ?? null, color: '#7c3aed' }]
+      ? [{ key: 'f_parse_ms', code: '解析', label: '投标书解析与OCR', ms: dur.f_parse_ms ?? null, color: '#7c3aed' }]
       : []),
-    { key: 'f2_ms', code: 'F2', label: '报价算术沙盒', ms: dur.f2_ms ?? null, color: '#0891b2' },
-    { key: 'f3_ms', code: 'F3', label: '证照效期与串名', ms: dur.f3_ms ?? null, color: '#059669' },
-    { key: 'f4_ms', code: 'F4', label: '★逐条勾稽与矛盾', ms: dur.f4_ms ?? null, color: '#d97706' },
+    { key: 'f2_ms', code: '报价', label: '报价算术沙盒', ms: dur.f2_ms ?? null, color: '#0891b2' },
+    { key: 'f3_ms', code: '证照', label: '证照效期与串名', ms: dur.f3_ms ?? null, color: '#059669' },
+    { key: 'f4_ms', code: '勾稽', label: '★逐条勾稽与矛盾', ms: dur.f4_ms ?? null, color: '#d97706' },
     { key: 'grading_ms', code: '汇总', label: '风险分级落库', ms: dur.grading_ms ?? null, color: '#64748b' },
   ]
 
@@ -316,6 +318,7 @@ const slowestStageItem = computed<StageDurationItem | null>(() => {
 
 async function loadTaskList(selectFirst = false): Promise<void> {
   listLoading.value = true
+  let preferred: BidTaskOut | undefined
   try {
     const res = await checksApi.list({
       task_type: 'pre_check',
@@ -327,36 +330,41 @@ async function loadTaskList(selectFirst = false): Promise<void> {
 
     if (selectFirst && tasks.value.length > 0 && !currentTask.value) {
       const qTaskId = Number(route.query.task_id || 0)
-      const preferred =
+      preferred =
         (qTaskId > 0 ? tasks.value.find((t) => t.id === qTaskId) : undefined) ||
         tasks.value.find((t) => t.id === appStore.activeTaskId) ||
         tasks.value[0]
-      if (preferred) {
-        await selectTask(preferred)
-      }
     }
   } finally {
     listLoading.value = false
   }
+  if (preferred) {
+    await selectTask(preferred)
+  }
 }
 
 async function selectTask(task: BidTaskOut): Promise<void> {
+  const reqSeq = ++selectReqSeq
   cancelRenameDetailTask()
   stopScorePoll()
   appStore.setActiveTaskId(task.id)
   detailLoading.value = true
   try {
     const detail = await checksApi.detail(task.id)
+    if (reqSeq !== selectReqSeq) return
     currentTask.value = detail.task
     const listIdx = tasks.value.findIndex((t) => t.id === detail.task.id)
     if (listIdx >= 0) {
       tasks.value[listIdx] = { ...tasks.value[listIdx], ...detail.task }
     }
     findings.value = detail.findings || []
-    await loadScoreEstimate(detail.task.id)
+    await loadScoreEstimate(detail.task.id, reqSeq)
+    if (reqSeq !== selectReqSeq) return
     checkAutoPopupPriceManual(detail.task)
   } finally {
-    detailLoading.value = false
+    if (reqSeq === selectReqSeq) {
+      detailLoading.value = false
+    }
   }
 }
 
@@ -412,9 +420,10 @@ function scheduleScorePoll(taskId: number): void {
   }, 2000)
 }
 
-async function loadScoreEstimate(taskId: number): Promise<void> {
+async function loadScoreEstimate(taskId: number, reqSeq?: number): Promise<void> {
   try {
     const snap = await checksApi.getScoreEstimate(taskId)
+    if (reqSeq !== undefined && reqSeq !== selectReqSeq) return
     scoreEstimate.value = snap
     syncTaskScoreSnapshot(taskId, snap)
     if (forceExpandScoreOnce.value || ['queued', 'running'].includes(snap.status)) {
@@ -522,6 +531,55 @@ function scoreCategoryLabel(cat: string): string {
   return map[cat] || cat
 }
 
+function vetoModuleLabel(mod: string): string {
+  const map: Record<string, string> = {
+    F2: '报价算术',
+    F3: '证照与串名',
+    F4: '双书勾稽',
+    F6: '投前控标',
+    BLIND_BID: '暗标合规',
+  }
+  return map[mod] || mod
+}
+
+function vetoCodeLabel(code: string): string {
+  const map: Record<string, string> = {
+    MISSING_RESPONSE: '★条款漏应答',
+    CONTRADICTION: '前后承诺矛盾',
+    NEGATIVE_DEVIATION: '实质性负偏离',
+    PRICE_MISMATCH: '报价算术异常',
+    PRICE_CAP_EXCEEDED: '超最高限价',
+    CERT_EXPIRED: '证照已过期',
+    BLIND_BID_IDENTITY_LEAK: '暗标身份泄露',
+  }
+  return map[code] || code
+}
+
+const scoreRangeSummary = computed(() => {
+  const se = scoreEstimate.value
+  if (!se) return null
+  const est = Number(se.assessed_estimated_score || 0)
+  const assessedMax = Number(se.assessed_max_score || 0)
+  const priceMax = Number(se.price_pending_max_score || 0)
+  const needManual = Number(se.need_llm_max_score || 0)
+  const declaredTotal = Number(se.total_declared_max_score || 100)
+  const estCents = Math.round((Number.isFinite(est) ? est : 0) * 100)
+  const priceCents = Math.round((Number.isFinite(priceMax) ? priceMax : 0) * 100)
+  const needCents = Math.round((Number.isFinite(needManual) ? needManual : 0) * 100)
+  const highCents = estCents + priceCents
+  const fmt = (cents: number) => (cents / 100).toFixed(2)
+  return {
+    hasPricePending: priceCents > 0,
+    hasNeedManual: needCents > 0,
+    minStr: fmt(estCents),
+    maxStr: fmt(highCents),
+    assessedMaxStr: (Number.isFinite(assessedMax) ? assessedMax : 0).toFixed(2),
+    priceMaxStr: fmt(priceCents),
+    needManualStr: fmt(needCents),
+    declaredTotalStr: (Number.isFinite(declaredTotal) ? declaredTotal : 100).toFixed(2),
+  }
+})
+
 function checkAutoPopupPriceManual(task: BidTaskOut): void {
   if (task.status !== 'delivered' || task.stats_json?.price_status !== 'NEED_MANUAL') return
   // 每个任务每个浏览器会话只自动弹一次：关闭后本会话不再打扰（页面上的人工回填入口仍在），
@@ -539,20 +597,41 @@ watch(priceModalVisible, (visible) => {
 })
 
 async function handleTriggerRun(): Promise<void> {
-  if (!currentTask.value) return
+  if (!currentTask.value || runningTrigger.value) return
+  const taskId = currentTask.value.id
   runningTrigger.value = true
   try {
-    const res = await checksApi.run(currentTask.value.id, false)
-    currentTask.value.status = res.status
-    sseRef.value?.startStream()
+    sseRef.value?.closeActiveStream()
+    stopScorePoll()
+    notificationStore.untrackJob('check', taskId)
+    const res = await checksApi.run(taskId, false)
+    const nextStatus = res.status === 'failed' ? 'extracting' : res.status
+    const nowIso = new Date().toISOString()
+    currentTask.value.status = nextStatus
+    currentTask.value.progress = 0
+    currentTask.value.error_msg = null
+    currentTask.value.stage_detail = '正在启动新一轮防废标核验流水线…'
+    currentTask.value.updated_at = nowIso
+    const idx = tasks.value.findIndex((t) => t.id === taskId)
+    if (idx >= 0) {
+      tasks.value[idx] = {
+        ...tasks.value[idx],
+        status: nextStatus,
+        progress: 0,
+        error_msg: null,
+        stage_detail: '正在启动新一轮防废标核验流水线…',
+        updated_at: nowIso,
+      }
+    }
+    sseRef.value?.startStream(true)
     notificationStore.registerTrackedJob({
       kind: 'check',
-      targetId: currentTask.value.id,
+      targetId: taskId,
       title: currentTask.value.title,
-      status: res.status,
+      status: nextStatus,
       stageDetail: '防废标核验流水线运行中…',
       routePath: '/checks',
-      routeQuery: { task_id: String(currentTask.value.id) },
+      routeQuery: { task_id: String(taskId) },
     })
     ElMessage.info('已启动防废标核验流水线，切页不中断，完成后顶部将自动通知')
   } finally {
@@ -664,6 +743,7 @@ function handlePageChange(newPage: number): void {
 }
 
 async function handleDeleteTask(task: BidTaskOut): Promise<void> {
+  if (deletingTaskId.value === task.id) return
   if (['extracting', 'checking', 'grading'].includes(task.status)) {
     ElMessage.warning('运行中任务请先中断后再删除')
     return
@@ -682,15 +762,27 @@ async function handleDeleteTask(task: BidTaskOut): Promise<void> {
     return
   }
 
-  await checksApi.remove(task.id)
+  deletingTaskId.value = task.id
+  sseRef.value?.closeActiveStream()
+  stopScorePoll()
   notificationStore.untrackJob('check', task.id)
   notificationStore.untrackJob('score', task.id)
+  try {
+    await checksApi.remove(task.id)
+  } finally {
+    deletingTaskId.value = null
+  }
   ElMessage.success(`体检任务 #${task.id} 已删除`)
 
+  tasks.value = tasks.value.filter((t) => t.id !== task.id)
+  total.value = Math.max(0, total.value - 1)
+
   if (currentTask.value?.id === task.id) {
-    sseRef.value?.closeActiveStream()
+    selectReqSeq += 1
     currentTask.value = null
     findings.value = []
+    scoreEstimate.value = null
+    detailLoading.value = false
     if (appStore.activeTaskId === task.id) {
       appStore.setActiveTaskId(null)
     }
@@ -701,6 +793,7 @@ async function handleDeleteTask(task: BidTaskOut): Promise<void> {
 }
 
 async function handleCancelTask(task: BidTaskOut): Promise<void> {
+  if (cancellingTask.value) return
   try {
     await ElMessageBox.confirm(
       `确认中断体检任务「#${task.id} ${task.title}」吗？中断后本任务标记为失败，不保留半程报告，之后可删除或重新发起体检。`,
@@ -716,10 +809,26 @@ async function handleCancelTask(task: BidTaskOut): Promise<void> {
   }
   cancellingTask.value = true
   try {
-    await checksApi.cancel(task.id)
+    sseRef.value?.closeActiveStream()
+    stopScorePoll()
     notificationStore.untrackJob('check', task.id)
+    await checksApi.cancel(task.id)
+    const idx = tasks.value.findIndex((t) => t.id === task.id)
+    if (idx >= 0) {
+      tasks.value[idx] = {
+        ...tasks.value[idx],
+        status: 'failed',
+        stage_detail: '用户中断',
+        error_msg: '用户中断',
+      }
+    }
     if (currentTask.value?.id === task.id) {
-      sseRef.value?.closeActiveStream()
+      currentTask.value = {
+        ...currentTask.value,
+        status: 'failed',
+        stage_detail: '用户中断',
+        error_msg: '用户中断',
+      }
     }
     ElMessage.success(`体检任务 #${task.id} 已中断`)
     await loadTaskList(false)
@@ -1018,14 +1127,15 @@ onBeforeUnmount(() => {
             >
               精修定稿中心
             </el-button>
-            <el-button
-              type="danger"
-              plain
-              :disabled="['extracting', 'checking', 'grading'].includes(currentTask.status)"
-              @click="handleDeleteTask(currentTask)"
-            >
-              删除任务
-            </el-button>
+              <el-button
+                type="danger"
+                plain
+                :loading="deletingTaskId === currentTask.id"
+                :disabled="['extracting', 'checking', 'grading'].includes(currentTask.status)"
+                @click="handleDeleteTask(currentTask)"
+              >
+                删除任务
+              </el-button>
           </div>
         </section>
 
@@ -1118,8 +1228,8 @@ onBeforeUnmount(() => {
                 >
                   {{
                     scoreEstimate.llm_status === 'done'
-                      ? '局部窗 AI + 确定性引擎已评估'
-                      : '0-Token 确定性预筛模式'
+                      ? '大模型 + 确定性引擎已评估'
+                      : '确定性规则预筛模式'
                   }}
                 </el-tag>
               </div>
@@ -1172,8 +1282,8 @@ onBeforeUnmount(() => {
                   ({{ scoreEstimate.assessed_ratio_pct }}%)
                 </template>
               </span>
-              <span class="scb-pill mono-num">
-                价格分待开标 {{ scoreEstimate.price_pending_max_score }} 分
+              <span v-if="scoreRangeSummary?.hasPricePending" class="scb-pill mono-num">
+                综合预估总分参考 {{ scoreRangeSummary.minStr }} ~ {{ scoreRangeSummary.maxStr }} / {{ scoreRangeSummary.declaredTotalStr }} 分
               </span>
               <span
                 v-if="scoreEstimate.veto_alerts.length > 0"
@@ -1240,7 +1350,7 @@ onBeforeUnmount(() => {
               :title="scoreEstimate.score_scale_warning"
             />
 
-            <!-- 一票否决风险先导警示（联动 F2/F3/F4/E43 暗标） -->
+            <!-- 一票否决风险先导警示 -->
             <el-alert
               v-if="scoreEstimate.has_veto_risk || scoreEstimate.veto_alerts.length > 0"
               type="error"
@@ -1254,7 +1364,7 @@ onBeforeUnmount(() => {
                   v-for="(va, vIdx) in scoreEstimate.veto_alerts.slice(0, 6)"
                   :key="`va_${vIdx}`"
                 >
-                  <b>[{{ va.source_module }} · {{ va.code }}]</b>
+                  <b>[{{ vetoModuleLabel(va.source_module) }} · {{ vetoCodeLabel(va.code) }}]</b>
                   {{ va.message }}（建议：{{ va.suggestion }}）
                 </li>
               </ul>
@@ -1263,30 +1373,51 @@ onBeforeUnmount(() => {
             <!-- 顶部四格核心指标总览 -->
             <div class="score-summary-grid">
               <div class="ssg-item primary">
-                <div class="ssg-label">非价格项预估得分 / 已评估满分</div>
+                <div class="ssg-label">非价格项预估总分</div>
                 <div class="ssg-val mono-num">
                   {{ scoreEstimate.assessed_estimated_score }}
                   <span class="ssg-sub">/ {{ scoreEstimate.assessed_max_score }} 分</span>
                 </div>
                 <div class="ssg-foot">
-                  得分率：{{ scoreEstimate.assessed_ratio_pct != null ? `${scoreEstimate.assessed_ratio_pct}%` : '—' }}
+                  得分率：{{ scoreEstimate.assessed_ratio_pct != null ? `${scoreEstimate.assessed_ratio_pct}%` : '—' }}（{{ scoreRangeSummary?.hasNeedManual ? `另有 ${scoreEstimate.need_llm_max_score} 分待人工复核` : '全部非价格项已出分' }}）
+                </div>
+              </div>
+              <div class="ssg-item primary">
+                <div class="ssg-label">综合预估总分参考（{{ scoreRangeSummary?.declaredTotalStr || '100.00' }} 分制）</div>
+                <div class="ssg-val mono-num">
+                  <template v-if="scoreRangeSummary?.hasPricePending">
+                    {{ scoreRangeSummary.minStr }} ~ {{ scoreRangeSummary.maxStr }}
+                    <span class="ssg-sub">分</span>
+                  </template>
+                  <template v-else>
+                    {{ scoreEstimate.assessed_estimated_score }}
+                    <span class="ssg-sub">/ {{ scoreEstimate.assessed_max_score }} 分</span>
+                  </template>
+                </div>
+                <div class="ssg-foot">
+                  <template v-if="scoreRangeSummary?.hasPricePending">
+                    已评非价格 {{ scoreRangeSummary.minStr }} 分 + 价格区间 0~{{ scoreEstimate.price_pending_max_score }} 分
+                  </template>
+                  <template v-else>
+                    提取满分合计 {{ scoreEstimate.items_sum_max_score }} 分
+                  </template>
                 </div>
               </div>
               <div class="ssg-item">
-                <div class="ssg-label">价格分（待开标确定）</div>
+                <div class="ssg-label">
+                  {{ scoreRangeSummary?.hasNeedManual ? '未自动出分待核对分值' : '价格分满分（待开标确定）' }}
+                </div>
                 <div class="ssg-val mono-num">
-                  {{ scoreEstimate.price_pending_max_score }}
+                  {{ scoreRangeSummary?.hasNeedManual ? scoreEstimate.need_llm_max_score : scoreEstimate.price_pending_max_score }}
                   <span class="ssg-sub">分</span>
                 </div>
-                <div class="ssg-foot">依赖开标现场评标基准价（禁捏造）</div>
-              </div>
-              <div class="ssg-item">
-                <div class="ssg-label">待模型/人工确认分值</div>
-                <div class="ssg-val mono-num">
-                  {{ scoreEstimate.need_llm_max_score }}
-                  <span class="ssg-sub">分</span>
+                <div class="ssg-foot">
+                  {{
+                    scoreRangeSummary?.hasNeedManual
+                      ? `提取满分合计 ${scoreEstimate.items_sum_max_score} 分`
+                      : '价格分依赖开标现场各家报价基准价（严禁虚构）'
+                  }}
                 </div>
-                <div class="ssg-foot">提取满分合计 {{ scoreEstimate.items_sum_max_score }} 分</div>
               </div>
               <div class="ssg-item" :class="{ danger: scoreEstimate.veto_alerts.length > 0 }">
                 <div class="ssg-label">一票否决红线预警</div>
@@ -1294,7 +1425,7 @@ onBeforeUnmount(() => {
                   {{ scoreEstimate.veto_alerts.length }}
                   <span class="ssg-sub">项</span>
                 </div>
-                <div class="ssg-foot">含 F2/F3/F4 及暗标合规</div>
+                <div class="ssg-foot">含报价 / 证照 / 勾稽 / 暗标合规</div>
               </div>
             </div>
 
@@ -1347,26 +1478,32 @@ onBeforeUnmount(() => {
             </div>
 
             <!-- 分项评分细则明细表 -->
-            <el-table :data="scoreEstimate.items" border size="small" class="score-items-table">
-              <el-table-column label="维度" width="95">
+            <el-table
+              :data="scoreEstimate.items"
+              border
+              size="small"
+              style="width: 100%"
+              class="score-items-table"
+            >
+              <el-table-column label="维度" width="84">
                 <template #default="{ row }">
                   <el-tag size="small" effect="plain">
                     {{ scoreCategoryLabel((row as ScoreCriterionItemOut).category) }}
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="评分因素与标准" min-width="180">
+              <el-table-column label="评分因素与标准" min-width="150">
                 <template #default="{ row }">
                   <div class="sit-factor">{{ (row as ScoreCriterionItemOut).factor }}</div>
                   <div class="sit-sec">{{ (row as ScoreCriterionItemOut).section }}</div>
                 </template>
               </el-table-column>
-              <el-table-column label="满分" width="76" align="right">
+              <el-table-column label="满分" width="66" align="right">
                 <template #default="{ row }">
                   <span class="mono-num">{{ (row as ScoreCriterionItemOut).max_score }}</span>
                 </template>
               </el-table-column>
-              <el-table-column label="预估得分" width="90" align="right">
+              <el-table-column label="预估得分" width="80" align="right">
                 <template #default="{ row }">
                   <b v-if="(row as ScoreCriterionItemOut).estimated_score != null" class="mono-num">
                     {{ (row as ScoreCriterionItemOut).estimated_score }}
@@ -1374,14 +1511,14 @@ onBeforeUnmount(() => {
                   <span v-else class="muted-txt">—</span>
                 </template>
               </el-table-column>
-              <el-table-column label="评估状态" width="120">
+              <el-table-column label="评估状态" width="98">
                 <template #default="{ row }">
                   <el-tag size="small" :type="scoreStatusTagType(row as ScoreCriterionItemOut)">
                     {{ scoreStatusLabel(row as ScoreCriterionItemOut) }}
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="失分原因与提分建议" min-width="260">
+              <el-table-column label="失分原因与提分建议" min-width="280">
                 <template #default="{ row }">
                   <div class="sit-reason">
                     <b>原因：</b>{{ ((row as ScoreCriterionItemOut).deduction_reasons || []).join('；') || '—' }}
@@ -1391,7 +1528,7 @@ onBeforeUnmount(() => {
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column label="投标书正文依据" min-width="220">
+              <el-table-column label="投标书正文依据" min-width="190">
                 <template #default="{ row }">
                   <el-collapse
                     v-if="((row as ScoreCriterionItemOut).evidence_quotes || []).some((q) => q.quote_verified && q.quote)"
@@ -1409,7 +1546,9 @@ onBeforeUnmount(() => {
                       </div>
                     </el-collapse-item>
                   </el-collapse>
-                  <span v-else class="muted-txt">原文未直引</span>
+                  <span v-else class="muted-txt">
+                    {{ (row as ScoreCriterionItemOut).status === 'pending_open_bid' ? '待开标后由报价基准确定' : '未匹配到直接引用句' }}
+                  </span>
                 </template>
               </el-table-column>
             </el-table>
@@ -1568,8 +1707,18 @@ onBeforeUnmount(() => {
 
 .cwt-actions {
   display: flex;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
   flex-wrap: wrap;
+}
+
+.cwt-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.cwt-actions :deep(.el-button) {
+  padding: 7px 11px;
+  font-size: 12.5px;
 }
 
 .dur-breakdown-card {
@@ -1773,6 +1922,13 @@ onBeforeUnmount(() => {
 
 .score-est-card {
   margin-bottom: 14px;
+  overflow: hidden;
+  max-width: 100%;
+}
+
+.score-est-card :deep(.el-card__body) {
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .sec-head-row {

@@ -342,7 +342,7 @@ onMounted(() => {
     <section class="bg-panel section-card">
       <div class="section-hd">
         <div>
-          <h2>部门组织台账（Tenant）</h2>
+          <h2>部门组织台账</h2>
           <p class="section-sub">
             同一部门成员共享规则配置、证照台账与体检任务资产；不同部门严格按租户隔离。
           </p>
@@ -438,7 +438,7 @@ onMounted(() => {
         :closable="false"
         show-icon
         style="margin-bottom: 14px"
-        title="安全护栏：禁用某账号后其既有 JWT 令牌立即失效；当前系统至少保留 1 名活跃管理员，且管理员不可禁用或降级自己。"
+        title="安全护栏：禁用某账号后其既有登录令牌立即失效；当前系统至少保留 1 名活跃管理员，且管理员不可禁用或降级自己。"
       />
 
       <el-table
@@ -525,7 +525,7 @@ onMounted(() => {
     </section>
 
     <!-- 新建账号弹窗 -->
-    <el-dialog v-model="createDialogVisible" title="新建平台成员账号" width="460px" destroy-on-close>
+    <el-dialog v-model="createDialogVisible" title="新建平台成员账号" width="460px" append-to-body destroy-on-close>
       <el-form label-width="96px">
         <el-form-item label="登录账号" required>
           <el-input
@@ -549,8 +549,8 @@ onMounted(() => {
         </el-form-item>
         <el-form-item label="角色权限" required>
           <el-select v-model="createForm.role" style="width: 100%">
-            <el-option label="普通成员 (member)" value="member" />
-            <el-option label="系统管理员 (admin)" value="admin" />
+            <el-option label="普通成员" value="member" />
+            <el-option label="系统管理员" value="admin" />
           </el-select>
         </el-form-item>
         <el-form-item label="初始密码" required>
@@ -571,7 +571,7 @@ onMounted(() => {
     </el-dialog>
 
     <!-- 编辑账号弹窗 -->
-    <el-dialog v-model="editDialogVisible" title="编辑账号信息与部门角色" width="460px" destroy-on-close>
+    <el-dialog v-model="editDialogVisible" title="编辑账号信息与部门角色" width="460px" append-to-body destroy-on-close>
       <el-form v-if="editTarget" label-width="96px">
         <el-form-item label="登录账号" required>
           <el-input
@@ -602,8 +602,8 @@ onMounted(() => {
             style="width: 100%"
             :disabled="isSelf(editTarget) || isLastActiveAdmin(editTarget)"
           >
-            <el-option label="普通成员 (member)" value="member" />
-            <el-option label="系统管理员 (admin)" value="admin" />
+            <el-option label="普通成员" value="member" />
+            <el-option label="系统管理员" value="admin" />
           </el-select>
           <div
             v-if="isSelf(editTarget) || isLastActiveAdmin(editTarget)"
@@ -626,7 +626,7 @@ onMounted(() => {
     </el-dialog>
 
     <!-- 重置密码弹窗 -->
-    <el-dialog v-model="resetPwdDialogVisible" title="管理员重置登录密码" width="420px" destroy-on-close>
+    <el-dialog v-model="resetPwdDialogVisible" title="管理员重置登录密码" width="420px" append-to-body destroy-on-close>
       <el-form v-if="resetPwdTarget" label-width="96px">
         <el-form-item label="目标账号">
           <span class="mono-num">{{ resetPwdTarget.username }}（{{ resetPwdTarget.display_name }}）</span>

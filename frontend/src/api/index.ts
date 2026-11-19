@@ -209,18 +209,19 @@ export const checksApi = {
     page?: number
     page_size?: number
   }): Promise<BidTaskListOut> {
-    return get<BidTaskListOut>('/checks', { params })
+    return get<BidTaskListOut>('/checks', { params, timeout: 25000 })
   },
   detail(taskId: number): Promise<BidTaskDetailOut> {
-    return get<BidTaskDetailOut>(`/checks/${taskId}`)
+    return get<BidTaskDetailOut>(`/checks/${taskId}`, { timeout: 25000 })
   },
   run(taskId: number, sync = false): Promise<RunTaskTriggerOut> {
     return post<RunTaskTriggerOut>(`/checks/${taskId}/run`, undefined, {
       params: { sync },
+      timeout: sync ? 180000 : 30000,
     })
   },
   cancel(taskId: number): Promise<OkResponse> {
-    return post<OkResponse>(`/checks/${taskId}/cancel`)
+    return post<OkResponse>(`/checks/${taskId}/cancel`, undefined, { timeout: 30000 })
   },
   rename(taskId: number, payload: BidTaskRenamePayload): Promise<BidTaskOut> {
     return patch<BidTaskOut>(`/checks/${taskId}`, payload)
@@ -248,7 +249,7 @@ export const checksApi = {
     })
   },
   getScoreEstimate(taskId: number): Promise<ScoreEstimateOut> {
-    return get<ScoreEstimateOut>(`/checks/${taskId}/score-estimate`)
+    return get<ScoreEstimateOut>(`/checks/${taskId}/score-estimate`, { timeout: 25000 })
   },
   downloadScoreEstimateReport(
     taskId: number,
@@ -257,7 +258,7 @@ export const checksApi = {
     return downloadFromApi(`/checks/${taskId}/score-estimate/export`, fallbackName)
   },
   remove(taskId: number): Promise<OkResponse> {
-    return del<OkResponse>(`/checks/${taskId}`)
+    return del<OkResponse>(`/checks/${taskId}`, { timeout: 30000 })
   },
   downloadStoredFile(fileUrl: string, fallbackName: string): Promise<string> {
     return downloadFromApi(fileUrl, fallbackName)

@@ -1,6 +1,6 @@
 /* ============================================================================
- * BidGuard-Agent · 全新工业防废标精密工作台主题系统
- * 默认：工业浅岩灰 (slate, #e2e8f0) | 备选：曜石暖炭灰 (carbon) / 深海峡湾青 (fjord)
+ * 智标 (BidGuard-Agent) · 工作台主题系统
+ * 默认：工业浅岩灰 (slate, #e2e8f0) | 备选：暖砂燕麦灰 (carbon) / 晴岚雾蓝灰 (fjord)
  * ============================================================================ */
 
 :root,
@@ -20,33 +20,33 @@
 }
 
 [data-sidebar-theme='carbon'] {
-  /* 侧栏主题二：曜石暖炭灰（高对比度暗色工业风） */
-  --sb-bg: #23201e;
-  --sb-surface: #2d2926;
-  --sb-hover: #38332f;
-  --sb-border: #443e39;
-  --sb-text: #f5f2ed;
-  --sb-text-sec: #d6d1c7;
-  --sb-muted: #9c9488;
-  --sb-active-bg: #ea580c;
+  /* 侧栏主题二：暖砂燕麦灰（低饱和柔暖纸感，不刺眼、不暗沉） */
+  --sb-bg: #efece6;
+  --sb-surface: #e5e0d7;
+  --sb-hover: #dcd6cc;
+  --sb-border: #cfc8bc;
+  --sb-text: #292524;
+  --sb-text-sec: #57534e;
+  --sb-muted: #78716c;
+  --sb-active-bg: #546257;
   --sb-active-text: #ffffff;
-  --sb-badge-bg: #38332f;
-  --sb-badge-text: #fb923c;
+  --sb-badge-bg: #dcd6cc;
+  --sb-badge-text: #292524;
 }
 
 [data-sidebar-theme='fjord'] {
-  /* 侧栏主题三：深海峡湾青（莫兰迪深青灰） */
-  --sb-bg: #18282b;
-  --sb-surface: #213539;
-  --sb-hover: #294247;
-  --sb-border: #335056;
-  --sb-text: #ecfeff;
-  --sb-text-sec: #bae6fd;
-  --sb-muted: #7dd3fc;
-  --sb-active-bg: #0284c7;
+  /* 侧栏主题三：晴岚雾蓝灰（莫兰迪浅青灰，清朗克制） */
+  --sb-bg: #e6eef3;
+  --sb-surface: #d9e5ec;
+  --sb-hover: #cddce4;
+  --sb-border: #bdcfd9;
+  --sb-text: #162a36;
+  --sb-text-sec: #3b5362;
+  --sb-muted: #627b8a;
+  --sb-active-bg: #2f5d7c;
   --sb-active-text: #ffffff;
-  --sb-badge-bg: #294247;
-  --sb-badge-text: #38bdf8;
+  --sb-badge-bg: #cddce4;
+  --sb-badge-text: #162a36;
 }
 
 :root {

@@ -701,3 +701,80 @@ def test_e30_radar_cancel_and_exception_no_zombie_checking(tmp_path, monkeypatch
             assert row_err.finished_at is not None
 
         assert tc.delete(f"/api/radar/{ok_tid}", headers=hdrs).status_code == 200
+
+
+def test_e30_cancel_then_rerun_and_mark_deleted_race(tmp_path, monkeypatch):
+    """中断后立即重跑与删任务竞态保护：旧取消令牌不反杀新轮次，mark_deleted 阻止僵尸回写。"""
+    monkeypatch.setenv('BIDGUARD_FORCE_ZERO_TOKEN', '1')
+    tender_docx = _make_docx_file(
+        tmp_path / 'tender.docx',
+        ['第一章 技术要求', '★1. 免费质保期不少于24个月。'],
+    )
+    bid_docx = _make_docx_file(
+        tmp_path / 'bid.docx',
+        ['第一章 投标响应', '★1. 免费质保期不少于24个月。（完全响应）'],
+    )
+
+    db_file = tmp_path / 'e30_rerun_delete_race.db'
+    eng = get_engine(f"sqlite:///{db_file.as_posix()}")
+    Base.metadata.create_all(bind=eng)
+    SessionMaker = get_session_factory(eng)
+
+    s = SessionMaker()
+    try:
+        tenant = Tenant(name='E30中断重跑删任务竞态租户', is_active=True)
+        s.add(tenant)
+        s.flush()
+        task = BidCheckTask(
+            tenant_id=tenant.id,
+            task_type='pre_check',
+            title='E30中断重跑竞态测试',
+            status='extracting',
+            progress=15,
+            tender_filename='tender.docx',
+            bid_filename='bid.docx',
+            tender_path=str(tender_docx),
+            bid_path=str(bid_docx),
+            config_json={'open_date': '2026-11-28'},
+        )
+        s.add(task)
+        s.commit()
+        tid = task.id
+    finally:
+        s.close()
+
+    worker = BidTaskWorker(session_factory=SessionMaker, max_workers=1)
+    try:
+        # 1) 模拟旧轮次在途并被用户中断，随后立即点击“启动防废标核验”重跑
+        old_ev = worker.register_task_execution(tid)
+        assert worker.request_cancel(tid) is True
+        assert old_ev.is_set() is True
+
+        # 重跑会接管 cancel_flags[tid]，不应因旧 ev 仍被 set 而卡死或误中断
+        worker.submit_check_task(tid, sync=True)
+        assert worker._is_current_run(tid, old_ev) is False
+
+        # 旧线程延迟退出调用 unregister_task_execution(tid, old_ev) 时，不应干扰任何后续标记
+        worker.unregister_task_execution(tid, old_ev)
+
+        with SessionMaker() as sess:
+            row = sess.query(BidCheckTask).filter_by(id=tid).first()
+            assert row is not None
+            assert row.status == 'delivered'
+            assert row.progress == 100
+            assert 'cancelled_by_user' not in (row.config_json or {})
+
+        # 2) mark_deleted 后，在途旧令牌立刻判非当前轮次并触发 _PipelineCancelled
+        run2_ev = worker.register_task_execution(tid)
+        assert worker._is_current_run(tid, run2_ev) is True
+        worker.mark_deleted(tid)
+        assert run2_ev.is_set() is True
+        assert worker._is_current_run(tid, run2_ev) is False
+        with pytest.raises(_PipelineCancelled):
+            worker.check_cancelled(tid, run2_ev)
+        worker.unregister_task_execution(tid, run2_ev)
+    finally:
+        _cleanup_task_deviation_artifacts(tid)
+        worker.shutdown(wait=False)
+        eng.dispose()
+

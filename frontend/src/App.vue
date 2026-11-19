@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
+import zhCn from 'element-plus/es/locale/lang/zh-cn'
+import { authApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { SIDEBAR_THEMES, useAppStore } from '@/stores/app'
 import { useNotificationStore, type TaskNotificationItem, type TrackedBackgroundJob } from '@/stores/notifications'
@@ -13,31 +15,38 @@ const authStore = useAuthStore()
 const appStore = useAppStore()
 const notificationStore = useNotificationStore()
 const notifPopoverOpen = ref(false)
+const userMenuOpen = ref(false)
+const pwdDialogOpen = ref(false)
+const pwdSubmitting = ref(false)
+const pwdForm = reactive({
+  old_password: '',
+  new_password: '',
+  confirm_password: '',
+})
 
 const isLoginRoute = computed(() => route.path === '/login')
 
 interface NavItem {
   path: string
   label: string
-  badge?: string
+  icon: string
   group: 'core' | 'asset' | 'system'
   adminOnly?: boolean
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { path: '/dashboard', label: '防废标体检总览', badge: '大盘', group: 'core' },
-  { path: '/extract', label: '招标红线与★提取', badge: 'F1', group: 'core' },
-  { path: '/checks', label: '封标前防废标体检台', badge: 'F2-F4', group: 'core' },
-  { path: '/deviation', label: '偏离表一键生成', badge: 'F5', group: 'core' },
-  { path: '/radar', label: '投前控标雷达', badge: 'F6', group: 'core' },
-  { path: '/qa', label: '标书专家追问', badge: 'F7', group: 'core' },
-  { path: '/similarity', label: '多标书交叉比对', badge: '查重对比', group: 'core' },
-  { path: '/composer', label: '标书编制输出中心', badge: 'F8 编制', group: 'core' },
-  { path: '/rules', label: '废标规则与证照底表', group: 'asset' },
-  { path: '/reports', label: '封标交付中心与审计', group: 'asset' },
-  { path: '/users', label: '部门与账号管理', group: 'system', adminOnly: true },
-  { path: '/model-settings', label: '私有模型服务配置', group: 'system' },
-  { path: '/change-password', label: '修改登录密码', group: 'system' },
+  { path: '/dashboard', label: '防废标体检总览', icon: 'M3 3h6v6H3V3zm8 0h6v4h-6V3zm0 6h6v8h-6V9zM3 11h6v6H3v-6z', group: 'core' },
+  { path: '/extract', label: '招标红线与★提取', icon: 'M5 3h7l4 4v10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zm3 6h5m-5 3h5m-5 3h3', group: 'core' },
+  { path: '/checks', label: '封标前防废标体检台', icon: 'M10 2.5l6.5 2.7v4.6c0 4.1-2.8 7.5-6.5 8.7-3.7-1.2-6.5-4.6-6.5-8.7V5.2L10 2.5zm-2.5 8l1.8 1.8 3.5-3.8', group: 'core' },
+  { path: '/deviation', label: '偏离表一键生成', icon: 'M3.5 4.5h13v11h-13v-11zm0 4h13m-8.5-4v11', group: 'core' },
+  { path: '/radar', label: '投前控标雷达', icon: 'M10 17a7 7 0 1 0 0-14 7 7 0 0 0 0 14zm0-3.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zm0-3.5l3.8-3.8', group: 'core' },
+  { path: '/qa', label: '标书专家追问', icon: 'M4 5.5A1.5 1.5 0 0 1 5.5 4h9A1.5 1.5 0 0 1 16 5.5v6A1.5 1.5 0 0 1 14.5 13H9l-3.5 3v-3H5.5A1.5 1.5 0 0 1 4 11.5v-6z', group: 'core' },
+  { path: '/similarity', label: '多标书交叉比对', icon: 'M7 4H4.5A1.5 1.5 0 0 0 3 5.5v9A1.5 1.5 0 0 0 4.5 16H7m6-12h2.5A1.5 1.5 0 0 1 17 5.5v9a1.5 1.5 0 0 1-1.5 1.5H13M10 3v14', group: 'core' },
+  { path: '/composer', label: '标书编制输出中心', icon: 'M13.2 3.3a1.8 1.8 0 0 1 2.5 2.5L7.6 13.9l-3.6.9.9-3.6 8.3-7.9z', group: 'core' },
+  { path: '/rules', label: '废标规则与证照底表', icon: 'M4.5 4h11v12h-11V4zm2.5 3.5h6m-6 3h6m-6 3h4', group: 'asset' },
+  { path: '/reports', label: '封标交付中心与审计', icon: 'M3.5 6.5h13v9.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V6.5zm2-3h9l1.5 3h-12l1.5-3zm2.5 7h4', group: 'asset' },
+  { path: '/users', label: '部门与账号管理', icon: 'M7.5 9.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm-4.5 6.5a4.5 4.5 0 0 1 9 0m3-7a2.2 2.2 0 1 0 0-4.4M16.5 16a3.5 3.5 0 0 0-2.5-3.3', group: 'system', adminOnly: true },
+  { path: '/model-settings', label: '私有模型服务配置', icon: 'M10 6.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4zm0-4.3v1.6m0 11.8v1.6m-7.5-7.5h1.6m11.8 0h1.6M4.7 4.7l1.1 1.1m8.4 8.4l1.1 1.1m0-10.6l-1.1 1.1m-8.4 8.4l-1.1 1.1', group: 'system' },
 ]
 
 const coreNavs = computed(() => NAV_ITEMS.filter((i) => i.group === 'core'))
@@ -46,7 +55,7 @@ const systemNavs = computed(() =>
   NAV_ITEMS.filter((i) => i.group === 'system' && (!i.adminOnly || authStore.isAdmin)),
 )
 
-const currentPageTitle = computed(() => (route.meta.title as string) || '防废标体检工作台')
+const currentPageTitle = computed(() => (route.meta.title as string) || '智标合规工作台')
 const roleLabel = computed(() => (authStore.isAdmin ? '系统管理员' : '投标商务专员'))
 const userDisplayName = computed(
   () => (authStore.user?.display_name || authStore.user?.username || '').trim(),
@@ -91,27 +100,63 @@ function handleClickTrackedJob(job: TrackedBackgroundJob): void {
   notificationStore.navigateToTarget(job.routePath, job.routeQuery)
 }
 
+function openPwdDialog(): void {
+  userMenuOpen.value = false
+  pwdForm.old_password = ''
+  pwdForm.new_password = ''
+  pwdForm.confirm_password = ''
+  pwdDialogOpen.value = true
+}
+
+async function submitPwdChange(): Promise<void> {
+  if (!pwdForm.old_password.trim()) {
+    ElMessage.warning('请输入当前原密码')
+    return
+  }
+  if (pwdForm.new_password.trim().length < 6) {
+    ElMessage.warning('新密码长度不能少于 6 位')
+    return
+  }
+  if (pwdForm.new_password !== pwdForm.confirm_password) {
+    ElMessage.warning('两次输入的新密码不一致')
+    return
+  }
+  pwdSubmitting.value = true
+  try {
+    await authApi.changePassword({
+      old_password: pwdForm.old_password,
+      new_password: pwdForm.new_password.trim(),
+    })
+    ElMessage.success('密码修改成功')
+    pwdDialogOpen.value = false
+  } finally {
+    pwdSubmitting.value = false
+  }
+}
+
 function handleLogout(): void {
+  userMenuOpen.value = false
   notificationStore.stopAndReset()
   authStore.logout()
-  ElMessage.info('已安全退出投标防废标工作台')
+  ElMessage.info('已安全退出智标工作台')
   void router.push('/login')
 }
 </script>
 
 <template>
-  <router-view v-if="isLoginRoute" />
+  <el-config-provider :locale="zhCn">
+    <router-view v-if="isLoginRoute" />
 
-  <div v-else class="bg-workspace-layout">
-    <!-- 左置全高工业控制台侧栏（支持三色主题实时切换，默认 #e2e8f0 工业浅岩灰） -->
-    <aside class="bg-sidebar">
-      <div class="sb-brand-block" @click="router.push('/dashboard')">
-        <div class="sb-shield-mark">BG</div>
-        <div class="sb-brand-meta">
-          <div class="sb-brand-name">BidGuard-Agent</div>
-          <div class="sb-brand-sub">卖方投标防废标体检台</div>
+    <div v-else class="bg-workspace-layout">
+      <!-- 左置全高工业控制台侧栏（支持三色主题实时切换，默认 #e2e8f0 工业浅岩灰） -->
+      <aside class="bg-sidebar">
+        <div class="sb-brand-block" @click="router.push('/dashboard')">
+          <div class="sb-shield-mark">智</div>
+          <div class="sb-brand-meta">
+            <div class="sb-brand-name">智标</div>
+            <div class="sb-brand-sub">标书合规审查与智能编制 Agent</div>
+          </div>
         </div>
-      </div>
 
       <!-- 侧栏内嵌式三色主题切换器 -->
       <div class="sb-theme-switcher">
@@ -143,8 +188,12 @@ function handleLogout(): void {
           :class="{ 'is-active': route.path === item.path }"
           @click="router.push(item.path)"
         >
-          <span class="nav-txt">{{ item.label }}</span>
-          <span v-if="item.badge" class="nav-code-badge">{{ item.badge }}</span>
+          <span class="nav-item-inner">
+            <svg class="nav-svg" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+              <path :d="item.icon" />
+            </svg>
+            <span class="nav-txt">{{ item.label }}</span>
+          </span>
         </button>
 
         <div class="sb-group-hd">规则底座与封标归档</div>
@@ -156,7 +205,12 @@ function handleLogout(): void {
           :class="{ 'is-active': route.path === item.path }"
           @click="router.push(item.path)"
         >
-          <span class="nav-txt">{{ item.label }}</span>
+          <span class="nav-item-inner">
+            <svg class="nav-svg" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+              <path :d="item.icon" />
+            </svg>
+            <span class="nav-txt">{{ item.label }}</span>
+          </span>
         </button>
 
         <div class="sb-group-hd">模型与账户安全</div>
@@ -168,18 +222,19 @@ function handleLogout(): void {
           :class="{ 'is-active': route.path === item.path }"
           @click="router.push(item.path)"
         >
-          <span class="nav-txt">{{ item.label }}</span>
-        </button>
-
-        <button type="button" class="sb-nav-link logout-item" @click="handleLogout">
-          <span class="nav-txt">退出当前账号</span>
+          <span class="nav-item-inner">
+            <svg class="nav-svg" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+              <path :d="item.icon" />
+            </svg>
+            <span class="nav-txt">{{ item.label }}</span>
+          </span>
         </button>
       </nav>
 
       <!-- 侧栏底栏高对比度工程铭牌 -->
       <div class="sb-telemetry-foot">
-        <div class="foot-line"><b>算术/效期沙盒：</b>0-Token 确定性核验</div>
-        <div class="foot-line"><b>防幻觉铁闸：</b>逐字 verify_quote 溯源</div>
+        <div class="foot-line"><b>算术/效期沙盒：</b>确定性精算核验</div>
+        <div class="foot-line"><b>防幻觉铁闸：</b>全文逐字溯源校验</div>
         <div class="foot-line"><b>商业标书保密：</b>支持内网私有模型网关</div>
       </div>
     </aside>
@@ -291,16 +346,49 @@ function handleLogout(): void {
             </div>
           </el-popover>
 
-          <div class="tb-user-chip">
-            <span class="u-name">{{ userDisplayName }}</span>
-            <span
-              v-if="showSeparateRoleBadge"
-              class="u-role"
-              :class="authStore.isAdmin ? 'is-admin' : 'is-member'"
-            >
-              {{ roleLabel }}
-            </span>
-          </div>
+          <el-popover
+            v-model:visible="userMenuOpen"
+            placement="bottom-end"
+            :width="236"
+            trigger="click"
+          >
+            <template #reference>
+              <button type="button" class="tb-user-chip is-interactive" title="账号设置与退出">
+                <span class="u-name">{{ userDisplayName }}</span>
+                <span
+                  v-if="showSeparateRoleBadge"
+                  class="u-role"
+                  :class="authStore.isAdmin ? 'is-admin' : 'is-member'"
+                >
+                  {{ roleLabel }}
+                </span>
+                <span class="u-caret">▾</span>
+              </button>
+            </template>
+
+            <div class="user-pop">
+              <div class="user-pop-hd">
+                <div class="up-name-row">
+                  <span class="up-display">{{ userDisplayName || roleLabel }}</span>
+                  <span class="u-role" :class="authStore.isAdmin ? 'is-admin' : 'is-member'">
+                    {{ roleLabel }}
+                  </span>
+                </div>
+                <div class="up-meta">
+                  <span v-if="authStore.user?.username">@{{ authStore.user.username }} · </span>
+                  <span>{{ authStore.tenantName }}</span>
+                </div>
+              </div>
+              <div class="user-pop-actions">
+                <button type="button" class="user-pop-btn" @click="openPwdDialog">
+                  <span>修改登录密码</span>
+                </button>
+                <button type="button" class="user-pop-btn is-danger" @click="handleLogout">
+                  <span>退出当前账号</span>
+                </button>
+              </div>
+            </div>
+          </el-popover>
         </div>
       </header>
 
@@ -313,6 +401,47 @@ function handleLogout(): void {
       </main>
     </div>
   </div>
+
+    <el-dialog
+      v-model="pwdDialogOpen"
+      title="修改登录密码"
+      width="420px"
+      append-to-body
+      :close-on-click-modal="false"
+    >
+      <el-form label-position="top" @submit.prevent="submitPwdChange">
+        <el-form-item label="当前原密码" required>
+          <el-input
+            v-model="pwdForm.old_password"
+            type="password"
+            show-password
+            placeholder="请输入当前登录密码"
+          />
+        </el-form-item>
+        <el-form-item label="新密码（至少 6 位字符）" required>
+          <el-input
+            v-model="pwdForm.new_password"
+            type="password"
+            show-password
+            placeholder="请输入新密码"
+          />
+        </el-form-item>
+        <el-form-item label="确认新密码" required>
+          <el-input
+            v-model="pwdForm.confirm_password"
+            type="password"
+            show-password
+            placeholder="请再次输入新密码"
+            @keyup.enter="submitPwdChange"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="pwdDialogOpen = false">取消</el-button>
+        <el-button type="primary" :loading="pwdSubmitting" @click="submitPwdChange">确认修改</el-button>
+      </template>
+    </el-dialog>
+  </el-config-provider>
 </template>
 
 <style scoped>
@@ -368,9 +497,11 @@ function handleLogout(): void {
 }
 
 .sb-brand-sub {
-  font-size: 11.5px;
+  font-size: 10.5px;
   color: var(--sb-muted);
   margin-top: 2px;
+  white-space: nowrap;
+  letter-spacing: -0.15px;
 }
 
 .sb-theme-switcher {
@@ -440,8 +571,8 @@ function handleLogout(): void {
 
 .sb-nav-link {
   width: 100%;
-  height: 38px;
-  padding: 0 11px;
+  height: 36px;
+  padding: 0 10px;
   margin-bottom: 3px;
   border-radius: 7px;
   border: none;
@@ -455,6 +586,24 @@ function handleLogout(): void {
   cursor: pointer;
   transition: all 0.14s ease;
   text-align: left;
+}
+
+.nav-item-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.nav-svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  opacity: 0.72;
+}
+
+.sb-nav-link.is-active .nav-svg {
+  opacity: 1;
 }
 
 .sb-nav-link:hover {
@@ -583,13 +732,93 @@ function handleLogout(): void {
 }
 
 .tb-user-chip {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 8px;
   padding: 5px 12px;
   background: var(--bg-subtle);
   border: 1px solid var(--border-line);
   border-radius: 6px;
+}
+
+.tb-user-chip.is-interactive {
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.tb-user-chip.is-interactive:hover {
+  border-color: var(--brand);
+  background: #ffffff;
+}
+
+.u-caret {
+  font-size: 11px;
+  color: var(--txt-muted);
+  margin-left: 2px;
+}
+
+.user-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.user-pop-hd {
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.up-name-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.up-display {
+  font-size: 13.5px;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.up-meta {
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: #64748b;
+}
+
+.user-pop-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.user-pop-btn {
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: #1e293b;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.14s ease;
+}
+
+.user-pop-btn:hover {
+  background: #f1f5f9;
+  color: var(--brand);
+}
+
+.user-pop-btn.is-danger {
+  color: #b91c1c;
+}
+
+.user-pop-btn.is-danger:hover {
+  background: #fef2f2;
+  color: #991b1b;
 }
 
 .tb-notif-badge {

@@ -851,6 +851,7 @@ onUnmounted(() => {
 
 .sim-history-pane {
   padding: 14px;
+  min-height: 420px;
 }
 
 .pane-hd {
@@ -919,6 +920,7 @@ onUnmounted(() => {
 .sim-detail-pane {
   padding: 18px 20px;
   min-width: 0;
+  min-height: 420px;
 }
 
 .report-hd {

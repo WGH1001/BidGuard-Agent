@@ -20,6 +20,7 @@ declare module 'vue' {
     ElCheckboxGroup: typeof import('element-plus/es/components/checkbox/index')['ElCheckboxGroup']
     ElCollapse: typeof import('element-plus/es/components/collapse/index')['ElCollapse']
     ElCollapseItem: typeof import('element-plus/es/components/collapse/index')['ElCollapseItem']
+    ElConfigProvider: typeof import('element-plus/es/components/config-provider/index')['ElConfigProvider']
     ElDatePicker: typeof import('element-plus/es/components/date-picker/index')['ElDatePicker']
     ElDialog: typeof import('element-plus/es/components/dialog/index')['ElDialog']
     ElDivider: typeof import('element-plus/es/components/divider/index')['ElDivider']

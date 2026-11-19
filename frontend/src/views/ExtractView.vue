@@ -359,13 +359,13 @@ const nonReqCount = computed(
 
 function kindBadge(kind: string): { label: string; cls: string } {
   if (kind === 'requirement') {
-    return { label: 'requirement · 实质要求', cls: 'ok' }
+    return { label: '实质要求', cls: 'ok' }
   }
   if (kind === 'usage_note') {
-    return { label: 'usage_note · 非要求（说明语）', cls: 'neutral' }
+    return { label: '非要求（说明语）', cls: 'neutral' }
   }
   if (kind === 'table_marker') {
-    return { label: 'table_marker · 非要求（表格碎片）', cls: 'neutral' }
+    return { label: '非要求（表格碎片）', cls: 'neutral' }
   }
   return { label: kind, cls: 'neutral' }
 }
@@ -376,12 +376,12 @@ function consequenceBadge(item: {
   structured?: { consequence?: string } | null
 }): { label: string; cls: string } {
   const c = (item.structured?.consequence || item.consequence || '').toLowerCase()
-  if (c === 'veto') return { label: 'veto · 一票否决', cls: 'error' }
-  if (c === 'deduction') return { label: 'deduction · 扣分项', cls: 'warning' }
-  if (c === 'bonus') return { label: 'bonus · 加分项', cls: 'info' }
-  if (item.mark === '★') return { label: 'veto · ★实质要求', cls: 'error' }
-  if (item.mark === '▲') return { label: 'deduction/bonus · ▲重要参数', cls: 'warning' }
-  return { label: 'none · 一般条款', cls: 'neutral' }
+  if (c === 'veto') return { label: '一票否决', cls: 'error' }
+  if (c === 'deduction') return { label: '扣分项', cls: 'warning' }
+  if (c === 'bonus') return { label: '加分项', cls: 'info' }
+  if (item.mark === '★') return { label: '★实质要求', cls: 'error' }
+  if (item.mark === '▲') return { label: '▲重要参数', cls: 'warning' }
+  return { label: '一般条款', cls: 'neutral' }
 }
 
 function itemPage(item: unknown): number | null {
@@ -483,7 +483,7 @@ onBeforeUnmount(() => {
   <div class="extract-view">
     <section class="bg-panel ext-upload-bar">
       <div class="eu-left">
-        <div class="eu-tag">F1 · 招标红线与 ★/▲ 强制条款提取器</div>
+        <div class="eu-tag">招标红线与 ★/▲ 强制条款提取器</div>
         <h2>上传招标文件结构化拆解四张必审清单</h2>
         <p>
           先抽取资格项、符合性审查项、★/▲ 强制参数与评分细则表建立核验基准（★漏检率=0%），
@@ -619,10 +619,10 @@ onBeforeUnmount(() => {
       </el-select>
     </section>
 
-    <!-- 0-Token 确定性模式提示横幅（当 llm_status === 'skipped' 时显示） -->
+    <!-- 确定性模式提示横幅（当 llm_status === 'skipped' 时显示） -->
     <div v-if="result && result.llm_status === 'skipped'" class="det-mode-banner">
-      <b>当前为确定性模式（llm_status = skipped · 0 Token）：</b>
-      已通过纯规则引擎完成 ★/▲ 标记条款、无标记模式 A/B 废标句式、审查章节与表格型评分细则 100% 确定性提取。
+      <b>当前为确定性引擎模式：</b>
+      已通过规则引擎完成 ★/▲ 标记条款、无标记模式 A/B 废标句式、审查章节与表格型评分细则 100% 确定性提取。
     </div>
 
     <template v-if="result">
@@ -721,7 +721,7 @@ onBeforeUnmount(() => {
           </ul>
           <div class="blind-alert-actions">
             <el-button type="danger" size="small" @click="goComposerBlindMode">
-              前往 F8「按暗标生成」（自动剥离身份与特殊样式）
+              前往编制中心「按暗标生成」（自动剥离身份与特殊样式）
             </el-button>
           </div>
         </div>
@@ -742,7 +742,7 @@ onBeforeUnmount(() => {
                   全部记录 ({{ result.marked_clauses.length }})
                 </el-radio-button>
                 <el-radio-button value="requirement">
-                  仅看实质要求 requirement ({{ reqCount }})
+                  仅看实质要求 ({{ reqCount }})
                 </el-radio-button>
                 <el-radio-button value="non_req">
                   非要求说明语/表格碎片 ({{ nonReqCount }})

@@ -42,6 +42,18 @@ function statusLabel(st: string): { text: string; cls: string } {
   return map[st] || { text: st, cls: 'info' }
 }
 
+function defenseModuleLabel(mod: string): string {
+  const map: Record<string, string> = {
+    F1: '红线提取',
+    F2: '报价沙盒',
+    F3: '证照串名',
+    F4: '双书勾稽',
+    F5: '偏离制表',
+    F6: '控标雷达',
+  }
+  return map[mod] || mod
+}
+
 function renderCharts(): void {
   if (!stats.value) return
 
@@ -56,7 +68,7 @@ function renderCharts(): void {
       xAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { type: 'dashed' } } },
       yAxis: {
         type: 'category',
-        data: items.map((i) => `${i.module} ${i.title}`).reverse(),
+        data: items.map((i) => i.title).reverse(),
         axisLabel: { color: '#334155', fontWeight: 700, fontSize: 12 },
       },
       series: [
@@ -139,7 +151,7 @@ async function handleDeleteTask(row: Partial<BidTaskOut>): Promise<void> {
     ElMessage.warning('任务正在运行中，请先等待完成')
     return
   }
-  const typeLabel = row.task_type === 'radar' ? 'F6 控标雷达记录' : '封标防废标体检任务'
+  const typeLabel = row.task_type === 'radar' ? '投前控标评估记录' : '封标防废标体检任务'
   try {
     await ElMessageBox.confirm(
       `确认删除${typeLabel}「#${row.id} ${row.title ?? ''}」及其关联风险发现与上传文件吗？删除后不可恢复。`,
@@ -184,10 +196,10 @@ onBeforeUnmount(() => {
     <!-- 顶部横幅与操作区 -->
     <div class="db-hero-banner bg-panel">
       <div>
-        <div class="db-hero-tag">SEAL-BEFORE CHECK · 封标前最后一道安全锁</div>
+        <div class="db-hero-tag">智标 · 封标前最后一道安全锁</div>
         <h1 class="db-hero-title">投标文件防废标体检与偏离表生成总览</h1>
         <p class="db-hero-sub">
-          先从招标文件结构化提取四张必审清单（★漏检率=0%），再执行 0-Token 报价/证照沙盒与双书条款级勾稽核验。
+          先从招标文件结构化提取四张必审清单（★零漏检），再执行精确报价与证照效期核验及双书条款级勾稽。
         </p>
       </div>
       <div class="db-hero-actions">
@@ -195,7 +207,7 @@ onBeforeUnmount(() => {
           + 发起封标前防废标体检
         </el-button>
         <el-button size="large" @click="router.push('/extract')">
-          F1 招标红线提取
+          招标红线提取
         </el-button>
         <el-button size="large" @click="loadDashboard">刷新态势</el-button>
       </div>
@@ -253,8 +265,8 @@ onBeforeUnmount(() => {
       <section class="bg-panel db-section-box">
         <div class="sec-hd">
           <div>
-            <h3>封标前六大一票否决防线健康度矩阵（F1 ~ F6 引擎分工）</h3>
-            <p>实时聚合本租户各防线指标（F1 统计提取红线/★▲条款数 · F2~F4/F6 统计检出风险项 · F5 统计已交付偏离表数）</p>
+            <h3>封标前六大一票否决防线健康度矩阵</h3>
+            <p>实时聚合本部门各防线指标（统计提取红线与★/▲条款数 · 检出风险项 · 已交付偏离表数）</p>
           </div>
           <span class="sev-pill info">6 大防线在线</span>
         </div>
@@ -262,7 +274,7 @@ onBeforeUnmount(() => {
         <div class="matrix-6-grid">
           <div v-for="item in defenseMatrix" :key="item.module" class="m6-card">
             <div class="m6-top">
-              <span class="m6-mod mono-num">{{ item.module }}</span>
+              <span class="m6-mod">{{ defenseModuleLabel(item.module) }}</span>
               <span class="sev-pill" :class="item.hit_count > 0 ? 'warning' : 'ok'">
                 累计 {{ item.hit_count }} 项
               </span>
@@ -294,14 +306,16 @@ onBeforeUnmount(() => {
                   class="sev-pill cd-type-pill"
                   :class="alert.task_type === 'radar' ? 'warning' : 'info'"
                 >
-                  {{ alert.task_type === 'radar' ? 'F6 雷达' : '双书体检' }}
+                  {{ alert.task_type === 'radar' ? '控标扫描' : '双书体检' }}
                 </span>
                 <span class="cd-title" :title="alert.title">{{ alert.title }}</span>
               </div>
               <div class="cd-meta">
                 开标日：{{ alert.open_date || '待设定' }}
                 <template v-if="alert.days_left != null">
-                  （距开标 <b class="mono-num">{{ alert.days_left }}</b> 天）
+                  <span v-if="alert.days_left < 0">（已开标）</span>
+                  <span v-else-if="alert.days_left === 0">（今日开标）</span>
+                  <span v-else>（距开标 <b class="mono-num">{{ alert.days_left }}</b> 天）</span>
                 </template>
               </div>
             </div>
@@ -327,7 +341,7 @@ onBeforeUnmount(() => {
       <div class="sec-hd">
         <div>
           <h3>在途投标项目防废标体检台账</h3>
-          <p>实时汇总 F1~F5 封标防废标体检与 F6 投前控标雷达记录，支持直达详情、导出偏离表或交付打包</p>
+          <p>实时汇总封标防废标体检与投前控标雷达记录，支持直达详情、导出偏离表或交付打包</p>
         </div>
         <el-button size="small" @click="router.push('/checks')">查看全部任务 →</el-button>
       </div>
@@ -357,7 +371,7 @@ onBeforeUnmount(() => {
         <el-table-column label="任务类型" width="130">
           <template #default="{ row }">
             <span class="sev-pill" :class="row.task_type === 'radar' ? 'warning' : 'info'">
-              {{ row.task_type === 'radar' ? 'F6 控标雷达' : '封标防废标体检' }}
+              {{ row.task_type === 'radar' ? '投前控标评估' : '封标防废标体检' }}
             </span>
           </template>
         </el-table-column>

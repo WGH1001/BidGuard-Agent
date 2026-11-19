@@ -59,6 +59,42 @@ function feedbackMeta(fb: FeedbackType): { text: string; cls: string } {
   return { text: '待确认', cls: 'warning' }
 }
 
+function moduleLabel(mod: string): string {
+  const map: Record<string, string> = {
+    F1: '红线提取',
+    F2: '报价算术',
+    F3: '证照与串名',
+    F4: '双书勾稽',
+    F5: '偏离制表',
+    F6: '投前控标',
+    BLIND_BID: '暗标合规',
+  }
+  return map[mod] || mod
+}
+
+function codeLabel(code: string): string {
+  const map: Record<string, string> = {
+    CONTRADICTION: '前后承诺矛盾',
+    MISSING_RESPONSE: '★条款漏应答',
+    NEGATIVE_DEVIATION: '实质性负偏离',
+    NEED_MANUAL: '待人工复核',
+    PRICE_MISMATCH: '报价算术异常',
+    PRICE_SUM_MISMATCH: '分项合计不符',
+    PRICE_UPPER_MISMATCH: '大小写金额不符',
+    PRICE_CAP_EXCEEDED: '超最高限价',
+    CERT_EXPIRED: '证照已过期',
+    CERT_EXPIRING_SOON: '证照临期预警',
+    SOCIAL_SECURITY_GAP: '社保证明不足',
+    STALE_COMPANY_NAME: '疑似错用历史单位名',
+    BLIND_BID_NEED_MANUAL: '暗标图文复核',
+    BLIND_BID_IDENTITY_LEAK: '暗标身份泄露',
+    BLIND_BID_STYLE_VIOLATION: '暗标排版违规',
+    BLIND_BID_TOC_FORBIDDEN: '暗标违规目录',
+    RADAR_EXCLUSIVE_PARAM: '疑似排他性参数',
+  }
+  return map[code] || code
+}
+
 function isDocxEstimatedPage(item: BidFindingOut): boolean {
   if (typeof item.page !== 'number' || item.page <= 0) return false
   const dj = item.detail_json
@@ -112,7 +148,7 @@ async function submitFeedback(item: BidFindingOut, fb: FeedbackType): Promise<vo
     <div class="rb-header">
       <div class="rb-title-group">
         <h3>封标前检出废标与偏离风险清单</h3>
-        <span class="rb-sub">按严重级排序（error 一票否决红线置顶）</span>
+        <span class="rb-sub">按严重级排序（一票否决红线置顶）</span>
       </div>
 
       <div class="rb-filters">
@@ -151,12 +187,13 @@ async function submitFeedback(item: BidFindingOut, fb: FeedbackType): Promise<vo
           </button>
         </div>
 
-        <el-select v-model="moduleFilter" size="small" style="width: 140px">
-          <el-option label="全部防线模块" value="ALL" />
-          <el-option label="F2 报价算术沙盒" value="F2" />
-          <el-option label="F3 证照与串名" value="F3" />
-          <el-option label="F4 ★响应与矛盾" value="F4" />
-          <el-option label="F6 控标雷达" value="F6" />
+        <el-select v-model="moduleFilter" size="small" style="width: 148px">
+          <el-option label="全部核验模块" value="ALL" />
+          <el-option label="报价算术沙盒" value="F2" />
+          <el-option label="证照与串名扫描" value="F3" />
+          <el-option label="★响应与前后矛盾" value="F4" />
+          <el-option label="暗标合规核查" value="BLIND_BID" />
+          <el-option label="投前控标雷达" value="F6" />
         </el-select>
       </div>
     </div>
@@ -170,10 +207,10 @@ async function submitFeedback(item: BidFindingOut, fb: FeedbackType): Promise<vo
       >
         <div class="fc-top">
           <span class="sev-pill" :class="item.severity">
-            {{ item.severity === 'error' ? 'ERROR · 废标红线' : item.severity === 'warning' ? 'WARN · 扣分预警' : 'INFO · 提示' }}
+            {{ item.severity === 'error' ? '废标红线' : item.severity === 'warning' ? '扣分预警' : '合规提示' }}
           </span>
-          <span class="mod-badge mono-num">{{ item.source_module }}</span>
-          <span class="code-badge mono-num">{{ item.code }}</span>
+          <span class="mod-badge">{{ moduleLabel(item.source_module) }}</span>
+          <span class="code-badge">{{ codeLabel(item.code) }}</span>
           <span v-if="item.clause_no" class="clause-chip">条款：{{ item.clause_no }}</span>
           <span class="sev-pill" :class="consequenceMeta(item.consequence).cls">
             {{ consequenceMeta(item.consequence).text }}

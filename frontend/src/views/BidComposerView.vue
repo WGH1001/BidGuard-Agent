@@ -755,7 +755,7 @@ onUnmounted(() => {
   <div class="composer-page">
     <div class="page-intro">
       <div>
-        <h2>标书编制输出与无损修订中心（F8）</h2>
+        <h2>标书编制输出与无损修订中心</h2>
         <p class="sub-desc">
           由「写作 Skill 规范 + AI 动态构章撰稿 + 报价/证照/覆盖三锁」驱动生成独立封面、目录与投标初稿（.docx），支持从 GitHub/Gitee 或本地导入 Skills；后期支持将已采纳整改无损导出 Clean 定稿。
         </p>
@@ -828,8 +828,8 @@ onUnmounted(() => {
                   </el-tag>
                 </div>
                 <el-radio-group v-model="composeScope" size="small" class="wps-scope-radios">
-                  <el-radio value="full">完整投标文件 (full)</el-radio>
-                  <el-radio value="section">单章节专项补写 (section)</el-radio>
+                  <el-radio value="full">完整投标文件</el-radio>
+                  <el-radio value="section">单章节专项补写</el-radio>
                 </el-radio-group>
 
                 <div v-if="composeScope === 'section'" class="wps-section-target-box">
@@ -960,7 +960,13 @@ onUnmounted(() => {
                 </div>
 
                 <div class="ind-sub-title mt-8">标准应答指标清单（含评分点与参数槽）</div>
-                <el-table :data="indicatorOverview.indicators" size="small" border max-height="230">
+                <el-table
+                  v-if="indicatorOverview.indicators.length > 0"
+                  :data="indicatorOverview.indicators"
+                  size="small"
+                  border
+                  max-height="230"
+                >
                   <el-table-column prop="category" label="分类" width="88" />
                   <el-table-column label="指标名称" min-width="160">
                     <template #default="{ row }">
@@ -994,6 +1000,7 @@ onUnmounted(() => {
                     </template>
                   </el-table-column>
                 </el-table>
+                <div v-else class="ind-empty-note">当前业务线暂未收录标准应答指标条目。</div>
               </div>
 
               <el-radio-group v-model="composeMode" class="mode-radios">
@@ -1658,6 +1665,7 @@ onUnmounted(() => {
       v-model="skillModalVisible"
       title="AI 标书写作 Skills 管理中心（支持 GitHub / Gitee / 本地导入）"
       width="780px"
+      append-to-body
     >
       <el-tabs v-model="skillModalTab">
         <el-tab-pane label="已有 Skills 列表" name="list">

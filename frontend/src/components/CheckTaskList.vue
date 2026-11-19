@@ -124,7 +124,7 @@ const form = reactive({
 function statusMeta(st: string): { label: string; cls: string } {
   const map: Record<string, { label: string; cls: string }> = {
     created: { label: '待启动', cls: 'info' },
-    extracting: { label: 'F1提取中', cls: 'info' },
+    extracting: { label: '红线提取中', cls: 'info' },
     checking: { label: '双轨核查', cls: 'warning' },
     grading: { label: '定级汇总', cls: 'warning' },
     delivered: { label: '已完成', cls: 'ok' },
@@ -547,6 +547,7 @@ defineExpose({
       v-model="dialogVisible"
       title="新建封标前防废标体检任务"
       width="560px"
+      append-to-body
       :close-on-click-modal="false"
       destroy-on-close
     >
@@ -585,7 +586,7 @@ defineExpose({
           </el-form-item>
 
           <div class="two-cols">
-            <el-form-item label="计划开标日期（用于 F3 证照有效期核验，留空则体检时自动从招标书识别）">
+            <el-form-item label="计划开标日期（用于证照有效期核验，留空则体检时自动从招标书识别）">
               <el-date-picker
                 v-model="form.openDate"
                 type="date"
@@ -605,7 +606,7 @@ defineExpose({
 
           <el-form-item>
             <el-checkbox v-model="form.autoRun">
-              上传完成后立即启动 F1~F4 防废标核验流水线并连接 SSE 实时进度（不勾选则仅创建任务，稍后可手动启动）
+              上传完成后立即启动防废标核验流水线并连接实时进度（不勾选则仅创建任务，稍后可手动启动）
             </el-checkbox>
           </el-form-item>
         </el-form>

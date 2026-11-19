@@ -79,7 +79,7 @@ function toggleObs(idx: number): void {
   <div v-if="props.steps && props.steps.length > 0" class="react-panel">
     <div class="rp-header" @click="isOpen = !isOpen">
       <div class="rp-title">
-        <span class="rp-badge mono-num">ReAct 轨迹</span>
+        <span class="rp-badge mono-num">检索轨迹</span>
         <span>
           跨双书工具检索与推理步骤（共 {{ roundCount }} 个思考回合 · {{ props.steps.length }} 步执行）
         </span>

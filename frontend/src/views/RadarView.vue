@@ -455,7 +455,7 @@ onBeforeUnmount(() => {
       <!-- 顶部上传与扫描触发面板 -->
       <section class="bg-panel radar-upload-card">
         <div class="ru-left">
-          <div class="ru-tag">F6 · 投前控标雷达（立项决策辅助流）</div>
+          <div class="ru-tag">投前控标雷达（立项决策辅助流）</div>
           <h2>刚拿到招标书？30 秒扫描疑似排他性控标参数</h2>
           <p>
             识别指定或参照特定品牌型号、原厂唯一授权函、特定软著全称绑定及毫米级非标尺寸；
@@ -577,7 +577,7 @@ onBeforeUnmount(() => {
                 }}
               </span>
               <span class="sev-pill" :class="scanResult.llm_status === 'done' ? 'ok' : 'info'">
-                {{ scanResult.llm_status === 'done' ? '确定性 + 大模型④ 双层复核' : '0-Token 确定性模式' }}
+                {{ scanResult.llm_status === 'done' ? '确定性 + 大模型双层复核' : '确定性规则模式' }}
               </span>
               <el-button
                 size="small"

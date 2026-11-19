@@ -302,35 +302,35 @@ onMounted(() => {
         </el-form-item>
 
         <div class="two-col">
-          <el-form-item label="快速核验模型 (model_flash · 用于 F1/F4/F6)" required>
+          <el-form-item label="快速核验模型" required>
             <el-input v-model.trim="form.model_flash" placeholder="例如：GLM-5.3-Flash" />
           </el-form-item>
 
-          <el-form-item label="专家追问模型 (model_flagship · 用于 F7 ReAct)">
+          <el-form-item label="专家追问模型">
             <el-input v-model.trim="form.model_flagship" placeholder="留空则默认与快速模型一致" />
           </el-form-item>
         </div>
 
-        <el-form-item label="向量精排模型 (model_embedding · 选填，用于 F4 / F7 / 评分预估混合精排 Rerank)">
+        <el-form-item label="向量精排模型（选填，用于检索与评分预估混合精排）">
           <el-input
             v-model.trim="form.model_embedding"
             clearable
             placeholder="留空自动使用 0-Token BM25；同网关支持 /v1/embeddings 时可填如 BAAI/bge-m3 或 embedding-3"
           />
           <div class="field-sub-tip">
-            共用上方同一组 Base URL 与 API Key（受内网锁与网关出口脱敏统一保护）；留空或上游不支持时自动静默降级为 0-Token BM25，绝不中断任务。
+            共用上方同一组 Base URL 与 API Key（受内网锁与网关出口脱敏统一保护）；留空或上游不支持时自动静默降级为 BM25 检索，绝不中断任务。
           </div>
         </el-form-item>
 
-        <el-form-item label="推理预算参数支持 (supports_reasoning_effort)">
+        <el-form-item label="推理预算参数支持">
           <el-switch v-model="form.supports_reasoning_effort" />
-          <span class="switch-tip">开启后向网关透传 reasoning_effort=low 加速结构化响应</span>
+          <span class="switch-tip">开启后向网关透传轻量推理参数以加速结构化响应</span>
         </el-form-item>
 
-        <el-form-item label="视觉多模态能力支持 (supports_vision · F7 原生识图)">
+        <el-form-item label="视觉多模态能力支持（支持问答原生识图）">
           <el-switch v-model="form.supports_vision" />
           <span class="switch-tip">
-            仅当所填模型为多模态视觉模型（如 GLM-4V / Qwen-VL / GPT-4o）时开启；未开启或上游不支持时自动降级为 RapidOCR 离线文字模式
+            仅当所填模型为多模态视觉模型（如 GLM-4V / Qwen-VL / GPT-4o）时开启；未开启或上游不支持时自动降级为离线文字识别模式
           </span>
         </el-form-item>
 

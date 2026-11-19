@@ -224,10 +224,10 @@ watch(
     <!-- 顶部任务选择与操作条 -->
     <section class="bg-panel dev-header-bar">
       <div class="dh-left">
-        <div class="dh-tag">F5 · 《技术与商务偏离表.docx》一键对齐生成器</div>
+        <div class="dh-tag">《技术与商务偏离表.docx》一键对齐生成器</div>
         <h2>招标技术/商务规范与我方投标响应逐条对齐制表</h2>
         <p>
-          严格消费 F4 双书勾稽三态结果（同序对位、零二次篡改），将人工 2 天制表时间压缩至 15 分钟内。
+          严格消费双书勾稽三态核验结果（同序对位、零二次篡改），将人工 2 天制表时间压缩至 15 分钟内。
         </p>
       </div>
 
@@ -325,7 +325,7 @@ watch(
       <!-- 标准六列偏离表在线预览 -->
       <section class="bg-panel dev-table-card">
         <div class="dt-hd">
-          <h3>《技术与商务偏离表》六列标准预览（{{ devResult.output_filename }}）</h3>
+          <h3>《技术与商务偏离表》六列标准预览</h3>
           <span class="dt-note">
             注：PDF 显示真实页码；Word 页码为系统估算，可能与实际排版有出入，以字符偏移为准。
           </span>
@@ -382,9 +382,6 @@ watch(
           <el-table-column prop="location" label="位置索引（页码/字符偏移）" width="250">
             <template #default="{ row }">
               <div class="mono-num loc-cell">{{ row.location }}</div>
-              <div v-if="row.location && row.location.includes('·估算')" class="docx-est-sub">
-                Word 页码为系统估算，可能与实际排版有出入，以字符偏移为准
-              </div>
             </template>
           </el-table-column>
         </el-table>

@@ -1589,16 +1589,35 @@ def export_score_estimate_docx(
 
     # 一、评估总览
     doc.add_heading('一、评分预估总览与分值守恒核对', level=2)
-    ov_tbl = doc.add_table(rows=5, cols=2)
-    ov_tbl.style = 'Table Grid'
-    ov_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    est_dec = _to_dec(estimate_result.get('assessed_estimated_score'), _DEC_ZERO)
+    assessed_max_dec = _to_dec(estimate_result.get('assessed_max_score'), _DEC_ZERO)
+    price_max_dec = _to_dec(estimate_result.get('price_pending_max_score'), _DEC_ZERO)
+    need_llm_dec = _to_dec(estimate_result.get('need_llm_max_score'), _DEC_ZERO)
+    decl_total_dec = _to_dec(estimate_result.get('total_declared_max_score'), _DEC_HUNDRED)
+    combined_high_dec = (est_dec + price_max_dec).quantize(_QUANT_001, rounding=ROUND_HALF_UP)
+    if price_max_dec > _DEC_ZERO:
+        combined_range_text = (
+            f"{_fmt_dec(est_dec)} ~ {_fmt_dec(combined_high_dec)} 分"
+            f"（{_fmt_dec(decl_total_dec)} 分制：非价格已评 {_fmt_dec(est_dec)} 分 + 价格分待开标区间 0~{_fmt_dec(price_max_dec)} 分）"
+        )
+    else:
+        combined_range_text = f"{_fmt_dec(est_dec)} / {_fmt_dec(assessed_max_dec)} 分"
+    need_llm_text = (
+        f"{_fmt_dec(need_llm_dec)} 分（全部非价格可评项均已自动出分）"
+        if need_llm_dec == _DEC_ZERO
+        else f"{_fmt_dec(need_llm_dec)} 分（未触发大模型或规则降级项，需人工终核）"
+    )
     ov_pairs = (
         ('任务名称', task_title),
-        ('非价格项预估得分 / 已评估满分', f"{estimate_result.get('assessed_estimated_score', '0.00')} / {estimate_result.get('assessed_max_score', '0.00')} 分"),
-        ('价格分（待开标现场基准价确定）', f"{estimate_result.get('price_pending_max_score', '0.00')} 分（pending_open_bid）"),
-        ('待模型/人工复核项满分合计', f"{estimate_result.get('need_llm_max_score', '0.00')} 分"),
+        ('非价格项预估得分 / 已评估满分', f"{_fmt_dec(est_dec)} / {_fmt_dec(assessed_max_dec)} 分"),
+        ('综合预估总分参考区间', combined_range_text),
+        ('价格分（开标基准价待定）', f"{_fmt_dec(price_max_dec)} 分（取决于开标现场各投标人报价基准）"),
+        ('未自动出分待核对分值', need_llm_text),
         ('一票否决/废标红线风险数', f"{len(estimate_result.get('veto_alerts') or [])} 项"),
     )
+    ov_tbl = doc.add_table(rows=len(ov_pairs), cols=2)
+    ov_tbl.style = 'Table Grid'
+    ov_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     for r_i, (k, v) in enumerate(ov_pairs):
         c0, c1 = ov_tbl.rows[r_i].cells[0], ov_tbl.rows[r_i].cells[1]
         _set_cell_shading(c0, 'F1F5F9')
@@ -1610,38 +1629,70 @@ def export_score_estimate_docx(
         r_w = p_warn.add_run(f"分值校准提示：{estimate_result['score_scale_warning']}")
         r_w.font.color.rgb = RGBColor(0xB4, 0x53, 0x09)
 
+    _mod_zh = {
+        'F2': '报价算术核验',
+        'F3': '证照效期与串名',
+        'F4': '双书响应勾稽',
+        'BLIND_BID': '暗标合规核查',
+    }
+    _code_zh = {
+        'MISSING_RESPONSE': '★条款漏应答',
+        'CONTRADICTION': '前后承诺矛盾',
+        'NEGATIVE_DEVIATION': '实质性负偏离',
+        'PRICE_MISMATCH': '报价算术异常',
+        'PRICE_CAP_EXCEEDED': '超最高限价',
+        'CERT_EXPIRED': '证照已过期',
+        'BLIND_BID_IDENTITY_LEAK': '暗标身份泄露',
+    }
+
     # 二、一票否决警示表
     veto_alerts = estimate_result.get('veto_alerts') or []
-    doc.add_heading('二、一票否决与废标红线先导警示（含 F2/F3/F4/E43 暗标）', level=2)
+    doc.add_heading('二、一票否决与废标红线先导警示（报价 / 证照 / 勾稽 / 暗标）', level=2)
     if veto_alerts:
         v_tbl = doc.add_table(rows=1, cols=4)
         v_tbl.style = 'Table Grid'
-        for idx, h in enumerate(('来源模块', '风险代码', '风险描述', '整改建议')):
+        for idx, h in enumerate(('风险防线', '风险类型', '风险描述', '整改建议')):
             c = v_tbl.rows[0].cells[idx]
             _set_cell_shading(c, 'FEE2E2')
             c.paragraphs[0].add_run(h).bold = True
         for va in veto_alerts:
             rc = v_tbl.add_row().cells
-            rc[0].paragraphs[0].add_run(str(va.get('source_module') or ''))
-            rc[1].paragraphs[0].add_run(str(va.get('code') or ''))
+            mod_k = str(va.get('source_module') or '')
+            code_k = str(va.get('code') or '')
+            rc[0].paragraphs[0].add_run(_mod_zh.get(mod_k, mod_k))
+            rc[1].paragraphs[0].add_run(_code_zh.get(code_k, code_k))
             rc[2].paragraphs[0].add_run(str(va.get('message') or ''))
             rc[3].paragraphs[0].add_run(str(va.get('suggestion') or ''))
     else:
-        doc.add_paragraph('未检出触发 consequence="veto" 的一票否决风险项。')
+        doc.add_paragraph('未检出触发一票否决的废标红线风险项。')
 
     # 三、重点提分抓手 Top-5
     priorities = estimate_result.get('top_priorities') or []
     doc.add_heading('三、重点提分行动抓手（按可挽回分值空间排序）', level=2)
     if priorities:
         for idx, pr in enumerate(priorities, start=1):
+            hint_txt = str(pr.get('f8_composer_hint') or '').replace('F8 标书编制中心', '「标书编制输出中心」')
             doc.add_paragraph(
                 f"{idx}. 【{pr.get('factor')}】（满分 {pr.get('max_score')} 分｜可挽回空间 {pr.get('gap_score')} 分）："
-                f"{pr.get('action_summary')}（{pr.get('f8_composer_hint', '')}）"
+                f"{pr.get('action_summary')}{f'（{hint_txt}）' if hint_txt else ''}"
             )
     else:
         doc.add_paragraph('当前已评估项得分率较高，暂无显著失分缺口。')
 
     # 四、逐项评分预估与提分建议明细表
+    _cat_zh = {
+        'price': '价格部分',
+        'business': '商务业绩',
+        'technical': '技术方案',
+        'service': '售后运维',
+        'qualification': '资质证书',
+    }
+    _st_zh = {
+        'evaluated': '已出分',
+        'pending_open_bid': '待开标确定',
+        'veto_risk': '含否决警示',
+        'need_llm': '待模型/人工复核',
+    }
     doc.add_heading('四、评分细则逐项评估与原文依据明细表', level=2)
     items = estimate_result.get('items') or []
     if items:
@@ -1655,12 +1706,14 @@ def export_score_estimate_docx(
             c.paragraphs[0].add_run(h).bold = True
         for it in items:
             rc = it_tbl.add_row().cells
-            rc[0].paragraphs[0].add_run(str(it.get('category') or ''))
+            cat_raw = str(it.get('category') or '')
+            st_raw = str(it.get('status') or '')
+            rc[0].paragraphs[0].add_run(_cat_zh.get(cat_raw, cat_raw))
             rc[1].paragraphs[0].add_run(str(it.get('factor') or ''))
             rc[2].paragraphs[0].add_run(str(it.get('max_score') or ''))
             est = it.get('estimated_score')
             rc[3].paragraphs[0].add_run(str(est) if est is not None else '待定')
-            rc[4].paragraphs[0].add_run(str(it.get('status') or ''))
+            rc[4].paragraphs[0].add_run(_st_zh.get(st_raw, st_raw))
             reasons_txt = '；'.join(it.get('deduction_reasons') or [])
             sugs_txt = '；'.join(it.get('improvement_suggestions') or [])
             rc[5].paragraphs[0].add_run(f"【原因】{reasons_txt}\n【建议】{sugs_txt}")
@@ -1670,7 +1723,8 @@ def export_score_estimate_docx(
                 for ev in ev_list
                 if ev.get('quote_verified') and ev.get('quote')
             ]
-            rc[6].paragraphs[0].add_run('\n'.join(verified_lines) if verified_lines else '原文未直引')
+            empty_ev = '待开标后由报价基准确定' if st_raw == 'pending_open_bid' else '未匹配到直接引用句'
+            rc[6].paragraphs[0].add_run('\n'.join(verified_lines) if verified_lines else empty_ev)
     else:
         doc.add_paragraph('未提取到结构化评分细则条目。')
 

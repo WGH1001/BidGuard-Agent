@@ -12,8 +12,8 @@ export interface SidebarThemeOption {
 
 export const SIDEBAR_THEMES: SidebarThemeOption[] = [
   { key: 'slate', label: '工业浅岩灰', swatch: '#e2e8f0' },
-  { key: 'carbon', label: '曜石暖炭灰', swatch: '#23201e' },
-  { key: 'fjord', label: '深海峡湾青', swatch: '#18282b' },
+  { key: 'carbon', label: '暖砂燕麦灰', swatch: '#ebe5dc' },
+  { key: 'fjord', label: '晴岚雾蓝灰', swatch: '#dce8ef' },
 ]
 
 function loadSavedTheme(): SidebarThemeMode {

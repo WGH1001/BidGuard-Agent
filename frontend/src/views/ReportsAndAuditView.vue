@@ -399,7 +399,7 @@ onMounted(() => {
                 </template>
               </el-table-column>
 
-              <el-table-column label="封标交付物独立下载与打包管理" width="540" fixed="right">
+              <el-table-column label="封标交付物独立下载与打包管理" width="590" fixed="right">
                 <template #default="{ row }">
                   <div class="dl-btn-group">
                     <el-button
@@ -570,6 +570,7 @@ onMounted(() => {
       v-model="batchDialogVisible"
       title="批量打包封标交付物（自主选择打包内容）"
       width="520px"
+      append-to-body
       :close-on-click-modal="false"
       destroy-on-close
     >
@@ -655,8 +656,17 @@ onMounted(() => {
 
 .dl-btn-group {
   display: flex;
-  gap: 6px;
+  gap: 4px;
   flex-wrap: nowrap;
+  align-items: center;
+}
+
+.dl-btn-group :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.dl-btn-group :deep(.el-button) {
+  padding: 5px 8px;
 }
 
 .muted-txt {

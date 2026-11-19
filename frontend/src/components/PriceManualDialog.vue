@@ -123,15 +123,16 @@ async function handleSubmit(): Promise<void> {
 <template>
   <el-dialog
     :model-value="props.visible"
-    title="F2 报价算术沙盒 · 报价表人工回填与精确复算"
+    title="报价表人工回填与精确复算"
     width="860px"
+    append-to-body
     :close-on-click-modal="false"
     @update:model-value="(v: boolean) => emit('update:visible', v)"
   >
     <div class="pm-body">
       <div class="pm-notice">
-        系统检测到当前投标书报价表为异形合并单元格或未定位到标准金额列（<code>price_status = NEED_MANUAL</code>）。
-        请核对或录入以下分项与总价数据，后端将执行 0-Token Decimal 精算（差 1 分钱或大写错 1 字立即报警）。
+        系统检测到当前投标书报价表为异形合并单元格或未定位到标准金额列。
+        请核对或录入以下分项与总价数据，后端将执行高精度 Decimal 复算（差 1 分钱或大写错 1 字立即报警）。
       </div>
 
       <div class="pm-sec-hd">
