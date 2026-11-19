@@ -319,7 +319,7 @@ export const useNotificationStore = defineStore('notifications', () => {
                 summary: `非价格项预估 ${est.assessed_estimated_score}/${est.assessed_max_score} 分${vetoTxt}`,
                 tone: est.has_veto_risk ? 'warning' : 'success',
                 routePath: '/checks',
-                routeQuery: { task_id: String(job.targetId) },
+                routeQuery: { task_id: String(job.targetId), panel: 'score' },
                 dedupSuffix: `completed:${est.updated_at || ''}`,
               })
             } else if (est.status === 'failed') {
@@ -330,7 +330,7 @@ export const useNotificationStore = defineStore('notifications', () => {
                 summary: est.error_msg || '标书评分预估执行失败',
                 tone: 'error',
                 routePath: '/checks',
-                routeQuery: { task_id: String(job.targetId) },
+                routeQuery: { task_id: String(job.targetId), panel: 'score' },
                 dedupSuffix: `failed:${est.updated_at || ''}`,
               })
             } else {

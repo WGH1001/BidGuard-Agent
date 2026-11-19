@@ -311,14 +311,14 @@ onMounted(() => {
           </el-form-item>
         </div>
 
-        <el-form-item label="向量精排模型 (model_embedding · 选填，用于 F4 / F7 / E42 混合精排 Rerank)">
+        <el-form-item label="向量精排模型 (model_embedding · 选填，用于 F4 / F7 / 评分预估混合精排 Rerank)">
           <el-input
             v-model.trim="form.model_embedding"
             clearable
             placeholder="留空自动使用 0-Token BM25；同网关支持 /v1/embeddings 时可填如 BAAI/bge-m3 或 embedding-3"
           />
           <div class="field-sub-tip">
-            共用上方同一组 Base URL 与 API Key（受内网锁与 E40 出口脱敏统一保护）；留空或上游不支持时自动静默降级为 0-Token BM25，绝不中断任务。
+            共用上方同一组 Base URL 与 API Key（受内网锁与网关出口脱敏统一保护）；留空或上游不支持时自动静默降级为 0-Token BM25，绝不中断任务。
           </div>
         </el-form-item>
 

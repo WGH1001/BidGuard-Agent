@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { checksApi, validateUploadFile } from '@/api'
-import type { BidTaskOut, TaskDurationRecord } from '@/api/types'
+import type { BidTaskOut, ScoreEstimateOut, TaskDurationRecord } from '@/api/types'
 
 const props = defineProps<{
   tasks: BidTaskOut[]
@@ -25,6 +25,55 @@ const emit = defineEmits<{
 
 const editingTaskId = ref<number | null>(null)
 const editingTitleDraft = ref('')
+const searchKeyword = ref('')
+const quickFilter = ref<'all' | 'veto' | 'scored' | 'running'>('all')
+
+function getScoreEstimateObj(item: BidTaskOut): Partial<ScoreEstimateOut> | null {
+  const raw = item.score_estimate_json
+  if (!raw || typeof raw !== 'object') return null
+  return raw as Partial<ScoreEstimateOut>
+}
+
+function getScoreBadgeMeta(item: BidTaskOut): { label: string; cls: string; title: string } | null {
+  const est = getScoreEstimateObj(item)
+  if (!est || !est.status || est.status === 'not_started') return null
+  if (est.status === 'running' || est.status === 'queued') {
+    return { label: '评分中…', cls: 'score-running', title: est.stage_detail || '正在进行评分预估' }
+  }
+  if (est.status === 'failed') {
+    return { label: '评分中断', cls: 'score-fail', title: est.error_msg || '评分预估未完成' }
+  }
+  if (est.status === 'completed') {
+    const score = est.assessed_estimated_score ?? '—'
+    const maxSc = est.assessed_max_score ?? '—'
+    const ratio = est.assessed_ratio_pct != null ? ` (${est.assessed_ratio_pct}%)` : ''
+    return {
+      label: `评分 ${score}/${maxSc}`,
+      cls: est.has_veto_risk ? 'score-warn' : 'score-ok',
+      title: `非价格项预估 ${score} / ${maxSc} 分${ratio}（AI 自评仅供参考）`,
+    }
+  }
+  return null
+}
+
+const filteredTasks = computed<BidTaskOut[]>(() => {
+  const kw = searchKeyword.value.trim().toLowerCase()
+  return props.tasks.filter((item) => {
+    if (quickFilter.value === 'veto' && Number(item.stats_json?.error_count || 0) <= 0) {
+      return false
+    }
+    if (quickFilter.value === 'scored') {
+      const est = getScoreEstimateObj(item)
+      if (!est || est.status !== 'completed') return false
+    }
+    if (quickFilter.value === 'running' && !['extracting', 'checking', 'grading'].includes(item.status)) {
+      return false
+    }
+    if (!kw) return true
+    const hay = `#${item.id} ${item.title || ''} ${item.tender_filename || ''} ${item.bid_filename || ''}`.toLowerCase()
+    return hay.includes(kw)
+  })
+})
 
 function startRenameTask(item: BidTaskOut): void {
   editingTaskId.value = item.id
@@ -282,9 +331,52 @@ defineExpose({
       </div>
     </div>
 
+    <div v-if="props.total > 0" class="rail-filter-box">
+      <el-input
+        v-model.trim="searchKeyword"
+        size="small"
+        clearable
+        placeholder="搜索项目名 / 标书文件名 / #ID…"
+      />
+      <div class="rail-filter-pills">
+        <button
+          type="button"
+          class="rf-pill"
+          :class="{ active: quickFilter === 'all' }"
+          @click="quickFilter = 'all'"
+        >
+          全部 ({{ props.tasks.length }})
+        </button>
+        <button
+          type="button"
+          class="rf-pill"
+          :class="{ active: quickFilter === 'veto' }"
+          @click="quickFilter = 'veto'"
+        >
+          有否决
+        </button>
+        <button
+          type="button"
+          class="rf-pill"
+          :class="{ active: quickFilter === 'scored' }"
+          @click="quickFilter = 'scored'"
+        >
+          已评分
+        </button>
+        <button
+          type="button"
+          class="rf-pill"
+          :class="{ active: quickFilter === 'running' }"
+          @click="quickFilter = 'running'"
+        >
+          进行中
+        </button>
+      </div>
+    </div>
+
     <div v-loading="props.loading" class="rail-scroll">
       <div
-        v-for="item in props.tasks"
+        v-for="item in filteredTasks"
         :key="item.id"
         class="rail-item"
         :class="{ active: item.id === props.selectedTaskId }"
@@ -294,31 +386,18 @@ defineExpose({
         <div class="ri-row1">
           <div class="ri-row1-left">
             <span class="ri-id mono-num">#{{ item.id }}</span>
-            <input
-              v-if="editingTaskId === item.id"
-              v-model="editingTitleDraft"
-              type="text"
-              maxlength="256"
-              class="ri-rename-input"
-              @click.stop
-              @dblclick.stop
-              @keydown.enter.prevent="commitRenameTask(item)"
-              @keydown.esc.prevent="cancelRenameTask"
-              @blur="commitRenameTask(item)"
-            />
-            <span
-              v-else
-              class="ri-title"
-              title="双击或点击右侧 ✎ 重命名体检任务"
-              @dblclick.stop="startRenameTask(item)"
-            >
-              {{ item.title }}
-            </span>
-          </div>
-          <div class="ri-row1-right">
             <span class="sev-pill" :class="statusMeta(item.status).cls">
               {{ statusMeta(item.status).label }}
             </span>
+            <span
+              v-if="item.stats_json?.is_blind_bid"
+              class="stat-chip blind"
+              title="招标文件包含暗标/盲评禁令"
+            >
+              暗标
+            </span>
+          </div>
+          <div class="ri-row1-right">
             <el-button
               v-if="editingTaskId !== item.id"
               link
@@ -352,6 +431,29 @@ defineExpose({
               删除
             </el-button>
           </div>
+        </div>
+
+        <div class="ri-title-row">
+          <input
+            v-if="editingTaskId === item.id"
+            v-model="editingTitleDraft"
+            type="text"
+            maxlength="256"
+            class="ri-rename-input"
+            @click.stop
+            @dblclick.stop
+            @keydown.enter.prevent="commitRenameTask(item)"
+            @keydown.esc.prevent="cancelRenameTask"
+            @blur="commitRenameTask(item)"
+          />
+          <span
+            v-else
+            class="ri-title"
+            title="双击或点击右上角 ✎ 重命名体检任务"
+            @dblclick.stop="startRenameTask(item)"
+          >
+            {{ item.title }}
+          </span>
         </div>
 
         <div class="ri-meta-row mono-num">
@@ -390,11 +492,21 @@ defineExpose({
           </div>
         </div>
 
-        <div v-if="item.stats_json" class="ri-stats-bar">
-          <span class="stat-chip err">否决 {{ item.stats_json.error_count ?? 0 }}</span>
-          <span class="stat-chip warn">预警 {{ item.stats_json.warning_count ?? 0 }}</span>
-          <span v-if="item.stats_json.price_status === 'NEED_MANUAL'" class="stat-chip manual">
-            待回填报价
+        <div v-if="item.stats_json || getScoreBadgeMeta(item)" class="ri-stats-bar">
+          <template v-if="item.stats_json">
+            <span class="stat-chip err">否决 {{ item.stats_json.error_count ?? 0 }}</span>
+            <span class="stat-chip warn">预警 {{ item.stats_json.warning_count ?? 0 }}</span>
+            <span v-if="item.stats_json.price_status === 'NEED_MANUAL'" class="stat-chip manual">
+              待回填报价
+            </span>
+          </template>
+          <span
+            v-if="getScoreBadgeMeta(item)"
+            class="stat-chip mono-num"
+            :class="getScoreBadgeMeta(item)!.cls"
+            :title="getScoreBadgeMeta(item)!.title"
+          >
+            {{ getScoreBadgeMeta(item)!.label }}
           </span>
         </div>
       </div>
@@ -404,6 +516,18 @@ defineExpose({
         description="暂无体检任务，点击上方「+ 新建体检」上传双书"
         :image-size="64"
       />
+      <el-empty
+        v-else-if="!props.loading && props.tasks.length > 0 && filteredTasks.length === 0"
+        description="当前筛选条件下无匹配任务"
+        :image-size="52"
+      >
+        <el-button
+          size="small"
+          @click="searchKeyword = ''; quickFilter = 'all'"
+        >
+          清空筛选
+        </el-button>
+      </el-empty>
     </div>
 
     <div v-if="props.total > props.pageSize" class="rail-pager">
@@ -544,6 +668,42 @@ defineExpose({
   gap: 6px;
 }
 
+.rail-filter-box {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-bottom: 10px;
+}
+
+.rail-filter-pills {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.rf-pill {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 99px;
+  border: 1px solid var(--border-line);
+  background: var(--bg-subtle);
+  color: var(--txt-sec);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.rf-pill:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+.rf-pill.active {
+  background: var(--brand-soft);
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
 .rail-scroll {
   flex: 1;
   overflow-y: auto;
@@ -637,13 +797,22 @@ defineExpose({
   flex-shrink: 0;
 }
 
+.ri-title-row {
+  margin-bottom: 5px;
+  display: flex;
+  align-items: center;
+}
+
 .ri-title {
   font-size: 13px;
   font-weight: 800;
+  line-height: 1.4;
   color: var(--txt-strong);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  word-break: break-all;
 }
 
 .ri-rename-input {
@@ -719,6 +888,31 @@ defineExpose({
 .stat-chip.manual {
   background: #fef3c7;
   color: #b45309;
+}
+
+.stat-chip.blind {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.stat-chip.score-ok {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.stat-chip.score-warn {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.stat-chip.score-running {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.stat-chip.score-fail {
+  background: #f1f5f9;
+  color: #64748b;
 }
 
 .rail-pager {

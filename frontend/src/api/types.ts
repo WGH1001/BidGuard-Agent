@@ -151,6 +151,9 @@ export interface BidTaskStats {
   bid_total_upper?: string | null
   price_items?: PriceItemInput[]
   llm_status?: 'done' | 'skipped' | string
+  is_blind_bid?: boolean
+  blind_toc_forbidden?: boolean
+  blind_bid_finding_count?: number
   suspicious_count?: number
   recommendation?: string
   summary?: string

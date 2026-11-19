@@ -223,6 +223,49 @@ const openDateMeta = computed(() => {
 })
 
 const railCollapsed = ref(false)
+const DURATION_COLLAPSED_KEY = 'bidguard_checks_duration_collapsed'
+const SCORE_COLLAPSED_KEY = 'bidguard_checks_score_collapsed'
+
+function readStoredCollapsed(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === '1'
+  } catch {
+    return false
+  }
+}
+
+function writeStoredCollapsed(key: string, collapsed: boolean): void {
+  try {
+    localStorage.setItem(key, collapsed ? '1' : '0')
+  } catch {
+    // ignore storage errors
+  }
+}
+
+const durationCollapsed = ref(readStoredCollapsed(DURATION_COLLAPSED_KEY))
+const scoreCollapsed = ref(readStoredCollapsed(SCORE_COLLAPSED_KEY))
+const forceExpandScoreOnce = ref(route.query.panel === 'score')
+
+function toggleDurationCollapsed(): void {
+  durationCollapsed.value = !durationCollapsed.value
+  writeStoredCollapsed(DURATION_COLLAPSED_KEY, durationCollapsed.value)
+}
+
+function toggleScoreCollapsed(): void {
+  scoreCollapsed.value = !scoreCollapsed.value
+  writeStoredCollapsed(SCORE_COLLAPSED_KEY, scoreCollapsed.value)
+}
+
+function syncTaskScoreSnapshot(taskId: number, snap: ScoreEstimateOut | null): void {
+  if (!snap) return
+  const target = tasks.value.find((t) => t.id === taskId)
+  if (target) {
+    target.score_estimate_json = snap
+  }
+  if (currentTask.value && currentTask.value.id === taskId) {
+    currentTask.value.score_estimate_json = snap
+  }
+}
 
 const stageDurationItems = computed<StageDurationItem[]>(() => {
   const dur = currentTaskExt.value?.duration
@@ -267,6 +310,10 @@ const stageDurationItems = computed<StageDurationItem[]>(() => {
   })
 })
 
+const slowestStageItem = computed<StageDurationItem | null>(() => {
+  return stageDurationItems.value.find((s) => s.isSlowest) || null
+})
+
 async function loadTaskList(selectFirst = false): Promise<void> {
   listLoading.value = true
   try {
@@ -301,6 +348,10 @@ async function selectTask(task: BidTaskOut): Promise<void> {
   try {
     const detail = await checksApi.detail(task.id)
     currentTask.value = detail.task
+    const listIdx = tasks.value.findIndex((t) => t.id === detail.task.id)
+    if (listIdx >= 0) {
+      tasks.value[listIdx] = { ...tasks.value[listIdx], ...detail.task }
+    }
     findings.value = detail.findings || []
     await loadScoreEstimate(detail.task.id)
     checkAutoPopupPriceManual(detail.task)
@@ -326,6 +377,7 @@ function scheduleScorePoll(taskId: number): void {
     try {
       const snap = await checksApi.getScoreEstimate(taskId)
       scoreEstimate.value = snap
+      syncTaskScoreSnapshot(taskId, snap)
       if (!['queued', 'running'].includes(snap.status)) {
         stopScorePoll()
         const taskTitle = currentTask.value?.title || `任务 #${taskId}`
@@ -338,7 +390,7 @@ function scheduleScorePoll(taskId: number): void {
             summary: `非价格项预估 ${snap.assessed_estimated_score}/${snap.assessed_max_score} 分${vetoTxt}`,
             tone: snap.has_veto_risk ? 'warning' : 'success',
             routePath: '/checks',
-            routeQuery: { task_id: String(taskId) },
+            routeQuery: { task_id: String(taskId), panel: 'score' },
             dedupSuffix: `completed:${snap.updated_at || ''}`,
           })
         } else if (snap.status === 'failed' && snap.error_msg) {
@@ -349,7 +401,7 @@ function scheduleScorePoll(taskId: number): void {
             summary: snap.error_msg,
             tone: 'error',
             routePath: '/checks',
-            routeQuery: { task_id: String(taskId) },
+            routeQuery: { task_id: String(taskId), panel: 'score' },
             dedupSuffix: `failed:${snap.updated_at || ''}`,
           })
         }
@@ -364,11 +416,25 @@ async function loadScoreEstimate(taskId: number): Promise<void> {
   try {
     const snap = await checksApi.getScoreEstimate(taskId)
     scoreEstimate.value = snap
+    syncTaskScoreSnapshot(taskId, snap)
+    if (forceExpandScoreOnce.value || ['queued', 'running'].includes(snap.status)) {
+      scoreCollapsed.value = false
+      if (forceExpandScoreOnce.value && !['queued', 'running'].includes(snap.status)) {
+        forceExpandScoreOnce.value = false
+      }
+    } else if (snap.status === 'not_started') {
+      // 未生成评分结果时默认折叠为单行引导条，优先把首屏空间留给 F2–F4 风险清单
+      scoreCollapsed.value = true
+    } else {
+      scoreCollapsed.value = readStoredCollapsed(SCORE_COLLAPSED_KEY)
+    }
     if (['queued', 'running'].includes(snap.status)) {
       scheduleScorePoll(taskId)
     }
   } catch {
     scoreEstimate.value = null
+    scoreCollapsed.value = !forceExpandScoreOnce.value
+    forceExpandScoreOnce.value = false
   }
 }
 
@@ -378,10 +444,13 @@ async function handleRunScoreEstimate(): Promise<void> {
     ElMessage.warning('请等待防废标核验流水线完成后再执行评分预估')
     return
   }
+  scoreCollapsed.value = false
+  writeStoredCollapsed(SCORE_COLLAPSED_KEY, false)
   triggeringScore.value = true
   try {
     const res = await checksApi.runScoreEstimate(currentTask.value.id, true)
     scoreEstimate.value = res
+    syncTaskScoreSnapshot(currentTask.value.id, res)
     if (['queued', 'running'].includes(res.status)) {
       ElMessage.info('标书评分预估已在后台启动，切页不中断，完成后顶部将自动提醒')
       notificationStore.registerTrackedJob({
@@ -392,7 +461,7 @@ async function handleRunScoreEstimate(): Promise<void> {
         progress: res.progress,
         stageDetail: res.stage_detail || '评分预估中…',
         routePath: '/checks',
-        routeQuery: { task_id: String(currentTask.value.id) },
+        routeQuery: { task_id: String(currentTask.value.id), panel: 'score' },
       })
       scheduleScorePoll(currentTask.value.id)
     } else if (res.status === 'completed') {
@@ -403,7 +472,7 @@ async function handleRunScoreEstimate(): Promise<void> {
         summary: `非价格项预估 ${res.assessed_estimated_score}/${res.assessed_max_score} 分`,
         tone: res.has_veto_risk ? 'warning' : 'success',
         routePath: '/checks',
-        routeQuery: { task_id: String(currentTask.value.id) },
+        routeQuery: { task_id: String(currentTask.value.id), panel: 'score' },
         dedupSuffix: `completed:${res.updated_at || ''}`,
       })
     }
@@ -714,8 +783,12 @@ async function commitRenameDetailTask(): Promise<void> {
 }
 
 watch(
-  () => route.query.task_id,
-  (rawId) => {
+  () => [route.query.task_id, route.query.panel],
+  ([rawId, rawPanel]) => {
+    if (rawPanel === 'score') {
+      forceExpandScoreOnce.value = true
+      scoreCollapsed.value = false
+    }
     const targetId = Number(rawId || 0)
     if (targetId > 0 && currentTask.value?.id !== targetId) {
       const hit = tasks.value.find((t) => t.id === targetId)
@@ -969,61 +1042,75 @@ onBeforeUnmount(() => {
           @error="handleSseError"
         />
 
-        <!-- E11：五阶段耗时可观测性面板（仅在终态且有 duration 记录时展示，最慢阶段高亮） -->
+        <!-- 五阶段耗时可观测性面板（支持一键收起，终态且有 duration 记录时展示） -->
         <section v-if="isTerminalTaskWithDuration" class="bg-panel dur-breakdown-card">
           <div class="dbc-head">
             <div class="dbc-title-row">
               <span class="dbc-title">核验流水线分阶段耗时透视</span>
               <span class="dbc-total mono-num">总计 {{ totalDurationLabel }}</span>
+              <span v-if="durationCollapsed && slowestStageItem" class="slowest-badge mono-num">
+                最慢 {{ slowestStageItem.code }} · {{ slowestStageItem.formatted }}
+              </span>
             </div>
-            <div class="dbc-timestamps mono-num">
-              <span>启动：{{ formatLocalDateTime(currentTaskExt?.started_at) }}</span>
-              <span class="sep">→</span>
-              <span>完成：{{ formatLocalDateTime(currentTaskExt?.finished_at) }}</span>
+            <div class="dbc-head-right">
+              <div class="dbc-timestamps mono-num">
+                <span>启动：{{ formatLocalDateTime(currentTaskExt?.started_at) }}</span>
+                <span class="sep">→</span>
+                <span>完成：{{ formatLocalDateTime(currentTaskExt?.finished_at) }}</span>
+              </div>
+              <button
+                type="button"
+                class="collapse-pill-btn"
+                @click="toggleDurationCollapsed"
+              >
+                {{ durationCollapsed ? '展开阶段 ▼' : '收起 ▲' }}
+              </button>
             </div>
           </div>
 
-          <!-- 横向比例堆叠条 -->
-          <div class="dbc-stack-bar">
-            <div
-              v-for="st in stageDurationItems"
-              :key="`bar_${st.key}`"
-              v-show="st.pct > 0"
-              class="dbc-stack-seg"
-              :style="{ width: `${st.pct}%`, backgroundColor: st.color }"
-              :title="`${st.code} ${st.label}：${st.formatted}`"
-            ></div>
-          </div>
+          <template v-if="!durationCollapsed">
+            <!-- 横向比例堆叠条 -->
+            <div class="dbc-stack-bar">
+              <div
+                v-for="st in stageDurationItems"
+                :key="`bar_${st.key}`"
+                v-show="st.pct > 0"
+                class="dbc-stack-seg"
+                :style="{ width: `${st.pct}%`, backgroundColor: st.color }"
+                :title="`${st.code} ${st.label}：${st.formatted}`"
+              ></div>
+            </div>
 
-          <!-- 五阶段明细卡片（最慢阶段红色高亮） -->
-          <div class="dbc-stages-grid">
-            <div
-              v-for="st in stageDurationItems"
-              :key="st.key"
-              class="dbc-stage-item"
-              :class="{ 'is-slowest': st.isSlowest }"
-            >
-              <div class="dsi-top">
-                <span class="dsi-code mono-num" :style="{ backgroundColor: st.color }">
-                  {{ st.code }}
-                </span>
-                <span class="dsi-label">{{ st.label }}</span>
-                <span v-if="st.isSlowest" class="slowest-badge">最慢阶段</span>
-              </div>
-              <div class="dsi-val mono-num">
-                {{ st.formatted }}
-                <span v-if="st.ms !== null" class="dsi-ms">({{ st.ms }}ms)</span>
+            <!-- 五阶段明细卡片（最慢阶段红色高亮） -->
+            <div class="dbc-stages-grid">
+              <div
+                v-for="st in stageDurationItems"
+                :key="st.key"
+                class="dbc-stage-item"
+                :class="{ 'is-slowest': st.isSlowest }"
+              >
+                <div class="dsi-top">
+                  <span class="dsi-code mono-num" :style="{ backgroundColor: st.color }">
+                    {{ st.code }}
+                  </span>
+                  <span class="dsi-label">{{ st.label }}</span>
+                  <span v-if="st.isSlowest" class="slowest-badge">最慢阶段</span>
+                </div>
+                <div class="dsi-val mono-num">
+                  {{ st.formatted }}
+                  <span v-if="st.ms !== null" class="dsi-ms">({{ st.ms }}ms)</span>
+                </div>
               </div>
             </div>
-          </div>
+          </template>
         </section>
 
-        <!-- E42：标书评分预估与提分诊断面板 -->
+        <!-- 标书评分预估与提分诊断面板 -->
         <el-card shadow="never" class="bg-panel score-est-card">
           <template #header>
             <div class="sec-head-row">
               <div class="sec-title-grp">
-                <span class="sec-main-title">标书评分预估与提分诊断（E42）</span>
+                <span class="sec-main-title">标书评分预估与提分诊断</span>
                 <el-tag
                   v-if="scoreEstimate && scoreEstimate.status === 'completed'"
                   size="small"
@@ -1062,19 +1149,66 @@ onBeforeUnmount(() => {
                 >
                   下载诊断报告 (.docx)
                 </el-button>
+                <button
+                  type="button"
+                  class="collapse-pill-btn"
+                  @click="toggleScoreCollapsed"
+                >
+                  {{ scoreCollapsed ? '展开分析 ▼' : '收起分析 ▲' }}
+                </button>
               </div>
             </div>
           </template>
 
-          <!-- 三条防幻觉红线之三：常驻显眼免责声明（严禁省略或弱化） -->
-          <el-alert
-            type="warning"
-            :closable="false"
-            show-icon
-            class="score-disclaimer-banner"
-            title="AI 质量自评预估（非最终评委实际打分）"
-            description="本预估仅基于招标评分细则与我方投标书局部证据窗口进行技术/商务质量诊断与查漏补缺，价格分取决于开标现场各投标人报价基准，不代表评标委员会最终打分承诺。"
-          />
+          <!-- 收起态：保留常驻简明免责标识 + 核心分数摘要条，优先让出首屏空间给 F2–F4 风险清单 -->
+          <div v-if="scoreCollapsed" class="score-collapsed-bar">
+            <span class="scb-disclaimer" title="本预估仅供参考，价格分依赖开标现场基准，不代表评委最终打分">
+              ⚠ AI 质量自评预估（非最终评委实际打分）
+            </span>
+            <template v-if="scoreEstimate?.status === 'completed'">
+              <span class="scb-pill primary mono-num">
+                非价格项预估 {{ scoreEstimate.assessed_estimated_score }} / {{ scoreEstimate.assessed_max_score }} 分
+                <template v-if="scoreEstimate.assessed_ratio_pct != null">
+                  ({{ scoreEstimate.assessed_ratio_pct }}%)
+                </template>
+              </span>
+              <span class="scb-pill mono-num">
+                价格分待开标 {{ scoreEstimate.price_pending_max_score }} 分
+              </span>
+              <span
+                v-if="scoreEstimate.veto_alerts.length > 0"
+                class="scb-pill danger mono-num"
+              >
+                一票否决预警 {{ scoreEstimate.veto_alerts.length }} 项
+              </span>
+              <span v-if="scoreEstimate.score_scale_warning" class="scb-pill warn">
+                需核对总分口径
+              </span>
+            </template>
+            <span
+              v-else-if="scoreEstimate?.status === 'running' || scoreEstimate?.status === 'queued'"
+              class="scb-muted"
+            >
+              {{ scoreEstimate.stage_detail || '后台评分预估计算中…' }} ({{ scoreEstimate.progress || 15 }}%)
+            </span>
+            <span v-else-if="scoreEstimate?.status === 'failed'" class="scb-pill danger">
+              上次评分中断：{{ scoreEstimate.error_msg || '请点击右上角重新评估' }}
+            </span>
+            <span v-else class="scb-muted">
+              尚未发起评分预估；点击右侧「一键发起评分预估」或「展开分析」查看。
+            </span>
+          </div>
+
+          <template v-else>
+            <!-- 三条防幻觉红线之三：常驻显眼免责声明（严禁省略或弱化） -->
+            <el-alert
+              type="warning"
+              :closable="false"
+              show-icon
+              class="score-disclaimer-banner"
+              title="AI 质量自评预估（非最终评委实际打分）"
+              description="本预估仅基于招标评分细则与我方投标书局部证据窗口进行技术/商务质量诊断与查漏补缺，价格分取决于开标现场各投标人报价基准，不代表评标委员会最终打分承诺。"
+            />
 
           <div
             v-if="scoreEstimate && (scoreEstimate.status === 'running' || scoreEstimate.status === 'queued')"
@@ -1160,7 +1294,7 @@ onBeforeUnmount(() => {
                   {{ scoreEstimate.veto_alerts.length }}
                   <span class="ssg-sub">项</span>
                 </div>
-                <div class="ssg-foot">含 F2/F3/F4 及 E43 暗标合规</div>
+                <div class="ssg-foot">含 F2/F3/F4 及暗标合规</div>
               </div>
             </div>
 
@@ -1265,6 +1399,7 @@ onBeforeUnmount(() => {
           <div v-else class="score-idle-hint">
             尚未生成评分预估结果。点击右上角「一键发起评分预估」，系统将按招标《评分细则》逐条评估我方标书正文质量并给出提分抓手。
           </div>
+          </template>
         </el-card>
 
         <!-- 风险卡列表 -->
@@ -1302,7 +1437,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .check-workbench {
   display: grid;
-  grid-template-columns: 300px 1fr;
+  grid-template-columns: 320px 1fr;
   gap: 18px;
   align-items: start;
 }
@@ -1460,6 +1595,74 @@ onBeforeUnmount(() => {
   gap: 6px;
 }
 
+.dbc-head-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.collapse-pill-btn {
+  padding: 3px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--border-line);
+  background: var(--bg-subtle);
+  color: var(--txt-sec);
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.collapse-pill-btn:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+  background: #ffffff;
+}
+
+.score-collapsed-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.scb-disclaimer {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #fef3c7;
+  color: #92400e;
+  font-weight: 700;
+}
+
+.scb-pill {
+  padding: 2px 9px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: var(--txt-strong);
+  font-weight: 700;
+}
+
+.scb-pill.primary {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.scb-pill.danger {
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.scb-pill.warn {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.scb-muted {
+  color: var(--txt-muted);
+}
+
 .dbc-stack-bar {
   height: 7px;
   background: #e2e8f0;
@@ -1577,6 +1780,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .score-disclaimer-banner {
