@@ -241,7 +241,8 @@ parse_document(file_path: str, *, ocr_images: bool = True,
 parse_qa_attachment(file_path: str | Path) -> dict    # E24: 低门槛 F7 附件解析（0~99 字图片不报错，返回 is_image/ocr_chars/has_text）
 build_pdf_page_spans(file_path: str | Path | None) -> list[tuple[int, int, int]]
 offset_to_page(offset: int | None, page_spans: list[tuple[int, int, int]]) -> int | None
-build_docx_page_spans(file_path: str | Path | None) -> list[tuple[int, int, int, int | None]]
+build_docx_page_spans(file_path: str | Path | None, *, ocr_images: bool = True,
+                      progress_cb: Optional[Callable[[int, int, int], None]] = None) -> list[tuple[int, int, int, int | None]]
 offset_to_docx_page(offset: int | None, spans: list[tuple[int, int, int, int | None]]) -> dict | None
 
 # core/redline.py —— 原位标红批注（交付中心 ZIP 用）

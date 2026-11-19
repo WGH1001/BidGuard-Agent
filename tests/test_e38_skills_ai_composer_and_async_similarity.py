@@ -685,3 +685,98 @@ def test_e38_legacy_sqlite_migration_and_stale_task_recovery(tmp_path: Path):
             assert sim_row is not None and sim_row.status == 'failed' and sim_row.error_msg == '服务重启中断'
         finally:
             sess2.close()
+
+
+def test_e38_similarity_skips_ocr_on_text_docx_and_cancels_during_ocr_fallback(tmp_path: Path, monkeypatch):
+    """回归：1）有可提取正文的 docx 交叉比对绝不触发内嵌大图 RapidOCR（且仍测出图片 SHA256 碰撞）；
+    2）纯扫描件兜底 OCR 期间命中 cancel_check 时立即透传中断异常不吞异常；
+    3）RapidOCR 线程默认受限，不打满多核宿主机。
+    """
+    from PIL import Image
+    import core.parser as parser_mod
+    from backend.worker import PipelineCancelled
+
+    # 1) 验证 OCR 线程上限默认被钳制在 1..4 之间，且支持环境变量覆写
+    monkeypatch.delenv('BIDGUARD_OCR_THREADS', raising=False)
+    default_limit = parser_mod._resolve_ocr_thread_limit()
+    assert 1 <= default_limit <= 4
+    monkeypatch.setenv('BIDGUARD_OCR_THREADS', '2')
+    assert parser_mod._resolve_ocr_thread_limit() == 2
+
+    # 2) 构造含大尺寸高噪音内嵌图片（>20KB、300x300，满足过滤阈值）且正文 >200 字的两份 docx
+    img_p = tmp_path / 'scan_cert.png'
+    raw_rgb = os.urandom(300 * 300 * 3)
+    Image.frombytes('RGB', (300, 300), raw_rgb).save(str(img_p), format='PNG')
+    assert img_p.stat().st_size > 20 * 1024
+
+    def _build_rich_docx_with_image(path: Path, header_tag: str) -> Path:
+        doc = Document()
+        for idx_p in range(6):
+            doc.add_paragraph(
+                f'{header_tag} 第{idx_p + 1}段：本项目数据库稳定性运行测试与高可用架构设计方案，'
+                f'包括核心巡检脚本、容灾演练策略、SLA响应指标及运维团队分工说明。'
+            )
+        doc.add_page_break()
+        doc.add_picture(str(img_p))
+        doc.add_paragraph(f'{header_tag} 投标总价汇总：人民币 880,000.00 元。')
+        doc.save(str(path))
+        return path
+
+    b1 = _build_rich_docx_with_image(tmp_path / 'rich_bid_a.docx', '投标人甲')
+    b2 = _build_rich_docx_with_image(tmp_path / 'rich_bid_b.docx', '投标人乙')
+
+    def _forbid_ocr():
+        raise AssertionError('正文充足的 docx 交叉比对不应调用 RapidOCR')
+
+    monkeypatch.setattr(parser_mod, '_get_ocr_engine', _forbid_ocr)
+
+    res = analyze_bid_similarity(
+        [
+            {'path': str(b1), 'label': '甲公司', 'filename': b1.name},
+            {'path': str(b2), 'label': '乙公司', 'filename': b2.name},
+        ],
+        enable_ai_review=False,
+    )
+    assert any(f.get('code') == 'SAME_EMBEDDED_IMAGE' for f in res['findings'])
+
+    # 3) 构造仅含图片、正文不足 200 字的纯图 docx，验证 OCR 回调链透传 cancel_check 并立即中止
+    def _build_image_only_docx(path: Path) -> Path:
+        doc = Document()
+        doc.add_picture(str(img_p))
+        doc.save(str(path))
+        return path
+
+    scan_a = _build_image_only_docx(tmp_path / 'scan_only_a.docx')
+    scan_b = _build_image_only_docx(tmp_path / 'scan_only_b.docx')
+
+    ocr_calls = 0
+
+    def _fake_ocr_engine(_img_bgr):
+        nonlocal ocr_calls
+        ocr_calls += 1
+        return [([[0, 0], [100, 0], [100, 20], [0, 20]], '扫描标书正文识别片段', 0.98)], None
+
+    monkeypatch.setattr(parser_mod, '_get_ocr_engine', lambda: _fake_ocr_engine)
+
+    cancel_flag = {'cancelled': False}
+
+    def _on_prog(_pct: int, detail: str) -> None:
+        if '扫描件 OCR' in detail:
+            cancel_flag['cancelled'] = True
+
+    def _cancel_check() -> None:
+        if cancel_flag['cancelled']:
+            raise PipelineCancelled('用户中断')
+
+    with pytest.raises(PipelineCancelled):
+        analyze_bid_similarity(
+            [
+                {'path': str(scan_a), 'label': '纯图甲', 'filename': scan_a.name},
+                {'path': str(scan_b), 'label': '纯图乙', 'filename': scan_b.name},
+            ],
+            enable_ai_review=False,
+            progress_cb=_on_prog,
+            cancel_check=_cancel_check,
+        )
+    assert ocr_calls == 1
+

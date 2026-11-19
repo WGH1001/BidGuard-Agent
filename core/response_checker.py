@@ -150,7 +150,11 @@ def _offset_to_page(offset: Optional[int], page_spans: list[tuple[int, int, int]
     return offset_to_page(offset, page_spans)
 
 
-def _build_unified_page_context(file_path: Optional[str | Path]) -> dict[str, Any]:
+def _build_unified_page_context(
+    file_path: Optional[str | Path],
+    *,
+    ocr_images: bool = True,
+) -> dict[str, Any]:
     """E6 统一构建文档页码映射上下文（自动区分 PDF 与 docx 双轨页码）。"""
     if not file_path:
         return {'kind': 'none', 'pdf_spans': [], 'docx_spans': []}
@@ -161,7 +165,11 @@ def _build_unified_page_context(file_path: Optional[str | Path]) -> dict[str, An
     if ext == '.pdf':
         return {'kind': 'pdf', 'pdf_spans': build_pdf_page_spans(path), 'docx_spans': []}
     if ext == '.docx':
-        return {'kind': 'docx', 'pdf_spans': [], 'docx_spans': build_docx_page_spans(path)}
+        return {
+            'kind': 'docx',
+            'pdf_spans': [],
+            'docx_spans': build_docx_page_spans(path, ocr_images=ocr_images),
+        }
     return {'kind': 'none', 'pdf_spans': [], 'docx_spans': []}
 
 

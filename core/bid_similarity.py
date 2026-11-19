@@ -875,12 +875,50 @@ def analyze_bid_similarity(
         if progress_cb is not None:
             progress_cb(pct, stage)
 
+    def _parse_doc_for_similarity(
+        fpath: Path,
+        *,
+        pct_start: int,
+        pct_span: int,
+        stage_prefix: str,
+    ) -> tuple[Any, bool]:
+        """优先极速解析文本层（ocr_images=False），仅当正文极少（纯扫描件）时再逐页/逐图 OCR 并透传进度与中断信号。"""
+        doc = parse_document(str(fpath), ocr_images=False)
+        if cancel_check is not None:
+            cancel_check()
+        if len((doc.text or '').strip()) >= 200:
+            return doc, False
+
+        def _on_ocr_prog(done_cnt: int, total_cnt: int, cached_cnt: int) -> None:
+            if total_cnt > 0:
+                sub_pct = pct_start + min(max(1, pct_span - 1), int((done_cnt / max(1, total_cnt)) * max(1, pct_span)))
+                _emit(sub_pct, f"{stage_prefix}（扫描件 OCR {done_cnt}/{total_cnt}，缓存 {cached_cnt}）")
+            elif cancel_check is not None:
+                cancel_check()
+
+        ocr_doc = parse_document(str(fpath), ocr_images=True, progress_cb=_on_ocr_prog)
+        if cancel_check is not None:
+            cancel_check()
+        return ocr_doc, True
+
+    def _build_page_ctx_compat(fpath: Path, *, used_ocr: bool) -> dict[str, Any]:
+        try:
+            return build_unified_page_context(fpath, ocr_images=used_ocr)
+        except TypeError:
+            return build_unified_page_context(fpath)
+
     _emit(8, '阶段 1/4：解析招标公共底稿与构建过滤词片')
+    t_doc = None
     tender_text = ''
     tender_norm = ''
     tender_shingles: set[str] = set()
     if tender_path is not None:
-        t_doc = parse_document(str(tender_path))
+        t_doc, _t_ocr = _parse_doc_for_similarity(
+            Path(tender_path),
+            pct_start=8,
+            pct_span=4,
+            stage_prefix='阶段 1/4：解析招标公共底稿',
+        )
         tender_text = t_doc.text or ''
         tender_norm = normalize_zh(tender_text)
         tender_shingles = _build_shingle_set(tender_norm, 12)
@@ -888,17 +926,28 @@ def analyze_bid_similarity(
     parsed_bids: list[dict[str, Any]] = []
     total_files = len(bid_files)
     for idx, spec in enumerate(bid_files):
+        base_pct = 12 + int((idx / max(1, total_files)) * 38)
+        per_bid_span = max(2, int(38 / max(1, total_files)))
         _emit(
-            12 + int((idx / max(1, total_files)) * 38),
+            base_pct,
             f"阶段 2/4：解析投标书元数据与净正文（{idx + 1}/{total_files}）",
         )
         fpath = Path(spec['path'])
         label = str(spec.get('label') or fpath.stem).strip() or f"标书#{idx + 1}"
         filename = str(spec.get('filename') or fpath.name)
 
-        pdoc = parse_document(str(fpath))
+        pdoc, used_ocr = _parse_doc_for_similarity(
+            fpath,
+            pct_start=base_pct,
+            pct_span=max(1, per_bid_span // 2),
+            stage_prefix=f"阶段 2/4：解析投标书（{idx + 1}/{total_files}）",
+        )
         raw_text = pdoc.text or ''
-        page_ctx = build_unified_page_context(fpath)
+        _emit(
+            min(50, base_pct + max(1, per_bid_span // 2)),
+            f"阶段 2/4：提取页码、文件指纹与分项报价（{idx + 1}/{total_files}）",
+        )
+        page_ctx = _build_page_ctx_compat(fpath, used_ocr=used_ocr)
         fp = extract_file_fingerprint(fpath)
         norm_full, pos_map = _normalize_with_pos_map(raw_text)
         net_norm, net_map = _compute_net_norm_and_map(
@@ -914,6 +963,7 @@ def analyze_bid_similarity(
             fpath,
             tender_path=tender_path,
             parsed_doc=pdoc,
+            tender_parsed_doc=t_doc,
         )
         bid_total_dec = _to_decimal(price_res.get('bid_total')) or _to_decimal(price_res.get('reference_bid_total'))
 

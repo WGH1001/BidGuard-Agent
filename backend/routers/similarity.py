@@ -11,6 +11,7 @@ from decimal import Decimal
 import json
 from pathlib import Path
 import shutil
+import time
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -242,9 +243,10 @@ def compare_bids(
         sess: Session = worker.session_factory()
         last_pct = 5
         last_stage = ''
+        last_db_ts = 0.0
         try:
             r_row = sess.query(SimilarityReport).filter_by(id=report_id).first()
-            if r_row is None:
+            if r_row is None or r_row.status not in ('queued', 'running'):
                 return
             r_row.status = 'running'
             r_row.progress = 8
@@ -257,19 +259,24 @@ def compare_bids(
                 llm_client, _ = resolve_effective_llm_client(sess, user_id)
 
             def _on_prog(pct: int, detail: str) -> None:
-                nonlocal last_pct, last_stage
+                nonlocal last_pct, last_stage, last_db_ts
                 worker.check_cancelled(job_key, cancel_ev)
-                if pct - last_pct < 5 and detail == last_stage:
+                now_m = time.monotonic()
+                if pct == last_pct and detail == last_stage:
+                    return
+                if pct - last_pct < 5 and detail == last_stage and (now_m - last_db_ts) < 0.8:
                     return
                 last_pct = pct
                 last_stage = detail
+                last_db_ts = now_m
+                cur = sess.query(SimilarityReport).filter_by(id=report_id).first()
+                if cur is None or cur.status not in ('queued', 'running'):
+                    raise PipelineCancelled('用户中断')
                 try:
-                    cur = sess.query(SimilarityReport).filter_by(id=report_id).first()
-                    if cur is not None:
-                        cur.progress = min(98, max(5, int(pct)))
-                        cur.stage_detail = str(detail)[:250]
-                        cur.updated_at = _utc_now()
-                        sess.commit()
+                    cur.progress = min(98, max(5, int(pct)))
+                    cur.stage_detail = str(detail)[:250]
+                    cur.updated_at = _utc_now()
+                    sess.commit()
                 except Exception:
                     sess.rollback()
 
@@ -287,6 +294,8 @@ def compare_bids(
             r_row = sess.query(SimilarityReport).filter_by(id=report_id).first()
             if r_row is None:
                 return
+            if r_row.status not in ('queued', 'running'):
+                raise PipelineCancelled('用户中断')
             r_row.bidders_json = result['bidders']
             r_row.pair_matrix_json = result['pair_matrix']
             r_row.findings_json = result['findings']

@@ -11,6 +11,7 @@
 import bisect
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import struct
@@ -71,6 +72,15 @@ _OCR_ENGINE = None
 _OCR_LOCK = threading.Lock()
 
 
+def _resolve_ocr_thread_limit() -> int:
+    """限制 RapidOCR 单实例 ONNX 线程数，避免多核宿主机上 100% 占满全部 CPU。"""
+    raw = (os.getenv('BIDGUARD_OCR_THREADS') or '').strip()
+    if raw.isdigit():
+        return max(1, min(16, int(raw)))
+    cpu_cnt = os.cpu_count() or 2
+    return max(1, min(4, cpu_cnt))
+
+
 def _get_ocr_engine():
     """懒加载并单例化 RapidOCR 引擎（模型初始化数秒，绝不重复加载）。"""
     global _OCR_ENGINE
@@ -83,7 +93,14 @@ def _get_ocr_engine():
                     '未安装 OCR 引擎，无法识别扫描件：请在项目环境执行 '
                     'pip install rapidocr-onnxruntime'
                 ) from e
-            _OCR_ENGINE = RapidOCR()
+            ocr_threads = _resolve_ocr_thread_limit()
+            try:
+                _OCR_ENGINE = RapidOCR(
+                    intra_op_num_threads=ocr_threads,
+                    inter_op_num_threads=1,
+                )
+            except TypeError:
+                _OCR_ENGINE = RapidOCR()
     return _OCR_ENGINE
 
 
@@ -390,8 +407,79 @@ def _extract_tc_text_and_breaks_lxml(tc_el: ET._Element) -> tuple[str, list[int]
     return stripped, mapped
 
 
+class _DocxMediaOcrSession:
+    """共享 docx 内嵌图片 OCR 状态管理器（统一缓存、进度回调、增量落盘与 ocr_images 开关）。"""
+
+    def __init__(
+        self,
+        doc_path: Path,
+        doc,
+        *,
+        ocr_images: bool,
+        progress_cb: Optional[Callable[[int, int, int], None]] = None,
+    ) -> None:
+        self.ocr_images = bool(ocr_images)
+        self.progress_cb = progress_cb
+        self.related_parts = getattr(doc.part, 'related_parts', {}) or {}
+        self.media_cache_path = _docx_media_ocr_cache_path(doc_path)
+        self.media_cache_map = _load_docx_media_cache(self.media_cache_path) if self.ocr_images else {}
+        self.seen_media_sha1s: set[str] = set()
+        self.cache_dirty = False
+        self.ocr_skipped_any = False
+        self.total_uncached = 0
+        self.cached_hits = 0
+        self.uncached_done = 0
+        self.unflushed_new = 0
+
+        if self.ocr_images and (self.progress_cb is not None or self.related_parts):
+            self.total_uncached, self.cached_hits = _count_docx_media_targets(
+                doc, self.related_parts, self.media_cache_map
+            )
+            if self.progress_cb is not None and (self.total_uncached > 0 or self.cached_hits > 0):
+                try:
+                    self.progress_cb(0, self.total_uncached, self.cached_hits)
+                except Exception:
+                    pass
+
+    def _on_new_ocr(self) -> None:
+        self.uncached_done += 1
+        self.unflushed_new += 1
+        if self.unflushed_new >= _DOCX_MEDIA_INCREMENTAL_FLUSH:
+            _save_docx_media_cache(self.media_cache_path, self.media_cache_map)
+            self.unflushed_new = 0
+            self.cache_dirty = False
+        if self.progress_cb is not None:
+            self.progress_cb(self.uncached_done, self.total_uncached, self.cached_hits)
+
+    def extract(self, xml_str: str, para_idx: int) -> list[str]:
+        if not self.ocr_images:
+            return []
+        img_texts, dirty, skipped = _extract_xml_embedded_media_texts(
+            xml_str,
+            self.related_parts,
+            self.media_cache_map,
+            para_idx,
+            self.seen_media_sha1s,
+            on_new_ocr=self._on_new_ocr,
+        )
+        if dirty:
+            self.cache_dirty = True
+        if skipped:
+            self.ocr_skipped_any = True
+        return img_texts
+
+    def flush(self) -> None:
+        if self.ocr_images and (self.cache_dirty or self.unflushed_new > 0):
+            _save_docx_media_cache(self.media_cache_path, self.media_cache_map)
+            self.cache_dirty = False
+            self.unflushed_new = 0
+
+
 def _parse_docx_with_page_spans_internal(
     file_path: str | Path,
+    *,
+    ocr_images: bool = True,
+    progress_cb: Optional[Callable[[int, int, int], None]] = None,
 ) -> tuple[str, list[tuple[int, int, int, Optional[int]]], bool, int]:
     """用 zipfile + lxml 单趟解析 docx，同时产出：
     1. full_text（与 parse_document 逐字节 100% SHA256 等值）；
@@ -400,11 +488,6 @@ def _parse_docx_with_page_spans_internal(
     4. media_ocr_count: int。
     """
     path = Path(file_path)
-    media_cache_path = _docx_media_ocr_cache_path(path)
-    media_cache_map = _load_docx_media_cache(media_cache_path)
-    seen_media_sha1s: set[str] = set()
-    cache_dirty = False
-    ocr_skipped_any = False
 
     # ── 权威偏移空间 = python-docx 部件序列（与 parse_document 拼接严格同构）──
     # E6 验收修正：lxml 单独重建全文无法对特殊构造（文本框/超链接/域字符/修订标记）
@@ -418,7 +501,12 @@ def _parse_docx_with_page_spans_internal(
 
     from docx import Document
     doc = Document(str(path))
-    related_parts = getattr(doc.part, 'related_parts', {}) or {}
+    media_session = _DocxMediaOcrSession(
+        path,
+        doc,
+        ocr_images=ocr_images,
+        progress_cb=progress_cb,
+    )
 
     top_p_els = [para._p for para in doc.paragraphs]
     top_tbl_els = [table._tbl for table in doc.tables]
@@ -447,17 +535,6 @@ def _parse_docx_with_page_spans_internal(
             'has_pgnum_tag': False,
         })
 
-    def _media_for_xml(xml_str: str, p_idx_val: int) -> list[str]:
-        nonlocal cache_dirty, ocr_skipped_any
-        img_texts, dirty, skipped = _extract_xml_embedded_media_texts(
-            xml_str, related_parts, media_cache_map, p_idx_val, seen_media_sha1s
-        )
-        if dirty:
-            cache_dirty = True
-        if skipped:
-            ocr_skipped_any = True
-        return img_texts
-
     # ── 组装：部件序列与分页锚点事件（偏移全部落在 python-docx 权威空间）──
     text_parts: list[str] = []
     # events: (char_offset_in_full_text, 'page_break' | 'section_break')，偏移即 parse_document 空间
@@ -481,63 +558,69 @@ def _parse_docx_with_page_spans_internal(
         events.append((current_offset, ev_type))
         has_any_anchor = True
 
-    # 阶段 1：顶层段落（python-docx 与 lxml 元素同序一对一配对）
-    for p_idx, para in enumerate(doc.paragraphs):
-        p_el = top_p_els[p_idx]
-        _p_text, p_breaks = _extract_p_text_and_breaks_lxml(p_el)
-        pdx_text = para.text.strip()
-        xml_str = getattr(para._p, 'xml', '') or ''
-        img_texts = _media_for_xml(xml_str, p_idx)
-        if pdx_text:
-            _append_part(pdx_text, p_breaks)
-        elif p_breaks:
-            for _ in p_breaks:
-                _boundary_event('page_break')
-        for itxt in img_texts:
-            _append_part(itxt, [])
-
-        ppr = p_el.find(_W_PPR)
-        if ppr is not None and ppr.find(_W_SECTPR) is not None:
-            _boundary_event('section_break')
-
-    # 阶段 2：顶层表格（逐表配对；唯一 tc 序列复刻 python-docx row.cells 的 gridSpan/vMerge 去重序）
-    for table in doc.tables:
-        tbl_el = table._tbl
-        tc_els = _extract_table_unique_tcs_lxml(tbl_el)
-        seen_tcs: set = set()
-        pdx_cells = []
-        for row in table.rows:
-            for cell in row.cells:
-                tc = cell._tc
-                if tc in seen_tcs:
-                    continue
-                seen_tcs.add(tc)
-                pdx_cells.append(cell)
-        if len(pdx_cells) != len(tc_els):
-            # 配对失败：本表放弃锚点（部件照常拼接保证全文等值）——绝不乱锚
-            for cell in pdx_cells:
-                txt = cell.text.strip()
-                if txt:
-                    _append_part(txt, [])
-                xml_str = getattr(cell._tc, 'xml', '') or ''
-                for itxt in _media_for_xml(xml_str, -1):
-                    _append_part(itxt, [])
-            continue
-        for cell, tc_el in zip(pdx_cells, tc_els):
-            _tc_text, tc_breaks = _extract_tc_text_and_breaks_lxml(tc_el)
-            pdx_text = cell.text.strip()
-            xml_str = getattr(cell._tc, 'xml', '') or ''
-            img_texts = _media_for_xml(xml_str, -1)
+    try:
+        # 阶段 1：顶层段落（python-docx 与 lxml 元素同序一对一配对）
+        for p_idx, para in enumerate(doc.paragraphs):
+            p_el = top_p_els[p_idx]
+            _p_text, p_breaks = _extract_p_text_and_breaks_lxml(p_el)
+            pdx_text = para.text.strip()
+            xml_str = getattr(para._p, 'xml', '') or ''
+            img_texts = media_session.extract(xml_str, p_idx)
             if pdx_text:
-                _append_part(pdx_text, tc_breaks)
-            elif tc_breaks:
-                for _ in tc_breaks:
+                _append_part(pdx_text, p_breaks)
+            elif p_breaks:
+                for _ in p_breaks:
                     _boundary_event('page_break')
             for itxt in img_texts:
-                _append_part(itxt, [])
+                if itxt:
+                    _append_part(itxt, [])
 
-    if cache_dirty:
-        _save_docx_media_cache(media_cache_path, media_cache_map)
+            ppr = p_el.find(_W_PPR)
+            if ppr is not None and ppr.find(_W_SECTPR) is not None:
+                _boundary_event('section_break')
+
+        # 阶段 2：顶层表格（逐表配对；唯一 tc 序列复刻 python-docx row.cells 的 gridSpan/vMerge 去重序）
+        for table in doc.tables:
+            tbl_el = table._tbl
+            tc_els = _extract_table_unique_tcs_lxml(tbl_el)
+            seen_tcs: set = set()
+            pdx_cells = []
+            for row in table.rows:
+                for cell in row.cells:
+                    tc = cell._tc
+                    if tc in seen_tcs:
+                        continue
+                    seen_tcs.add(tc)
+                    pdx_cells.append(cell)
+            if len(pdx_cells) != len(tc_els):
+                # 配对失败：本表放弃锚点（部件照常拼接保证全文等值）——绝不乱锚
+                for cell in pdx_cells:
+                    txt = cell.text.strip()
+                    if txt:
+                        _append_part(txt, [])
+                    xml_str = getattr(cell._tc, 'xml', '') or ''
+                    for itxt in media_session.extract(xml_str, -1):
+                        if itxt:
+                            _append_part(itxt, [])
+                continue
+            for cell, tc_el in zip(pdx_cells, tc_els):
+                _tc_text, tc_breaks = _extract_tc_text_and_breaks_lxml(tc_el)
+                pdx_text = cell.text.strip()
+                xml_str = getattr(cell._tc, 'xml', '') or ''
+                img_texts = media_session.extract(xml_str, -1)
+                if pdx_text:
+                    _append_part(pdx_text, tc_breaks)
+                elif tc_breaks:
+                    for _ in tc_breaks:
+                        _boundary_event('page_break')
+                for itxt in img_texts:
+                    if itxt:
+                        _append_part(itxt, [])
+    except BaseException:
+        media_session.flush()
+        raise
+
+    media_session.flush()
 
     full_text = '\n'.join(text_parts)
     total_len = len(full_text)
@@ -549,7 +632,7 @@ def _parse_docx_with_page_spans_internal(
     )
     if not has_any_anchor and not any_footer_or_pgnum:
         # §2.5 绝不编造：纯机器生成无任何分页锚点与页脚的 docx 返回空 spans
-        return full_text, [], ocr_skipped_any, len(seen_media_sha1s)
+        return full_text, [], media_session.ocr_skipped_any, len(media_session.seen_media_sha1s)
 
     # ── 将事件序列转化为连续无缝的 (start_offset, end_offset, physical_page, footer_page) 区间 ──
     sec_idx = 0
@@ -602,10 +685,15 @@ def _parse_docx_with_page_spans_internal(
         else:
             cleaned_spans.append(sp)
 
-    return full_text, cleaned_spans, ocr_skipped_any, len(seen_media_sha1s)
+    return full_text, cleaned_spans, media_session.ocr_skipped_any, len(media_session.seen_media_sha1s)
 
 
-def build_docx_page_spans(file_path: str | Path | None) -> list[tuple[int, int, int, int | None]]:
+def build_docx_page_spans(
+    file_path: str | Path | None,
+    *,
+    ocr_images: bool = True,
+    progress_cb: Optional[Callable[[int, int, int], None]] = None,
+) -> list[tuple[int, int, int, int | None]]:
     """E6 §1 & §2：解析 .docx 文件的物理页与底部印刷页码区间。
 
     Returns:
@@ -619,7 +707,9 @@ def build_docx_page_spans(file_path: str | Path | None) -> list[tuple[int, int, 
     if not path.is_file() or path.suffix.lower() != '.docx':
         return []
     try:
-        _text, spans, _skipped, _cnt = _parse_docx_with_page_spans_internal(path)
+        _text, spans, _skipped, _cnt = _parse_docx_with_page_spans_internal(
+            path, ocr_images=ocr_images, progress_cb=progress_cb
+        )
         return spans
     except Exception:
         return []
@@ -1074,7 +1164,7 @@ def _ocr_pdf_text(
                         progress_cb(uncached_done, total_uncached, cached_hits)
                     except Exception:
                         pass
-        except Exception:
+        except BaseException:
             if unflushed_new > 0:
                 _save_pdf_partial_ocr_cache(
                     json_cache, total_pages, source_size, source_mtime_ns, pages_by_idx
@@ -1211,95 +1301,49 @@ def parse_document(
                         'paragraph_index': para_idx,
                     })
 
-            related_parts = getattr(doc.part, 'related_parts', {}) or {}
-            media_cache_path = _docx_media_ocr_cache_path(path)
-            media_cache_map = _load_docx_media_cache(media_cache_path) if ocr_images else {}
-            seen_media_sha1s: set[str] = set()
-            cache_dirty = False
-            ocr_skipped_any = False
-            total_uncached = 0
-            cached_hits = 0
-            uncached_done = 0
-            unflushed_new = 0
+            media_session = _DocxMediaOcrSession(
+                path,
+                doc,
+                ocr_images=ocr_images,
+                progress_cb=progress_cb,
+            )
 
-            if ocr_images and (progress_cb is not None or related_parts):
-                total_uncached, cached_hits = _count_docx_media_targets(
-                    doc, related_parts, media_cache_map
-                )
-                if progress_cb is not None and (total_uncached > 0 or cached_hits > 0):
-                    try:
-                        progress_cb(0, total_uncached, cached_hits)
-                    except Exception:
-                        pass
+            try:
+                for p_idx, para in enumerate(doc.paragraphs):
+                    text = para.text.strip()
+                    if text:
+                        _append_part(text, is_ocr=False, para_idx=p_idx)
+                    if ocr_images:
+                        xml_str = getattr(para._p, 'xml', '') or ''
+                        for itxt in media_session.extract(xml_str, p_idx):
+                            if itxt:
+                                _append_part(itxt, is_ocr=True, para_idx=p_idx)
 
-            def _handle_new_ocr() -> None:
-                nonlocal uncached_done, unflushed_new, cache_dirty
-                uncached_done += 1
-                unflushed_new += 1
-                if unflushed_new >= _DOCX_MEDIA_INCREMENTAL_FLUSH:
-                    _save_docx_media_cache(media_cache_path, media_cache_map)
-                    unflushed_new = 0
-                    cache_dirty = False
-                if progress_cb is not None:
-                    progress_cb(uncached_done, total_uncached, cached_hits)
+                for table in doc.tables:
+                    seen_tcs = set()
+                    for row in table.rows:
+                        for cell in row.cells:
+                            tc = cell._tc
+                            if tc in seen_tcs:
+                                continue
+                            seen_tcs.add(tc)
+                            text = cell.text.strip()
+                            if text:
+                                _append_part(text, is_ocr=False, para_idx=-1)
+                            if ocr_images:
+                                tc_xml = getattr(tc, 'xml', '') or ''
+                                for itxt in media_session.extract(tc_xml, -1):
+                                    if itxt:
+                                        _append_part(itxt, is_ocr=True, para_idx=-1)
+            except BaseException:
+                media_session.flush()
+                raise
 
-            for p_idx, para in enumerate(doc.paragraphs):
-                text = para.text.strip()
-                if text:
-                    _append_part(text, is_ocr=False, para_idx=p_idx)
-                if ocr_images:
-                    xml_str = getattr(para._p, 'xml', '') or ''
-                    img_texts, dirty, skipped = _extract_xml_embedded_media_texts(
-                        xml_str,
-                        related_parts,
-                        media_cache_map,
-                        p_idx,
-                        seen_media_sha1s,
-                        on_new_ocr=_handle_new_ocr,
-                    )
-                    if dirty:
-                        cache_dirty = True
-                    if skipped:
-                        ocr_skipped_any = True
-                    for itxt in img_texts:
-                        if itxt:
-                            _append_part(itxt, is_ocr=True, para_idx=p_idx)
-
-            for table in doc.tables:
-                seen_tcs = set()
-                for row in table.rows:
-                    for cell in row.cells:
-                        tc = cell._tc
-                        if tc in seen_tcs:
-                            continue
-                        seen_tcs.add(tc)
-                        text = cell.text.strip()
-                        if text:
-                            _append_part(text, is_ocr=False, para_idx=-1)
-                        if ocr_images:
-                            tc_xml = getattr(tc, 'xml', '') or ''
-                            img_texts, dirty, skipped = _extract_xml_embedded_media_texts(
-                                tc_xml,
-                                related_parts,
-                                media_cache_map,
-                                -1,
-                                seen_media_sha1s,
-                                on_new_ocr=_handle_new_ocr,
-                            )
-                            if dirty:
-                                cache_dirty = True
-                            if skipped:
-                                ocr_skipped_any = True
-                            for itxt in img_texts:
-                                if itxt:
-                                    _append_part(itxt, is_ocr=True, para_idx=-1)
-
-            if ocr_images and (cache_dirty or unflushed_new > 0):
-                _save_docx_media_cache(media_cache_path, media_cache_map)
+            media_session.flush()
 
             parsed_doc = ParsedDoc(text="\n".join(text_parts), source_type=source_type, pages=1)
-            parsed_doc.ocr_skipped = ocr_skipped_any
-            parsed_doc.media_ocr_count = len(seen_media_sha1s)
+            parsed_doc.ocr_skipped = media_session.ocr_skipped_any
+            parsed_doc.media_ocr_count = len(media_session.seen_media_sha1s)
             parsed_doc.media_ocr_spans = media_ocr_spans
             return parsed_doc
 
@@ -1316,7 +1360,7 @@ def parse_document(
                     max_page_chars = max(max_page_chars, len(page_text.strip()))
             text = "\n".join(text_parts)
 
-            if len(text.strip()) < OCR_MIN_CHARS and max_page_chars < 20:
+            if ocr_images and len(text.strip()) < OCR_MIN_CHARS and max_page_chars < 20:
                 text = _ocr_pdf_text(path, progress_cb=progress_cb)
 
             parsed_doc = ParsedDoc(text=text, source_type=source_type, pages=pages)
