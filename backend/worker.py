@@ -38,6 +38,7 @@ from backend.models import (
     UserModelConfig,
     ensure_bid_check_tasks_columns,
     ensure_user_model_configs_columns,
+    ensure_user_model_configs_e44_columns,
 )
 from backend.utils.crypto import decrypt_api_key
 from core.deviation_exporter import export_deviation_table
@@ -308,6 +309,7 @@ def resolve_effective_llm_client(session: Session, user_id: Optional[int] = None
     if user_id is not None:
         try:
             ensure_user_model_configs_columns(session.get_bind())
+            ensure_user_model_configs_e44_columns(session.get_bind())
             cfg = session.query(UserModelConfig).filter_by(user_id=int(user_id)).first()
             if cfg is not None and cfg.base_url and cfg.api_key_encrypted and cfg.model_flash:
                 if strict_inner and not is_inner_model_url_allowed(cfg.base_url):
@@ -317,11 +319,13 @@ def resolve_effective_llm_client(session: Session, user_id: Optional[int] = None
                     )
                 else:
                     plain_key = decrypt_api_key(cfg.api_key_encrypted)
+                    cfg_embedding = str(getattr(cfg, 'model_embedding', None) or '').strip() or None
                     client = build_client_from_user_config(
                         base_url=cfg.base_url,
                         api_key=plain_key,
                         model_flash=cfg.model_flash,
                         model_flagship=cfg.model_flagship or cfg.model_flash,
+                        model_embedding=cfg_embedding,
                         supports_reasoning_effort=bool(cfg.supports_reasoning_effort),
                         supports_vision=bool(getattr(cfg, 'supports_vision', False)),
                     )

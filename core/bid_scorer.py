@@ -76,10 +76,16 @@ _TABLE_HEADER_STOP_WORDS = (
     '评标因素', '分值', '评分细则', '计分标准', '评审标准', '评标标准',
 )
 _PRICE_PROSE_SCORE_RE = re.compile(
+    r'(?:'
     r'(?:价格分|投标报价得分|报价分|价格部分|报价部分|价格评审)[^\n。；;]{0,28}?(\d{1,2}(?:\.\d{1,2})?)\s*分'
+    r'|'
+    r'(?:^|\n)\s*(?:\d+\s*\n\s*)?(?:价格|报价)\s*(?:\n\s*)?[（(]\s*(?:满分|分值)?\s*(\d{1,2}(?:\.\d{1,2})?)\s*分\s*[）)]'
+    r'|'
+    r'(?:有效价格得分|价格得分|报价得分)\s*[=＝]\s*[^\n。；;]{0,55}[×xX\*]\s*(\d{1,2}(?:\.\d{1,2})?)'
+    r')'
 )
 _DECLARED_TOTAL_RE = re.compile(
-    r'(?:总分(?:为|满分)?|满分(?:为)?|评分总分)\s*(\d{2,3}(?:\.\d{1,2})?)\s*分'
+    r'(?:总分(?:为|满分)?|满分(?:为)?|评分总分|合计)\s*(\d{2,3}(?:\.\d{1,2})?)\s*分'
 )
 
 # 确定性客观扣分规则：如“每有一项不满足扣 2 分”、“每缺1项扣0.5分”
@@ -90,25 +96,42 @@ _DEDUCTION_PER_ITEM_RE = re.compile(
 )
 _AMBIGUOUS_DEDUCTION_SIGNAL_RE = re.compile(r'扣\s*(?:\d+(?:\.\d+)?\s*)?分|酌情扣|按比例扣')
 
-_CERT_KEYWORDS = (
-    'ISO9001',
-    'ISO27001',
-    'ISO20000',
-    'ISO14001',
-    'ISO45001',
-    'CMMI',
-    'ITSS',
-    'CCRC',
-    '高新技术企业',
-    '软件著作权',
-    '软著',
-    '发明专利',
-    '营业执照',
-    '信息系统建设和服务能力',
-    '信息安全管理体系',
-    '质量管理体系',
-    '信息技术服务管理体系',
+# E44 §2.1：按规范证书同义词组匹配（支持扫描图 OCR 中的 GB/T19001 / ISO9001 等写法，同时覆盖三体系）
+_CERT_SYNONYM_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ('质量管理体系', ('质量管理体系', 'iso9001', 'iso 9001', 'gb/t19001', 'gbt19001')),
+    ('环境管理体系', ('环境管理体系', 'iso14001', 'iso 14001', 'gb/t24001', 'gbt24001')),
+    (
+        '职业健康安全管理体系',
+        ('职业健康安全管理体系', '职业安全健康管理体系', 'iso45001', 'iso 45001', 'gb/t45001', 'ohsas18001'),
+    ),
+    ('信息安全管理体系', ('信息安全管理体系', 'iso27001', 'iso/iec27001', 'iso/iec 27001')),
+    ('信息技术服务管理体系', ('信息技术服务管理体系', 'iso20000', 'iso/iec20000', 'itss')),
+    ('CMMI', ('cmmi',)),
+    ('CCRC', ('ccrc',)),
+    ('高新技术企业', ('高新技术企业',)),
+    ('软件著作权', ('软件著作权', '软著')),
+    ('发明专利', ('发明专利',)),
+    ('信息系统建设和服务能力', ('信息系统建设和服务能力', 'cs1', 'cs2', 'cs3', 'cs4')),
 )
+
+_CERT_KEYWORDS = tuple(
+    alias for _canon, aliases in _CERT_SYNONYM_GROUPS for alias in aliases
+)
+
+_LEADING_SECTION_PREFIX_RE = re.compile(
+    r'^(?:[（(]?[一二三四五六七八九十\d]{1,2}[）)、.．\s]*)?'
+    r'(商务要求|商务部分|商务评分|技术要求|技术部分|技术评分|服务方案|政策分|资信分|综合实力|价格部分)'
+    r'\s*[（(]\s*\d+(?:\.\d+)?\s*分\s*[）)]\s*(.+)$'
+)
+_LEADING_BROKEN_PAREN_RE = re.compile(r'^[^（(]{1,42}[）)]\s*(.{2,40})$')
+_TOC_LINE_RE = re.compile(
+    r'(?:\t\s*\d{1,4}\s*$|[\.·…]{3,}\s*\d{1,4}\s*$|'
+    r'^\s*(?:第[一二三四五六七八九十\d]+[章部分节]|(?:\d+(?:\.\d+)*|[一二三四五六七八九十]+)[、.．\s])\s*[^\n]{2,36}\s+\d{1,4}\s*$)'
+)
+_GROUP_TOTAL_HEADER_NAMES = frozenset({
+    '技术', '技术部分', '技术要求', '技术分', '商务', '商务要求', '商务部分', '商务分',
+    '政策分', '政策', '服务方案', '综合评审', '资信分', '价格部分',
+})
 
 
 def _to_dec(val: Any, default: Decimal = _DEC_ZERO) -> Decimal:
@@ -143,17 +166,78 @@ def _obj_field(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
+def _clean_factor_title(raw_factor: str, section: str = '') -> tuple[str, str]:
+    """E44 §2.1：清洗 PDF 跨行抽取带来的前导规则尾碎片与大类汇总前缀，保留大类到 section。"""
+    fac = re.sub(r'\s+', ' ', str(raw_factor or '').strip())
+    sec = re.sub(r'\s+', ' ', str(section or '').strip())
+
+    # 1. 剥离如 "商务要求（13 分）相关业绩" / "政策分（2 分）节能环保"
+    m_sec = _LEADING_SECTION_PREFIX_RE.match(fac)
+    if m_sec:
+        extracted_sec = m_sec.group(1).strip()
+        rest = m_sec.group(2).strip()
+        if len(rest) >= 2:
+            if not sec or sec in ('PDF评分细则', '评分细则', '综合评审', 'PDF综合评分表'):
+                sec = extracted_sec
+            fac = rest
+
+    # 2. 剥离前导残缺右括号碎片，如 "容清单、签署页，复印件加盖公章）企业管理体系" / "核验）综合实力"
+    m_broken = _LEADING_BROKEN_PAREN_RE.match(fac)
+    if m_broken:
+        right = m_broken.group(1).strip()
+        if len(right) >= 2:
+            fac = right
+
+    fac = fac.strip(' ：:、，,。；;）)')
+    return fac, sec or '评分细则'
+
+
+def _extract_price_score_from_text(text: str, eval_start: Optional[int] = None) -> Optional[tuple[Decimal, str]]:
+    """从招标文件评标章或全文抽取价格分满分（兼容跨行 `价格\\n（30 分）` 与 `×30` 计分公式）。"""
+    if not text:
+        return None
+    segments: list[str] = []
+    if eval_start is not None and 0 <= eval_start < len(text):
+        segments.append(text[eval_start:eval_start + 15000])
+    m_eval = re.search(r'(?:评分细则|评分标准|评分办法|详细评审|综合评审)', text)
+    if m_eval:
+        segments.append(text[m_eval.start():m_eval.start() + 12000])
+    segments.append(text)
+
+    for seg in segments:
+        for m in _PRICE_PROSE_SCORE_RE.finditer(seg):
+            raw_num = m.group(1) or m.group(2) or m.group(3)
+            if not raw_num:
+                continue
+            p_sc = _to_dec(raw_num, _DEC_ZERO)
+            if _DEC_ZERO < p_sc <= Decimal('60.00'):
+                ctx_lo = max(0, m.start() - 10)
+                ctx_hi = min(len(seg), m.end() + 100)
+                rule_snippet = re.sub(r'\s+', ' ', seg[ctx_lo:ctx_hi]).strip()
+                return p_sc, rule_snippet[:240]
+    return None
+
+
 def _classify_criterion(factor: str, section: str, rule_text: str) -> tuple[CriterionCategory, EvaluationMode]:
     merged = f"{section} {factor} {rule_text}"
     head = f"{section} {factor}"
     if any(k in head for k in ('价格', '报价', '评标价', '投标总价')):
         return 'price', 'price_formula'
 
-    if any(k in merged for k in ('证书', '认证', '资质', '体系', 'ISO', 'CMMI', 'ITSS', 'CCRC', '软著', '著作权', '专利', '职称')):
-        cat: CriterionCategory = 'qualification'
-    elif any(k in merged for k in ('业绩', '案例', '同类项目', '类似项目', '合同', '信誉', '财务', '商务')):
+    # 优先依据标题/大类判别类别，避免“服务体系”误撞 qualification 或“合同签订”误将进度计划判为 business
+    if any(k in head for k in ('售后', '运维', '培训', '质保', '保修', '驻场', '应急', '服务')):
+        cat: CriterionCategory = 'service'
+    elif any(k in head for k in ('进度', '工期', '实施', '技术', '架构', '系统', '安全', '需求', '响应程度', '总体方案')):
+        cat = 'technical'
+    elif any(k in head for k in ('证书', '认证', '资质', '管理体系', 'ISO', 'CMMI', 'ITSS', 'CCRC', '软著', '著作权', '专利', '节能', '环保', '政策')):
+        cat = 'qualification'
+    elif any(k in head for k in ('业绩', '案例', '同类项目', '类似项目', '信誉', '财务', '商务')):
         cat = 'business'
-    elif any(k in merged for k in ('售后', '运维', '培训', '质保', '保修', '驻场', '应急', '服务', '响应时间')):
+    elif any(k in merged for k in ('认证证书', '管理体系认证', '资质证书', 'ISO', 'CMMI', 'ITSS', 'CCRC', '软著', '著作权', '专利')):
+        cat = 'qualification'
+    elif any(k in merged for k in ('类似业绩', '同类项目', '类似项目', '业绩', '成功案例', '信誉', '财务')):
+        cat = 'business'
+    elif any(k in merged for k in ('售后', '运维', '培训', '质保', '保修', '驻场', '应急', '响应时间')):
         cat = 'service'
     else:
         cat = 'technical'
@@ -161,8 +245,8 @@ def _classify_criterion(factor: str, section: str, rule_text: str) -> tuple[Crit
     if (
         _DEDUCTION_PER_ITEM_RE.search(merged)
         or _AMBIGUOUS_DEDUCTION_SIGNAL_RE.search(merged)
-        or any(k in head for k in ('技术参数响应', '偏离情况', '实质性响应', '指标响应'))
-        or (cat == 'qualification' and any(ck.lower() in merged.lower() for ck in _CERT_KEYWORDS))
+        or any(k in head for k in ('技术参数响应', '偏离情况', '实质性响应', '指标响应', '需求的响应程度'))
+        or (cat == 'qualification' and any(ck in merged.lower() for ck in _CERT_KEYWORDS))
     ):
         return cat, 'objective_deduction'
 
@@ -385,9 +469,10 @@ def collect_scoring_criteria_items(
     has_price_item = False
 
     for cand in raw_candidates:
-        factor = re.sub(r'\s+', ' ', str(cand.get('factor') or '').strip())
+        factor_raw = re.sub(r'\s+', ' ', str(cand.get('factor') or '').strip())
         detail = re.sub(r'\s+', ' ', str(cand.get('detail') or '').strip())
-        section = re.sub(r'\s+', ' ', str(cand.get('section') or '评分细则').strip())
+        section_raw = re.sub(r'\s+', ' ', str(cand.get('section') or '评分细则').strip())
+        factor, section = _clean_factor_title(factor_raw, section_raw)
         if not factor and detail:
             factor = detail[:28]
         if not factor:
@@ -406,7 +491,7 @@ def collect_scoring_criteria_items(
 
         cat, eval_mode = _classify_criterion(factor, section, detail)
         if cat != 'price' and _is_procedural_topic(factor) and not any(
-            k in factor for k in ('方案', '技术', '服务', '售后', '业绩', '认证', '证书', '实施', '运维', '架构', '响应', '安全', '培训')
+            k in factor for k in ('方案', '技术', '服务', '售后', '业绩', '认证', '证书', '实施', '运维', '架构', '响应', '安全', '培训', '体系', '进度', '节能', '环保')
         ):
             continue
 
@@ -429,24 +514,29 @@ def collect_scoring_criteria_items(
             'source': cand.get('source', 'scoring_table'),
         })
 
-    # 若 PDF/段落中仅抽出了技术商务项而价格分写在正文句子中，补齐价格分项
+    # 若 PDF/段落中仅抽出了技术商务项而价格分写在正文/跨行表头中，精准补齐价格分项
     if criteria and not has_price_item and tender_text:
-        m_price = _PRICE_PROSE_SCORE_RE.search(tender_text)
-        if m_price:
-            p_sc = _to_dec(m_price.group(1), _DEC_ZERO)
-            if _DEC_ZERO < p_sc <= Decimal('60.00'):
-                criteria.insert(0, {
-                    'criterion_id': 'crit_price_0',
-                    'category': 'price',
-                    'section': '价格评审（正文提取）',
-                    'factor': '投标报价得分',
-                    'max_score': p_sc,
-                    'scoring_rule_text': m_price.group(0)[:240],
-                    'evaluation_mode': 'price_formula',
-                    'source': 'prose_price_補齐',
-                })
-                for idx, it in enumerate(criteria, start=1):
-                    it['criterion_id'] = f"crit_{idx}"
+        eval_ch_obj = checklist.get('eval_chapter')
+        eval_start_off = (
+            int(eval_ch_obj['start'])
+            if isinstance(eval_ch_obj, dict) and eval_ch_obj.get('start') is not None
+            else None
+        )
+        price_hit = _extract_price_score_from_text(tender_text, eval_start=eval_start_off)
+        if price_hit is not None:
+            p_sc, p_rule = price_hit
+            criteria.insert(0, {
+                'criterion_id': 'crit_price_0',
+                'category': 'price',
+                'section': '价格评审',
+                'factor': '价格分',
+                'max_score': p_sc,
+                'scoring_rule_text': p_rule,
+                'evaluation_mode': 'price_formula',
+                'source': 'prose_price_extract',
+            })
+            for idx, it in enumerate(criteria, start=1):
+                it['criterion_id'] = f"crit_{idx}"
 
     declared_total = _DEC_HUNDRED
     if tender_text:
@@ -540,46 +630,320 @@ def _collect_veto_alerts(
     return alerts
 
 
+def _is_toc_line(line: str) -> bool:
+    """判定单行是否为目录项（含制表符+页码、省略号点线+页码或编号标题+尾页码）。"""
+    raw = str(line or '')
+    stripped = raw.strip()
+    if not stripped:
+        return False
+    if _TOC_LINE_RE.search(raw):
+        return True
+    return False
+
+
+def _is_toc_region(bid_text: str, pos: int) -> bool:
+    """判定字符偏移 pos 附近是否属于目录页密集区域（防目录碎片抢占正文证据窗口）。"""
+    if not bid_text or pos < 0:
+        return False
+    lo = max(0, pos - 320)
+    hi = min(len(bid_text), pos + 320)
+    lines = [ln for ln in bid_text[lo:hi].splitlines() if ln.strip()]
+    if not lines:
+        return False
+    # 若当前所在行本身就是目录行，直接排除
+    line_start = bid_text.rfind('\n', 0, pos) + 1
+    line_end = bid_text.find('\n', pos)
+    if line_end == -1:
+        line_end = len(bid_text)
+    if _is_toc_line(bid_text[line_start:line_end]):
+        return True
+    toc_cnt = sum(1 for ln in lines if _is_toc_line(ln))
+    return toc_cnt >= 3 and (toc_cnt / len(lines)) >= 0.45
+
+
+def _truncate_clean_boundary(text: str, max_len: int) -> str:
+    """按完整换行或句号边界收口，杜绝拦腰截断词语导致模型误判原文未写完。"""
+    s = (text or '').strip()
+    if len(s) <= max_len:
+        return s
+    head = s[:max_len]
+    floor = int(max_len * 0.62)
+    best_pos = -1
+    for sep in ('\n', '。', '；', '！', '？', '.'):
+        idx = head.rfind(sep)
+        if idx >= floor and idx > best_pos:
+            best_pos = idx
+    if best_pos >= floor:
+        return head[:best_pos + 1].strip()
+    return head.strip()
+
+
+def _extract_docx_table_blocks(bid_path: Path) -> list[dict[str, Any]]:
+    """一次性抽取 .docx 全部表格块（按 cell._tc 本体去重，严格遵循 AGENTS.md 铁律 6）。"""
+    if not bid_path.is_file() or bid_path.suffix.lower() != '.docx':
+        return []
+    blocks: list[dict[str, Any]] = []
+    try:
+        doc = Document(str(bid_path))
+        for ti, tb in enumerate(doc.tables):
+            rows_txt: list[str] = []
+            raw_cells: list[str] = []
+            seen_tcs = set()
+            for row in tb.rows:
+                r_cells: list[str] = []
+                for cell in row.cells:
+                    tc = cell._tc
+                    if tc in seen_tcs:
+                        continue
+                    seen_tcs.add(tc)
+                    c_txt = re.sub(r'\s+', ' ', cell.text.strip())
+                    if c_txt:
+                        r_cells.append(c_txt)
+                        raw_cells.append(cell.text.strip())
+                if r_cells:
+                    rows_txt.append(' | '.join(r_cells))
+            if len(rows_txt) >= 2:
+                joined = '\n'.join(rows_txt[:22])
+                blocks.append({
+                    'table_index': ti,
+                    'header': rows_txt[0],
+                    'text': _truncate_clean_boundary(joined, 1500),
+                    'anchor_cell': next((c for c in raw_cells if len(c) >= 6), raw_cells[0] if raw_cells else ''),
+                })
+    except Exception:
+        return []
+    return blocks
+
+
+def _build_section_anchor_terms(factor: str, category: str) -> tuple[list[str], list[str]]:
+    """为各典型评分因素生成 (章节标题定位词列表, 关联表格特征词列表)。"""
+    fac = factor or ''
+    heading_terms: list[str] = []
+    table_terms: list[str] = []
+
+    if any(k in fac for k in ('业绩', '案例', '合同')) or category == 'business':
+        # 优先定位 10.3 业绩证明 / 合同扫描件 OCR 段落，完整《业绩案例一览表》由下方表格聚合直取
+        heading_terms.extend(['业绩证明', '10.3', '类似项目业绩', '同类项目业绩', '项目业绩', '业绩案例一览表'])
+        table_terms.extend(['项目名称 | 用户名称', '合同金额', '业绩', '签订日期', '用户名称', '用户联系电话'])
+    if any(k in fac for k in ('售后', '维保', '运维', '质保')) or (category == 'service' and '培训' not in fac):
+        heading_terms.extend(['售后服务方案', '售后服务', '维修响应时间', '售后服务响应时间', '应急响应服务', '故障级别', '免费质保期'])
+        table_terms.extend(['故障级别', '响应时间', '服务摘要', '质保期限', '应急响应'])
+    if any(k in fac for k in ('进度', '工期', '计划')):
+        heading_terms.extend(['项目进度计划', '进度计划', '工作计划', '实施计划', '项目启动阶段'])
+        table_terms.extend(['计划内容', 'T+', '执行时间', '阶段 | 责任人', '里程碑'])
+    if any(k in fac for k in ('实施', '部署', '建设方案', '技术方案', '总体方案')):
+        heading_terms.extend(['实施方案', '系统设计与架构规划', '实施部署', '产品质量及安全保证措施'])
+        table_terms.extend(['计划内容', '项目实施阶段', '设备部署', '验收'])
+    if '培训' in fac:
+        heading_terms.extend(['培训方案', '技术培训', '培训内容', '培训计划', '培训目标'])
+        table_terms.extend(['培训', '课时', '课程', '培训对象'])
+    if any(k in fac for k in ('管理体系', '资质', '证书', '认证', '节能', '环保')):
+        heading_terms.extend(['资格证书', '10.2', '质量管理体系', '节能产品', '环境标志'])
+        table_terms.extend(['证书', '认证', 'ISO', '管理体系'])
+
+    # 补充因子名自身清洗词作为通用标题锚点
+    clean_fac = re.sub(r'[（(][^）)]*[）)]', '', fac).strip()
+    if 2 <= len(clean_fac) <= 16 and clean_fac not in heading_terms:
+        heading_terms.insert(0, clean_fac)
+
+    return heading_terms, table_terms
+
+
+def _collect_section_and_table_windows(
+    factor: str,
+    category: str,
+    bid_text: str,
+    bid_page_ctx: Any,
+    docx_tables: Optional[list[dict[str, Any]]] = None,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """E44 §2.1：确定性章/表结构化证据聚合（过滤目录行 + 整表入窗 + 句边界收口 + verify_quote 核验）。"""
+    if not bid_text or not bid_text.strip():
+        return [], []
+
+    heading_terms, table_terms = _build_section_anchor_terms(factor, category)
+    win_texts: list[str] = []
+    verified_quotes: list[dict[str, Any]] = []
+    seen_starts: list[int] = []
+    seen_q: set[str] = set()
+
+    def _add_quote(raw_snippet: str, off: Optional[int]) -> None:
+        snip = _truncate_clean_boundary(raw_snippet, 180)
+        if not snip or snip in seen_q:
+            return
+        if not verify_quote(snip, bid_text):
+            return
+        seen_q.add(snip)
+        real_off = off
+        if real_off is None:
+            pos = bid_text.find(snip[:36])
+            real_off = pos if pos != -1 else None
+        page = (
+            resolve_unified_page(int(real_off), bid_page_ctx)[0]
+            if (real_off is not None and bid_page_ctx is not None)
+            else None
+        )
+        verified_quotes.append({
+            'quote': snip,
+            'quote_verified': True,
+            'offset': real_off,
+            'page': page,
+        })
+
+    # 1. 匹配非目录区章节标题与正文块
+    lines_with_off: list[tuple[int, str]] = []
+    cursor = 0
+    for raw_ln in bid_text.splitlines(keepends=True):
+        s_ln = raw_ln.strip()
+        if s_ln:
+            lines_with_off.append((cursor, raw_ln))
+        cursor += len(raw_ln)
+
+    for term in heading_terms:
+        if len(win_texts) >= 3:
+            break
+        term_low = term.lower()
+        for off, raw_ln in lines_with_off:
+            s_ln = raw_ln.strip()
+            if len(s_ln) > 48:
+                continue
+            if term_low not in s_ln.lower():
+                continue
+            if _is_toc_region(bid_text, off):
+                continue
+            # 跳过重复近邻命中
+            if any(abs(off - prev) < 400 for prev in seen_starts):
+                continue
+            # 确认标题后确实有实质正文（跳过紧挨下一标题的空占位头，除非后面有 OCR/正文）
+            chunk_raw = bid_text[off:min(len(bid_text), off + 1650)]
+            non_toc_lines = [ln.strip() for ln in chunk_raw.splitlines() if ln.strip() and not _is_toc_line(ln)]
+            if len(non_toc_lines) < 2:
+                continue
+            # 针对“6 业绩案例一览表”若后面立刻跳到“7 投标人基本情况表”（因为表格被 parser 放到了末尾），
+            # 仍保留该非空章节段或让下方表格检索精准接棒
+            cleaned_win = _truncate_clean_boundary('\n'.join(non_toc_lines), 1500)
+            if len(cleaned_win) < 40:
+                continue
+            # 过滤《投标函》中的附件清单枚举段（如 "6 业绩案例一览表 7 投标人基本情况表 ... 在此，签字代表宣布同意如下："），防止滑偏到投标函页
+            if '投标函' not in (factor or '') and any(
+                noise in cleaned_win[:300]
+                for noise in ('签字代表宣布同意如下', '所附投标价格表中规定', '中标服务费承诺函')
+            ):
+                continue
+            seen_starts.append(off)
+            win_texts.append(cleaned_win)
+            # 挑首段实质句（跳过纯 4 字短标题）作为逐字溯源引用
+            quote_cand = '\n'.join(non_toc_lines[:3])
+            _add_quote(quote_cand, off)
+            if len(win_texts) >= 3:
+                break
+
+    # 2. 匹配 .docx 结构化表格块（解决 python-docx 中表格与正文段落分离存储导致漏招整表的根因）
+    if docx_tables and table_terms:
+        matched_tables: list[tuple[int, dict[str, Any]]] = []
+        for tb in docx_tables:
+            hdr_and_head = f"{tb['header']}\n{tb['text'][:450]}".lower()
+            hit_score = sum(1 for kw in table_terms if kw.lower() in hdr_and_head)
+            if hit_score > 0:
+                matched_tables.append((hit_score, tb))
+        matched_tables.sort(key=lambda x: x[0], reverse=True)
+        for _sc, tb in matched_tables[:2]:
+            tbl_block = f"【投标书内嵌表格 #{tb['table_index'] + 1}】\n{tb['text']}"
+            win_texts.insert(0, tbl_block)
+            # 锚定表格单元格在 bid_text 中的连续原文用于严格 verify_quote 核验，并优先置于引用首位
+            anc = str(tb.get('anchor_cell') or '').strip()
+            if anc:
+                pos = bid_text.find(anc)
+                if pos != -1:
+                    raw_slice = bid_text[pos:min(len(bid_text), pos + 200)]
+                    before_len = len(verified_quotes)
+                    _add_quote(raw_slice, pos)
+                    if len(verified_quotes) > before_len:
+                        verified_quotes.insert(0, verified_quotes.pop())
+
+    return win_texts[:4], verified_quotes[:3]
+
+
 def _retrieve_verified_local_quotes(
     query: str,
     bid_text: str,
     bid_page_ctx: Any,
     *,
+    client: Any = None,
     top_k: int = 3,
+    factor: str = '',
+    category: str = '',
+    docx_tables: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[list[str], list[dict[str, Any]]]:
-    """0-Token 混合检索投标书局部窗口，并生成经 verify_quote 核验的证据摘录列表。"""
+    """E44 §2.1：章表结构化聚合 + 目录隔离 + 透传 client 激活 L2 向量精排 Rerank（无向量自动降级 BM25）。"""
     if not bid_text or not bid_text.strip():
         return [], []
-    windows = hybrid_retrieve_windows(query, bid_text, top_k=top_k, client=None)
-    win_texts: list[str] = []
-    verified_quotes: list[dict[str, Any]] = []
-    seen_q: set[str] = set()
+
+    # 1. 先执行结构化非目录章节 + 整表聚合补召回
+    sec_wins, sec_quotes = _collect_section_and_table_windows(
+        factor=factor,
+        category=category,
+        bid_text=bid_text,
+        bid_page_ctx=bid_page_ctx,
+        docx_tables=docx_tables,
+    )
+
+    # 2. 透传 client 调用三级混合检索（有 embedding 自动激活 L2 Rerank，否则 0-Token BM25）
+    windows = hybrid_retrieve_windows(
+        query,
+        bid_text,
+        client=client,
+        top_k=max(top_k, 5),
+        min_score=0.28,
+        window_pad=360,
+    )
+
+    win_texts: list[str] = list(sec_wins)
+    verified_quotes: list[dict[str, Any]] = list(sec_quotes)
+    seen_q: set[str] = {str(q.get('quote') or '') for q in verified_quotes}
+    seen_win_heads: set[str] = {w[:60] for w in win_texts}
 
     for w in windows:
-        w_txt = str(w.get('text') or w.get('window') or '').strip()
+        off = w.get('start')
+        if off is not None and _is_toc_region(bid_text, int(off)):
+            continue
+        w_txt = str(w.get('window') or w.get('text') or '').strip()
         if not w_txt:
             continue
-        win_texts.append(w_txt[:800])
-        # 取窗口内首个非空实质句段做原文逐字摘录
-        snippet = w_txt[:160].strip()
-        if not snippet or snippet in seen_q:
+        # 剔除窗口内残留目录行
+        non_toc_lns = [ln for ln in w_txt.splitlines() if ln.strip() and not _is_toc_line(ln)]
+        if not non_toc_lns:
             continue
-        is_ok = bool(verify_quote(snippet, bid_text))
-        if is_ok:
+        clean_win = _truncate_clean_boundary('\n'.join(non_toc_lns), 1400)
+        if not clean_win:
+            continue
+        if clean_win[:60] not in seen_win_heads and len(win_texts) < 5:
+            seen_win_heads.add(clean_win[:60])
+            win_texts.append(clean_win)
+
+        # 取命中原句或实质句段做原文逐字摘录
+        raw_snip = str(w.get('quote') or non_toc_lns[0] or '').strip()
+        snippet = _truncate_clean_boundary(raw_snip, 180)
+        if not snippet or snippet in seen_q or _is_toc_line(snippet):
+            continue
+        if verify_quote(snippet, bid_text):
             seen_q.add(snippet)
-            off = w.get('start')
-            if off is None:
+            real_off = off
+            if real_off is None:
                 found_pos = bid_text.find(snippet[:40])
-                off = found_pos if found_pos != -1 else None
-            page = resolve_unified_page(int(off), bid_page_ctx)[0] if (off is not None and bid_page_ctx is not None) else None
+                real_off = found_pos if found_pos != -1 else None
+            page = (
+                resolve_unified_page(int(real_off), bid_page_ctx)[0]
+                if (real_off is not None and bid_page_ctx is not None)
+                else None
+            )
             verified_quotes.append({
                 'quote': snippet,
                 'quote_verified': True,
-                'offset': off,
+                'offset': real_off,
                 'page': page,
             })
 
-    return win_texts, verified_quotes
+    return win_texts[:4], verified_quotes[:3]
 
 
 def _parse_llm_json(raw_text: str) -> Optional[dict[str, Any]]:
@@ -613,18 +977,20 @@ def _evaluate_criterion_with_llm(
 ) -> dict[str, Any]:
     """对单条主观/複合评分项调用 client.chat（仅喂局部窗口），输出经 Decimal 钳位与 verify_quote 校验的结果。"""
     max_sc: Decimal = crit['max_score']
-    evidence_block = '\n---\n'.join(win_texts[:3]) if win_texts else '（未检索到明显对应段落）'
+    evidence_block = '\n---\n'.join(win_texts[:4]) if win_texts else '（未检索到明显对应段落）'
+    evidence_block = _truncate_clean_boundary(evidence_block, 4200)
     prompt = (
         "你是严谨的招投标技术评审专家。请仅根据【招标评分细则】与【我方投标书局部证据窗口】，"
         "客观评估我方在该评分项的预估得分、失分原因与可执行提分建议。\n"
         f"【评分因素】：{crit['factor']}（满分：{max_sc} 分，类别：{crit['category']}）\n"
         f"【评分标准细则】：{crit['scoring_rule_text']}\n"
         f"【关联实质性条款负偏离计数】：{f4_neg_count} 项\n"
-        f"【我方投标书局部证据窗口】：\n{evidence_block[:2400]}\n\n"
+        f"【我方投标书局部证据窗口】：\n{evidence_block}\n\n"
         "严格要求：\n"
-        f"1. `estimated_score` 必须在 0 到 {max_sc} 之间（保留1~2位小数）；若证据完全缺失给低分，若有详实量化方案与佐证给合理高分；\n"
-        "2. `evidence_quotes` 必须从上方【我方投标书局部证据窗口】逐字原样摘录 1~2 句（严禁改字或编造）；\n"
-        "3. 直接输出纯 JSON 对象：\n"
+        f"1. `estimated_score` 必须在 0 到 {max_sc} 之间（保留1~2位小数）；若证据完全缺失给低分，若有详实量化方案与表格/合同/证书佐证给合理高分；\n"
+        "2. 若证据窗口已包含《业绩案例一览表》、合同扫描 OCR 文本、四级故障响应表或 T+n 里程碑表，请直接依据表中具体项数、时限与交付物客观赋分；严禁因窗口截断边界臆测“原文未写完或语句截断”；\n"
+        "3. `evidence_quotes` 必须从上方【我方投标书局部证据窗口】逐字原样摘录 1~2 句（严禁改字、加前缀或编造）；\n"
+        "4. 直接输出纯 JSON 对象：\n"
         '{"estimated_score": 8.5, "deduction_reasons": ["失分点1"], "improvement_suggestions": ["提分建议1"], "evidence_quotes": ["原文逐字摘录"]}'
     )
     resp = client.chat([{'role': 'user', 'content': prompt}], model_tier='flash')
@@ -718,10 +1084,15 @@ def estimate_bid_score(
     if tender_parsed_doc is None and t_path.is_file():
         tender_parsed_doc = parse_document(str(t_path), ocr_images=False)
     if bid_parsed_doc is None and b_path.is_file():
-        bid_parsed_doc = parse_document(str(b_path), ocr_images=False)
+        def _on_bid_ocr_prog(done_cnt: int, total_cnt: int, cached_cnt: int) -> None:
+            if total_cnt > 0:
+                pct = 10 + min(12, int((done_cnt / max(1, total_cnt)) * 12))
+                _emit(pct, f"正在识别投标书内嵌证照与合同扫描件（{done_cnt}/{total_cnt}，命中缓存 {cached_cnt}）…")
+        bid_parsed_doc = parse_document(str(b_path), ocr_images=True, progress_cb=_on_bid_ocr_prog)
 
     bid_text = str(getattr(bid_parsed_doc, 'text', '') or '')
     bid_page_ctx = build_unified_page_context(str(b_path)) if b_path.is_file() else None
+    bid_docx_tables = _extract_docx_table_blocks(b_path) if b_path.is_file() else []
 
     if f2_res is None and b_path.is_file() and t_path.is_file():
         try:
@@ -817,7 +1188,16 @@ def estimate_bid_score(
             continue
 
         query_str = f"{factor} {rule_txt[:160]}".strip()
-        win_texts, local_quotes = _retrieve_verified_local_quotes(query_str, bid_text, bid_page_ctx, top_k=3)
+        win_texts, local_quotes = _retrieve_verified_local_quotes(
+            query_str,
+            bid_text,
+            bid_page_ctx,
+            client=client,
+            top_k=3,
+            factor=factor,
+            category=cat,
+            docx_tables=bid_docx_tables,
+        )
 
         # (2) 客观扣分 / 证书匹配项
         if eval_mode == 'objective_deduction':
@@ -880,30 +1260,77 @@ def estimate_bid_score(
                 }
                 continue
 
-            # 明确证书关键词匹配（如 ISO9001/ISO27001/CMMI 等）
-            matched_cert_kws = [ck for ck in _CERT_KEYWORDS if ck.lower() in f"{factor} {rule_txt}".lower()]
-            if matched_cert_kws:
-                found_kws = [ck for ck in matched_cert_kws if ck.lower() in bid_text.lower()]
-                expired_hit = any(any(ck.lower() in exp.lower() for ck in found_kws) for exp in f3_expired_certs)
+            # E44 §2.1：按证书同义词组匹配（支持扫描图 OCR 中的 ISO9001/GB/T19001 等，精确分项给分）
+            crit_lower = f"{factor} {rule_txt}".lower()
+            bid_lower = bid_text.lower()
+            required_cert_groups: list[tuple[str, tuple[str, ...]]] = [
+                (canon, aliases)
+                for canon, aliases in _CERT_SYNONYM_GROUPS
+                if any(al in crit_lower for al in aliases)
+            ]
+            if required_cert_groups:
+                found_canons: list[str] = []
+                cert_quotes: list[dict[str, Any]] = []
+                for canon, aliases in required_cert_groups:
+                    hit_pos = -1
+                    for al in aliases:
+                        p = bid_lower.find(al)
+                        if p != -1:
+                            # 避免命中诸如 "未提供质量管理体系" / "质量管理体系（无）" 的显式否定声明
+                            ctx_s = bid_text[max(0, p - 10):min(len(bid_text), p + len(al) + 12)]
+                            if re.search(r'(?:未提供|无此|（无）|\(无\))', ctx_s):
+                                continue
+                            hit_pos = p
+                            break
+                    if hit_pos != -1:
+                        found_canons.append(canon)
+                        ln_s = bid_text.rfind('\n', 0, hit_pos) + 1
+                        ln_e = bid_text.find('\n', hit_pos)
+                        if ln_e == -1:
+                            ln_e = len(bid_text)
+                        q_raw = _truncate_clean_boundary(bid_text[ln_s:min(ln_e, ln_s + 180)], 180)
+                        if q_raw and verify_quote(q_raw, bid_text):
+                            pg = (
+                                resolve_unified_page(int(ln_s), bid_page_ctx)[0]
+                                if bid_page_ctx is not None
+                                else None
+                            )
+                            cert_quotes.append({
+                                'quote': q_raw,
+                                'quote_verified': True,
+                                'offset': ln_s,
+                                'page': pg,
+                            })
+
+                matched_canons = [c for c, _ in required_cert_groups]
+                expired_hit = any(
+                    any(
+                        al in exp.lower()
+                        for canon, aliases in required_cert_groups
+                        if canon in found_canons
+                        for al in aliases
+                    )
+                    for exp in f3_expired_certs
+                )
                 if expired_hit:
                     est_sc = _DEC_ZERO
                     reasons = ['投标书虽提及相关证书，但 F3 检出证照存在过期风险，面临不得分或废标']
                     sugs = ['请立即更新有效期内的新证扫描件并替换至标书资格/商务章节']
-                elif len(found_kws) == len(matched_cert_kws):
+                elif len(found_canons) == len(matched_canons):
                     est_sc = max_sc
-                    reasons = [f"投标书正文已匹配所需资质/认证关键词（{', '.join(found_kws)}）"]
+                    reasons = [f"投标书正文/扫描件已匹配全部所需资质认证（{', '.join(found_canons)}）"]
                     sugs = ['请确认已附上清晰证书扫描件及全国认证认可信息公共服务平台查询截图']
-                elif found_kws:
-                    est_sc = (max_sc * Decimal(len(found_kws)) / Decimal(len(matched_cert_kws))).quantize(
+                elif found_canons:
+                    est_sc = (max_sc * Decimal(len(found_canons)) / Decimal(len(matched_canons))).quantize(
                         _QUANT_001, rounding=ROUND_HALF_UP
                     )
-                    missing_kws = [ck for ck in matched_cert_kws if ck not in found_kws]
-                    reasons = [f"已命中 {', '.join(found_kws)}，但正文中未检索到 {', '.join(missing_kws)}"]
-                    sugs = [f"请前往「企业证照台账」核对是否具备 {', '.join(missing_kws)} 并补入商务资质章节"]
+                    missing_canons = [c for c in matched_canons if c not in found_canons]
+                    reasons = [f"已检出 {', '.join(found_canons)}，但正文中及扫描件未检索到 {', '.join(missing_canons)}"]
+                    sugs = [f"请前往「企业证照台账」核对是否具备 {', '.join(missing_canons)} 并补入商务资质章节"]
                 else:
                     est_sc = _DEC_ZERO
-                    reasons = [f"投标书正文中未检索到所需资质/认证关键词（{', '.join(matched_cert_kws)}）"]
-                    sugs = [f"请补充 {', '.join(matched_cert_kws)} 证书复印件及有效期内证明"]
+                    reasons = [f"投标书正文及扫描件中均未检索到所需资质/认证（{', '.join(matched_canons)}）"]
+                    sugs = [f"请补充 {', '.join(matched_canons)} 证书复印件及有效期内证明"]
 
                 ratio = (
                     ((est_sc / max_sc) * _DEC_HUNDRED).quantize(_QUANT_01, rounding=ROUND_HALF_UP)
@@ -923,7 +1350,7 @@ def estimate_bid_score(
                     'score_ratio_pct': float(ratio),
                     'deduction_reasons': reasons,
                     'improvement_suggestions': sugs,
-                    'evidence_quotes': local_quotes,
+                    'evidence_quotes': cert_quotes or local_quotes,
                 }
                 continue
 

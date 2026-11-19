@@ -5,10 +5,12 @@ import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { checksApi, radarApi, validateUploadFile } from '@/api'
 import { formatPageOrOffset, type BidTaskOut, type RadarScanOut } from '@/api/types'
 import { RADAR_CACHE_KEY, useAuthStore } from '@/stores/auth'
+import { useNotificationStore } from '@/stores/notifications'
 
 defineOptions({ name: 'RadarView' })
 
 const authStore = useAuthStore()
+const notificationStore = useNotificationStore()
 
 const loading = ref(false)
 const detailLoading = ref(false)
@@ -154,7 +156,15 @@ async function handleRescan(taskId: number): Promise<void> {
     scanResult.value = res
     saveToSessionStorage(res)
     await loadHistoryList(false)
-    ElMessage.success(`控标雷达记录 #${taskId} 已重新扫描完成`)
+    notificationStore.notifyTaskTerminal({
+      kind: 'radar',
+      targetId: res.task_id,
+      title: res.title,
+      summary: `重新扫描结论：${res.conclusion?.recommendation || '已完成'}（疑似参数 ${res.suspicious_params?.length || 0} 处）`,
+      tone: res.conclusion?.recommendation === '疑似控标高' ? 'warning' : 'success',
+      routePath: '/radar',
+      dedupSuffix: `rescan:${Date.now()}`,
+    })
   } catch {
     await loadHistoryList(false)
   } finally {
@@ -289,11 +299,22 @@ async function handleRunRadar(): Promise<void> {
       }
     }
     if (successCount > 0 && !radarStopRequested) {
-      ElMessage.success(
-        successCount === 1
-          ? `F6 投前控标雷达扫描完成：${scanResult.value?.title}`
-          : `批量控标雷达扫描完成：成功扫描 ${successCount} 份招标文件`,
-      )
+      const latest = scanResult.value
+      notificationStore.notifyTaskTerminal({
+        kind: 'radar',
+        targetId: latest?.task_id || Date.now(),
+        title:
+          successCount === 1
+            ? latest?.title || '投前控标评估'
+            : `批量控标评估（共 ${successCount} 份）`,
+        summary:
+          successCount === 1
+            ? `结论：${latest?.conclusion?.recommendation || '已完成'}（疑似控标参数 ${latest?.suspicious_params?.length || 0} 处）`
+            : `成功完成 ${successCount} 份招标文件的投前控标雷达评估`,
+        tone: latest?.conclusion?.recommendation === '疑似控标高' ? 'warning' : 'success',
+        routePath: '/radar',
+        dedupSuffix: `scan:${Date.now()}`,
+      })
     }
   } finally {
     radarAbortController = null

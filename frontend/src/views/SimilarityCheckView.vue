@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { similarityApi, validateUploadFile } from '@/api'
+import { useNotificationStore } from '@/stores/notifications'
 import {
   formatMoneyDisplay,
   formatPageOrOffset,
@@ -13,6 +14,8 @@ import {
 } from '@/api/types'
 
 defineOptions({ name: 'SimilarityCheckView' })
+
+const notificationStore = useNotificationStore()
 
 interface PendingBidItem {
   id: string
@@ -110,7 +113,25 @@ function schedulePoll(reportId: number): void {
       if (isRunningStatus(detail.status)) {
         schedulePoll(reportId)
       } else if (detail.status === 'completed') {
-        ElMessage.success(`多标书交叉比对完成：${detail.title}`)
+        notificationStore.notifyTaskTerminal({
+          kind: 'similarity',
+          targetId: detail.id,
+          title: detail.title,
+          summary: `最高净文本相似度 ${detail.max_similarity_pct}%（风险等级：${detail.risk_level}）`,
+          tone: detail.risk_level === 'high' ? 'warning' : 'success',
+          routePath: '/similarity',
+          dedupSuffix: `completed:${detail.created_at || ''}`,
+        })
+      } else if (detail.status === 'failed') {
+        notificationStore.notifyTaskTerminal({
+          kind: 'similarity',
+          targetId: detail.id,
+          title: detail.title,
+          summary: detail.error_msg || '多标书交叉比对失败',
+          tone: 'error',
+          routePath: '/similarity',
+          dedupSuffix: `failed:${detail.created_at || ''}`,
+        })
       }
     } catch {
       stopPolling()
@@ -191,10 +212,27 @@ async function handleRunCompare(): Promise<void> {
     const listRes = await similarityApi.list()
     historyList.value = listRes.items || []
     if (isRunningStatus(detail.status)) {
-      ElMessage.info('交叉比对任务已在后台启动，切换页面不会中断执行')
+      ElMessage.info('交叉比对任务已在后台启动，切页不中断，完成后顶部将自动通知')
+      notificationStore.registerTrackedJob({
+        kind: 'similarity',
+        targetId: detail.id,
+        title: detail.title,
+        status: detail.status,
+        progress: detail.progress,
+        stageDetail: detail.stage_detail || '交叉比对分析中…',
+        routePath: '/similarity',
+      })
       schedulePoll(detail.id)
     } else {
-      ElMessage.success('多标书交叉比对分析完成')
+      notificationStore.notifyTaskTerminal({
+        kind: 'similarity',
+        targetId: detail.id,
+        title: detail.title,
+        summary: `最高净文本相似度 ${detail.max_similarity_pct}%（风险等级：${detail.risk_level}）`,
+        tone: detail.risk_level === 'high' ? 'warning' : 'success',
+        routePath: '/similarity',
+        dedupSuffix: `completed:${detail.created_at || ''}`,
+      })
     }
   } finally {
     comparing.value = false
@@ -206,6 +244,7 @@ async function handleCancelActive(): Promise<void> {
   cancelling.value = true
   try {
     await similarityApi.cancel(activeReport.value.id)
+    notificationStore.untrackJob('similarity', activeReport.value.id)
     stopPolling()
     await loadReportDetail(activeReport.value.id)
     const listRes = await similarityApi.list()

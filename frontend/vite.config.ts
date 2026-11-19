@@ -73,6 +73,9 @@ export default defineConfig({
           if (name === 'ElMessageBox') {
             return { name: 'ElMessageBox', from: 'element-plus/es/components/message-box/index' }
           }
+          if (name === 'ElNotification') {
+            return { name: 'ElNotification', from: 'element-plus/es/components/notification/index' }
+          }
           return undefined
         },
       ],

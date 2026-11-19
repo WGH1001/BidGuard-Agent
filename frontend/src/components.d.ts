@@ -13,6 +13,7 @@ declare module 'vue' {
   export interface GlobalComponents {
     CheckTaskList: typeof import('./components/CheckTaskList.vue')['default']
     ElAlert: typeof import('element-plus/es/components/alert/index')['ElAlert']
+    ElBadge: typeof import('element-plus/es/components/badge/index')['ElBadge']
     ElButton: typeof import('element-plus/es/components/button/index')['ElButton']
     ElCard: typeof import('element-plus/es/components/card/index')['ElCard']
     ElCheckbox: typeof import('element-plus/es/components/checkbox/index')['ElCheckbox']
@@ -29,6 +30,7 @@ declare module 'vue' {
     ElInputNumber: typeof import('element-plus/es/components/input-number/index')['ElInputNumber']
     ElOption: typeof import('element-plus/es/components/select/index')['ElOption']
     ElPagination: typeof import('element-plus/es/components/pagination/index')['ElPagination']
+    ElPopover: typeof import('element-plus/es/components/popover/index')['ElPopover']
     ElProgress: typeof import('element-plus/es/components/progress/index')['ElProgress']
     ElRadio: typeof import('element-plus/es/components/radio/index')['ElRadio']
     ElRadioButton: typeof import('element-plus/es/components/radio/index')['ElRadioButton']

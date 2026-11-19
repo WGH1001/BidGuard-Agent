@@ -678,6 +678,109 @@ def _extract_bid_letter_reference(text: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+_BID_LETTER_TOC_LINE_RE = re.compile(r'(?:\t\s*\d+\s*$|[\.·…]{3,}\s*\d+\s*$)')
+_BID_LETTER_HEADING_RE = re.compile(
+    r'^(?:[（(]?[一二三四五六七八九十\d]{1,2}[）)、.．\s]+)?投\s*标\s*函\s*$'
+)
+_BID_LETTER_STRONG_CLAUSE_RE = re.compile(
+    r'(?:所附投标价格表中规定的应提交和交付的|我(?:方|单位|公司)愿以|我(?:方|单位|公司))?'
+    r'[^。\n]{0,20}?'
+    r'投标(?:总)?(?:价|报价)\s*(?:为|是|[:：])\s*(?:人民币)?\s*[（(\s：:￥¥]*'
+    r'(?:'
+    r'([零壹贰叁肆伍陆柒捌玖拾佰仟万亿]{2,}(?:万元|万|元|圆)(?:整|正|[零壹贰叁肆伍陆柒捌玖拾佰仟万角分]*)?)'
+    r'[\s，,、；;（(：:￥¥]*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|万|元)?'
+    r'|'
+    r'([0-9][0-9,]*(?:\.[0-9]+)?)\s*(万元|万|元)'
+    r'(?:[^。\n]{0,30}?([零壹贰叁肆伍陆柒捌玖拾佰仟万亿]{2,}(?:万元|万|元|圆)(?:整|正)?))?'
+    r')'
+)
+
+
+def _extract_bid_letter_total(bid_text: str) -> dict[str, Any] | None:
+    """E44 §2.3：从投标文件《投标函》正文中确定性提取所填投标总价（严格排除预算/限价/保证金与目录行）。
+
+    Returns:
+        {'amount': '1400000.00', 'upper': '壹佰肆拾万' | None, 'quote': str} 或 None。
+    """
+    if not bid_text or not bid_text.strip():
+        return None
+
+    lines = bid_text.splitlines()
+    candidate_segments: list[str] = []
+
+    # 1. 收集明确位于《投标函》标题后的正文窗（最多 40 行），过滤目录行
+    in_letter = False
+    letter_buf: list[str] = []
+    for raw_ln in lines:
+        ln = raw_ln.strip()
+        if not ln:
+            continue
+        if _BID_LETTER_TOC_LINE_RE.search(raw_ln):
+            continue
+        if _BID_LETTER_HEADING_RE.match(ln):
+            if letter_buf:
+                candidate_segments.append('\n'.join(letter_buf))
+            in_letter = True
+            letter_buf = [ln]
+            continue
+        if in_letter:
+            letter_buf.append(ln)
+            if len(letter_buf) >= 40:
+                candidate_segments.append('\n'.join(letter_buf))
+                letter_buf = []
+                in_letter = False
+    if letter_buf:
+        candidate_segments.append('\n'.join(letter_buf))
+
+    # 2. 兜底：若投标函标题被表格/格式吞掉，仍允许命中强特征句 "所附投标价格表中规定的应提交和交付的投标总价"
+    for raw_ln in lines:
+        ln = raw_ln.strip()
+        if not ln or _BID_LETTER_TOC_LINE_RE.search(raw_ln):
+            continue
+        if '所附投标价格表中规定' in ln and '投标总价' in ln:
+            candidate_segments.append(ln)
+
+    extra_noise = _NON_BID_UPPER_KEYS + ('分包预算', '总预算', '预算为', '评标基准价', '投标人须知')
+
+    for seg in candidate_segments:
+        for seg_line in seg.splitlines():
+            clean_ln = seg_line.strip()
+            if not clean_ln:
+                continue
+            if any(nk in clean_ln for nk in extra_noise):
+                continue
+            m = _BID_LETTER_STRONG_CLAUSE_RE.search(clean_ln)
+            if not m:
+                continue
+            if m.group(2):
+                upper_raw = (m.group(1) or '').strip() or None
+                num_s = m.group(2).replace(',', '')
+                unit = (m.group(3) or '').strip()
+            else:
+                num_s = (m.group(4) or '').replace(',', '')
+                unit = (m.group(5) or '').strip()
+                upper_raw = (m.group(6) or '').strip() or None
+            if not num_s:
+                continue
+            try:
+                val = Decimal(num_s)
+            except InvalidOperation:
+                continue
+            if '万' in unit:
+                val = val * WAN
+            elif not unit and upper_raw and '万' in upper_raw and val < Decimal('1000'):
+                val = val * WAN
+            val = val.quantize(CENT, rounding=ROUND_HALF_UP)
+            if val <= Decimal('0'):
+                continue
+            return {
+                'amount': _fmt_yuan(val),
+                'upper': upper_raw,
+                'quote': clean_ln[:180],
+            }
+    return None
+
+
 def extract_price_cap(text: str, package_no: int | None = None) -> str | None:
     """从招标/投标文件全文中提取最高限价或采购预算（统一折算为元）。
 
@@ -2501,6 +2604,29 @@ def extract_price_data(
     if res['items'] or res['bid_total'] is not None:
         res['status'] = 'OK'
         res['reason'] = ''
+        # E44 §2.3：交叉比对正文《投标函》总价与《开标一览表》总价，拦截改价漏改《投标函》商务不一致
+        if res.get('bid_total') is not None:
+            letter_info = _extract_bid_letter_total(parsed.text)
+            if letter_info and letter_info.get('amount'):
+                try:
+                    d_letter = Decimal(str(letter_info['amount'])).quantize(CENT, rounding=ROUND_HALF_UP)
+                    d_bid = Decimal(str(res['bid_total'])).quantize(CENT, rounding=ROUND_HALF_UP)
+                    diff = abs(d_letter - d_bid).quantize(CENT, rounding=ROUND_HALF_UP)
+                    if diff > Decimal('0.00'):
+                        res['bid_letter_total'] = _fmt_yuan(d_letter)
+                        res['warnings'].append({
+                            'code': 'BID_LETTER_TOTAL_MISMATCH',
+                            'severity': 'warning',
+                            'message': (
+                                f"《投标函》填写的投标总价（{_fmt_yuan(d_letter)} 元）与《开标一览表》总价"
+                                f"（{_fmt_yuan(d_bid)} 元）不一致，相差 {_fmt_yuan(diff)} 元。"
+                                "依据《政府采购货物和服务招标投标管理办法》（财政部 87 号令）第 59 条，"
+                                "报价前后不一致通常以《开标一览表》为准，但封标前务必统一修正两处报价以防废标争议。"
+                            ),
+                            'anchor_text': letter_info.get('quote') or _fmt_yuan(d_letter),
+                        })
+                except InvalidOperation:
+                    pass
     else:
         res['status'] = 'NEED_MANUAL'
         ref_hint = ''
@@ -2556,7 +2682,7 @@ def _attach_f2_anchor_texts(extracted: dict) -> None:
             f['anchor_text'] = str(extracted['bid_total'])
         elif code == 'TOTAL_MISMATCH' and extracted.get('table_total'):
             f['anchor_text'] = str(extracted['table_total'])
-        elif code in ('AMBIGUOUS_BID_TOTAL', 'CROSS_TABLE_BID_WARNING', 'SUBTOTAL_SUMMARY_MISMATCH'):
+        elif code in ('AMBIGUOUS_BID_TOTAL', 'CROSS_TABLE_BID_WARNING', 'SUBTOTAL_SUMMARY_MISMATCH', 'BID_LETTER_TOTAL_MISMATCH'):
             m_amt = re.search(r'([0-9]+(?:\.[0-9]{2}))\s*元', str(f.get('message') or ''))
             if m_amt:
                 f['anchor_text'] = m_amt.group(1)

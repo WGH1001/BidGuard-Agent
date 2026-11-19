@@ -21,6 +21,7 @@ const form = reactive({
   api_key: '',
   model_flash: 'GLM-5.3-Flash',
   model_flagship: 'GLM-5.3-Flash',
+  model_embedding: '',
   supports_reasoning_effort: true,
   supports_vision: false,
 })
@@ -34,6 +35,7 @@ interface EndpointPreset {
   base_url: string
   model_flash: string
   model_flagship: string
+  model_embedding: string
   supports_reasoning_effort: boolean
   supports_vision?: boolean
 }
@@ -46,6 +48,7 @@ const PRESETS: EndpointPreset[] = [
     base_url: 'http://10.0.2.81:3000/v1',
     model_flash: 'GLM-5.3-Flash',
     model_flagship: 'GLM-5.3-Flash',
+    model_embedding: '',
     supports_reasoning_effort: true,
   },
   {
@@ -55,6 +58,7 @@ const PRESETS: EndpointPreset[] = [
     base_url: 'https://open.bigmodel.cn/api/paas/v4',
     model_flash: 'glm-5.3-flash',
     model_flagship: 'glm-5.3-flash',
+    model_embedding: 'embedding-3',
     supports_reasoning_effort: true,
   },
   {
@@ -64,6 +68,7 @@ const PRESETS: EndpointPreset[] = [
     base_url: 'https://api.deepseek.com',
     model_flash: 'deepseek-chat',
     model_flagship: 'deepseek-reasoner',
+    model_embedding: '',
     supports_reasoning_effort: false,
   },
   {
@@ -73,6 +78,7 @@ const PRESETS: EndpointPreset[] = [
     base_url: 'https://api.moonshot.cn/v1',
     model_flash: 'kimi-k3.1-pro-highspeed',
     model_flagship: 'kimi-k3.1-pro',
+    model_embedding: '',
     supports_reasoning_effort: false,
   },
   {
@@ -82,6 +88,7 @@ const PRESETS: EndpointPreset[] = [
     base_url: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
     model_flash: 'qwen3.8-flash',
     model_flagship: 'qwen3.8-max',
+    model_embedding: '',
     supports_reasoning_effort: false,
   },
   {
@@ -91,6 +98,7 @@ const PRESETS: EndpointPreset[] = [
     base_url: 'https://api.siliconflow.cn/v1',
     model_flash: 'deepseek-ai/DeepSeek-V4-Flash',
     model_flagship: 'deepseek-ai/DeepSeek-V4-Pro',
+    model_embedding: 'BAAI/bge-m3',
     supports_reasoning_effort: false,
   },
 ]
@@ -108,6 +116,7 @@ function applyPreset(p: EndpointPreset): void {
   form.base_url = p.base_url
   form.model_flash = p.model_flash
   form.model_flagship = p.model_flagship
+  form.model_embedding = p.model_embedding || ''
   form.supports_reasoning_effort = p.supports_reasoning_effort
   form.supports_vision = Boolean(p.supports_vision)
 }
@@ -125,6 +134,7 @@ async function fetchConfig(): Promise<void> {
       form.base_url = res.base_url
       form.model_flash = res.model_flash
       form.model_flagship = res.model_flagship || res.model_flash
+      form.model_embedding = (res.model_embedding || '').trim()
       form.supports_reasoning_effort = res.supports_reasoning_effort
       form.supports_vision = Boolean(res.supports_vision)
       const matched = PRESETS.find((p) => p.base_url === res.base_url)
@@ -151,6 +161,7 @@ async function handleSave(): Promise<void> {
       api_key: form.api_key.trim() || undefined,
       model_flash: form.model_flash.trim(),
       model_flagship: form.model_flagship.trim() || form.model_flash.trim(),
+      model_embedding: form.model_embedding.trim(),
       supports_reasoning_effort: form.supports_reasoning_effort,
       supports_vision: Boolean(form.supports_vision),
     })
@@ -158,6 +169,7 @@ async function handleSave(): Promise<void> {
     meta.api_key_last4 = res.api_key_last4
     meta.api_key_masked = res.api_key_masked
     meta.updated_at = res.updated_at
+    form.model_embedding = (res.model_embedding || '').trim()
     form.supports_vision = Boolean(res.supports_vision)
     form.api_key = ''
     ElMessage.success(`模型配置已加密保存（当前密钥尾号：${res.api_key_last4}）`)
@@ -178,13 +190,21 @@ async function handleTest(): Promise<void> {
       api_key: form.api_key.trim() || undefined,
       model_flash: form.model_flash.trim(),
       model_flagship: form.model_flagship.trim() || form.model_flash.trim(),
+      model_embedding: form.model_embedding.trim() || undefined,
       supports_reasoning_effort: form.supports_reasoning_effort,
       supports_vision: Boolean(form.supports_vision),
     })
     if (res.ok) {
-      ElMessage.success(res.message || `配置校验通过（${res.latency_ms ?? 0}ms）`)
+      const suffix = res.embedding_ok === true && res.embedding_message ? `；${res.embedding_message}` : ''
+      ElMessage.success(`${res.message || `配置校验通过（${res.latency_ms ?? 0}ms）`}${suffix}`)
+      if (res.embedding_ok === false && res.embedding_message) {
+        ElMessage.warning(res.embedding_message)
+      }
     } else {
       ElMessage.warning(res.message || `模型连通性异常（${res.latency_ms ?? 0}ms）`)
+      if (res.embedding_ok === false && res.embedding_message) {
+        ElMessage.warning(res.embedding_message)
+      }
     }
   } finally {
     testing.value = false
@@ -291,6 +311,17 @@ onMounted(() => {
           </el-form-item>
         </div>
 
+        <el-form-item label="向量精排模型 (model_embedding · 选填，用于 F4 / F7 / E42 混合精排 Rerank)">
+          <el-input
+            v-model.trim="form.model_embedding"
+            clearable
+            placeholder="留空自动使用 0-Token BM25；同网关支持 /v1/embeddings 时可填如 BAAI/bge-m3 或 embedding-3"
+          />
+          <div class="field-sub-tip">
+            共用上方同一组 Base URL 与 API Key（受内网锁与 E40 出口脱敏统一保护）；留空或上游不支持时自动静默降级为 0-Token BM25，绝不中断任务。
+          </div>
+        </el-form-item>
+
         <el-form-item label="推理预算参数支持 (supports_reasoning_effort)">
           <el-switch v-model="form.supports_reasoning_effort" />
           <span class="switch-tip">开启后向网关透传 reasoning_effort=low 加速结构化响应</span>
@@ -395,6 +426,13 @@ onMounted(() => {
   margin-left: 10px;
   font-size: 12px;
   color: var(--txt-muted);
+}
+
+.field-sub-tip {
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--txt-muted);
+  line-height: 1.5;
 }
 
 .ms-actions {

@@ -796,6 +796,7 @@ export interface ModelConfigUpsertRequest {
   api_key?: string
   model_flash: string
   model_flagship?: string
+  model_embedding?: string
   supports_reasoning_effort: boolean
   supports_vision?: boolean
 }
@@ -807,6 +808,7 @@ export interface ModelConfigOut {
   api_key_last4: string
   model_flash: string
   model_flagship: string
+  model_embedding?: string
   supports_reasoning_effort: boolean
   supports_vision?: boolean
   updated_at?: string | null
@@ -817,6 +819,8 @@ export interface ModelConfigTestOut {
   latency_ms?: number
   model: string
   message: string
+  embedding_ok?: boolean | null
+  embedding_message?: string | null
 }
 
 // ── 11. SSE 进度帧与通用格式化工具函数 ───────────────────────────────────

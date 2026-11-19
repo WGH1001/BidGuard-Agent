@@ -453,7 +453,7 @@ class CompositeKnowledgeSnippetProvider:
     ...
 ```
 
-### 1.16 E42 标书评分预估与提分诊断（`core/bid_scorer.py`）
+### 1.16 E42 / E44 标书评分预估与提分诊断（`core/bid_scorer.py`）
 
 ```python
 # core/bid_scorer.py —— 评分细则统一抽取 + 三分层质量预估（Decimal 钳位 + verify_quote 强制溯源）+ .docx 诊断报告导出
@@ -465,7 +465,8 @@ collect_scoring_criteria_items(
     tender_parsed_doc: Optional[Any] = None,
 ) -> dict[str, Any]
 # 统一整合 F1 scoring_tables（.docx 100 分表）、scoring_prose 与 PDF 评分片段（复用 bid_composer._extract_pdf_scoring_items(..., include_price=True)
-# 及括号型/三列尾分型 PDF 细则解析），输出 criteria 列表及 declared_total_max / items_sum / score_scale_warning（分值合计≠100 诚实告警，不篡改原文分值）
+# 及括号型/三列尾分型 PDF 细则解析）；E44 新增跨行/公式价格分补全（_extract_price_score_from_text）、大类汇总行防重计、
+# 脏前缀剥离（_clean_factor_title 将前导大类拆入 section 字段）与标题优先分类，输出 criteria 列表及 declared_total_max / items_sum / score_scale_warning
 
 estimate_bid_score(
     tender_path: str | Path,
@@ -482,11 +483,11 @@ estimate_bid_score(
     progress_cb: Optional[Callable[[int, str], None]] = None,
     cancel_check: Optional[Callable[[], None]] = None,
 ) -> dict[str, Any]
-# 三类评分项分层评估：
+# E44 解析 bid_path 默认启用 ocr_images=True（100% 复用 Stage 1.5 .media.ocr.json 缓存识别内嵌证照与合同扫描件）并提取 .docx 整表块（cell._tc 去重）：
 # ① price_formula：诚实标 status='pending_open_bid'、estimated_score=None（绝不捏造竞争对手开标报价基准）；
-# ② objective_deduction：结合 F3/F4 检出与本地检索按 Decimal 扣减（下限 0），模糊扣分规则诚实降级 status='need_llm'（status_reason='ambiguous_deduction_rule'）；
-# ③ subjective_quality：hybrid_retrieve_windows 取 Top-3 局部证据窗口送 client.chat（复用网关低温配置），输出强制经 Decimal [0, max_score] 钳位与
-#    verify_quote 原文连续子串核验（未过核验清空 quote='' 并标 quote_verified=False）；无模型或单条异常降级 status='need_llm'（'no_llm_client'|'llm_call_failed'）；
+# ② objective_deduction：结合 F3/F4 检出、正文表格与图片 OCR 段落按 Decimal 扣减（下限 0，E44 新增三体系/ISO9001/14001/45001/27001 同义词组），模糊扣分规则诚实降级 status='need_llm'；
+# ③ subjective_quality：_retrieve_verified_local_quotes 透传 client=client 至 hybrid_retrieve_windows 激活 L2 向量精排（无 embedding 配置静默回退 BM25），
+#    叠加目录页/投标函清单隔离 + 章表结构化证据聚合（句边界收口，单批证据上限 4200 字），输出强制经 Decimal [0, max_score] 钳位与 verify_quote 核验；
 # 汇总 veto_alerts（F2/F3/F4 + E43 source_module='BLIND_BID' 的 consequence='veto' 项）、top_priorities（Top-5 提分抓手）与固定免责声明 disclaimer
 
 export_score_estimate_docx(
@@ -515,7 +516,7 @@ export_score_estimate_docx(
 | 6 | `company_certificates` | 企业证照效期台账 | `tenant_id`、`cert_name`、`cert_no`、`valid_until`(Date)、`is_long_term`(Boolean, 默认 False)、`warn_days`(默认 30)、`remark`、`attachment_name`、`attachment_path`、`attachment_size` |
 | 7 | `qa_sessions` | F7 追问会话持久化 | `tenant_id`、`user_id`、`task_id`(可空 FK)、`title`、`tender_path`、`bid_path`、`messages_json`、`attachments_json` |
 | 8 | `audit_logs` | 安全审计留痕 | `tenant_id`、`user_id`、`action`、`target`、`detail_json`、`ip` |
-| 9 | `user_model_configs` | 用户级自定义模型配置 | `user_id`(唯一 FK)、`base_url`、`api_key_encrypted`、`model_flash`、`model_flagship`、`supports_reasoning_effort`(bool)、`supports_vision`(bool) |
+| 9 | `user_model_configs` | 用户级自定义模型配置 | `user_id`(唯一 FK)、`base_url`、`api_key_encrypted`、`model_flash`、`model_flagship`、`model_embedding`(可空，E44 复用主 URL/Key)、`supports_reasoning_effort`(bool)、`supports_vision`(bool) |
 | 10 | `regulation_laws` | E4 招投标法规主表 | `name`（唯一《...》全称）、`issuing_body`、`effective_date`、`source_url`、`article_count`、`content_hash`、`fetched_at`、`is_seed`(bool) |
 | 11 | `regulation_articles` | E4 法规条文表 | `law_id` FK(级联删除)、`article_no`("第X条")、`article_title`(可空)、`content`(Text)、`content_hash`、`UNIQUE(law_id, article_no)` |
 | 12 | `similarity_reports` | E36/E38 多标书交叉比对报告 | `tenant_id`、`user_id`、`title`、`status`、`progress`、`stage_detail`、`error_msg`、`tender_filename`、`tender_path`、`bidders_json`、`pair_matrix_json`、`findings_json`、`ai_review_json`、`max_similarity_pct`(Numeric 5,2)、`risk_level`(low/medium/high)、`started_at`、`finished_at` |
@@ -542,6 +543,7 @@ export_score_estimate_docx(
 - E41 双业务线专精 Skills 与常见指标标准应答库：`backend/models.py` 为 `composer_skills` 新增 `biz_line`（`general|security|maas`）及老库 `ensure_composer_skills_columns` 加列迁移；`backend/routers/composer.py` `ensure_builtin_composer_skills` 幂等为存量租户补种「网络安全与数据安全专精版」与「并行MaaS算力服务专精版」、新增 `GET /api/composer/indicators`（`BizLineIndicatorOverviewOut`）透出指标库与典型评分标准参考，并于 `POST /api/composer/generate` 新增 `use_indicator_library: bool = Form(default=False)`（开关开启或 `Skill.biz_line != 'general'` 时构造 `IndicatorLibraryProvider` 并与 V2 方案库叠加，在 `skeleton_v1` 与 `knowledge_draft_v2` 双模式均可注入）；
 - E43 暗标信号识别与暗标防废标双模式：`backend/schemas.py` 新增 `BlindBidRequirementItemOut`/`BlindBidInfoOut` 并扩展 `ExtractChecklistOut.blind_bid_info`、`ComposeDraftSummaryOut.blind_bid_mode`；`backend/routers/extract.py` 无/有模型两路均透出 `blind_bid_info`；`backend/worker.py::_run_pipeline` Stage 3 接入 `scan_blind_bid_compliance` 并以 `source_module='BLIND_BID'` 入库 `BidFinding`（并在 `stats_payload` 记录 `is_blind_bid`/`blind_toc_forbidden`/`blind_bid_finding_count`）；`backend/routers/composer.py::generate_composed_draft` 新增 `blind_bid_mode: bool = Form(default=False)`、`blind_rules_json: Optional[str] = Form(default=None)`、`blind_custom_words_json: Optional[str] = Form(default=None)`（审计日志仅记开关/规则键与屏蔽词数量，严禁写明文屏蔽词）；
 - E42 标书评分预估与提分建议：`backend/models.py` 为 `BidCheckTask` 新增 `score_estimate_json` 列与老库平滑加列守卫 `ensure_bid_check_tasks_e42_columns`（保持 14 张表不变），更新 `BidFinding.source_module` 行注释补入 `'BLIND_BID'`；`backend/schemas.py` 新增 `ScoreEvidenceQuoteOut`/`ScoreVetoAlertOut`/`ScoreCriterionItemOut`/`ScorePriorityItemOut`/`ScoreEstimateOut` 并扩展 `BidTaskOut.score_estimate_json`；`backend/routers/checks.py` 新增 `POST /api/checks/{task_id}/score-estimate`（支持 `async_run` 复用 `worker.submit_background_job(f"score:{task_id}", ...)`、拦截主任务运行中 `409 CHECK_TASK_RUNNING` 与重复评估 `409 SCORE_ESTIMATE_RUNNING`）、`GET /api/checks/{task_id}/score-estimate`（对进程重启遗留 `queued/running` 且不在 `worker._in_flight` 的快照自动懒收敛置 `'failed'`）与 `GET /api/checks/{task_id}/score-estimate/export`（未完成返回 `404 SCORE_ESTIMATE_NOT_FOUND`，记 `export_score_estimate` 审计；删除任务时级联清理 `output/score/{task_id}_*`）；
+- E44 E42 评分精度精修、Rerank 向量通道与跨页任务通知：`backend/models.py` 为 `UserModelConfig` 新增 `model_embedding = Column(String(128), nullable=True)` 及老库平滑迁移 `ensure_user_model_configs_e44_columns`（保持 14 表不变，方案 A 同源复用主 `Base URL`/`API Key` 与 E40 内网/脱敏边界）；`backend/schemas.py` 扩展 `ModelConfigUpsertRequest`/`ModelConfigOut` 的 `model_embedding` 与 `ModelConfigTestOut` 的 `embedding_ok`/`embedding_message`；`backend/routers/model_config.py` 持久化 `model_embedding` 并在 `POST /api/model-config/test` 增加非阻断 `client.embed(['ping'])` 探活（失败不阻塞 Chat 主连通 `ok`）；`backend/worker.py::resolve_effective_llm_client` 注入 `model_embedding` 激活 F4/F7/E42 L2 混合检索精排；`core/price_extractor.py` 新增 `_extract_bid_letter_total` 并在《投标函》总价与《开标一览表》`bid_total` 不一致时输出 `BID_LETTER_TOTAL_MISMATCH`（`warning`）；
 - 其余鉴权、多租户隔离、SSE 进度流、文件存储布局与统一错误格式约定保持不变。
 
 ---
@@ -584,3 +586,4 @@ export_score_estimate_docx(
 | 2026-11-18 | E41 双业务线专精 Skills 与常见指标标准应答库卡：新增 `core/indicator_library.py`（`common/security/maas` 三层指标架构 + `IndicatorLibraryProvider` 0-Token BM25/同义词三级门控与跨线隔离 + `CompositeKnowledgeSnippetProvider` + `get_biz_line_indicator_overview` 评分参考输出 + `_BID_MONEY_RE` 禁具体报价硬锁）；新增 `data/rules/indicator_library/{common,security,maas}_indicators.json` 与只产出草稿的 `scripts/build_indicator_library.py`；`core/composer_skills.py` 扩至 5 套内置预设并支持 `biz_line`；`core/bid_composer.py` 放行显式 `knowledge_provider` 于非 V2 模式生效、透传 `scoring_ref`/`notice`；`backend/models.py` 扩展 `composer_skills.biz_line` 与 `ensure_composer_skills_columns`；`backend/routers/composer.py` + `schemas.py` 幂等补种存量租户新 Skill、新增 `GET /api/composer/indicators`、扩展 `POST /api/composer/generate` `use_indicator_library` 接线；前端 `types.ts`、`index.ts`、`BidComposerView.vue` 完成业务线徽标、指标开关与典型评分标准预览卡片（零新增 Element Plus 组件） | 实现 + 验收 |
 | 2026-11-18 | E43 暗标信号识别与暗标防废标双模式卡：`core/tender_extractor.py` 新增 `extract_blind_bid_requirements` 并挂入 `build_review_checklist['blind_bid_info']`；`core/qualification_scanner.py` 新增 `scan_blind_bid_compliance`（`source_module='BLIND_BID'`，全图禁令判 `veto`、仅禁 Logo 诚实降级 `BLIND_BID_NEED_MANUAL`，含 OOXML `w:shd`/粗斜体/`TOC` 检查）；`core/bid_composer.py` 为 `compose_bid_blueprint`/`export_composed_bid_docx` 新增 `blind_bid_mode`/`blind_rules`/`blind_custom_words`/`bidder_hints`、保守 `_apply_blind_bid_sanitization` 及 `_strip_docx_ooxml_special_styles` 素颜渲染（清零页眉页脚/底纹/粗斜体/`TOC`/扫描图片）；`backend/schemas.py`/`extract.py`/`worker.py`/`composer.py` 贯通暗标检测入库与脱敏审计；前端 `types.ts`/`index.ts`/`ExtractView.vue`/`BidComposerView.vue` 完成暗标红线警告一键跳转与 6 项屏蔽规则+自定义词工作台（零新增 Element Plus 组件） | 实现 + 验收 |
 | 2026-11-18 | E42 标书评分预估与提分建议卡：`core/bid_composer.py` 为 `_extract_pdf_scoring_items` 新增 `include_price: bool = False` 开关；新增 `core/bid_scorer.py`（`collect_scoring_criteria_items` 统一 `.docx`/`.pdf` 表格与段落评分细则并输出 `score_scale_warning`、`estimate_bid_score` 三分层质量预估 + `Decimal` 钳位 + `verify_quote` 强制溯源 + `veto_alerts` 聚合 F2/F3/F4/E43 `BLIND_BID_*` + `top_priorities` Top-5 提分抓手、`export_score_estimate_docx` 封面与页眉双重免责声明）；`backend/models.py` 为 `BidCheckTask` 新增 `score_estimate_json` 与 `ensure_bid_check_tasks_e42_columns`（14 表不变）；`backend/schemas.py` + `backend/routers/checks.py` 新增 `POST/GET /api/checks/{task_id}/score-estimate`（含 `409 CHECK_TASK_RUNNING`/`SCORE_ESTIMATE_RUNNING` 与重启遗留态懒收敛）与 `GET /api/checks/{task_id}/score-estimate/export`；前端 `types.ts`/`index.ts`/`CheckDetailView.vue` 新增评分预估与提分诊断面板（常驻免责声明横幅，零新增 Element Plus 组件） | 实现 + 验收 |
+| 2026-11-19 | E44 E42 评分精度精修、Rerank 向量通道与跨页任务通知卡：`core/bid_scorer.py` 补全 PDF 跨行/公式价格分抽取、剥离脏前缀并拆分 `section`、修复标题优先分类、启用 `ocr_images=True` 复用 `.media.ocr.json` 识别 ISO9001 等证照扫描件、新增目录页/投标函清单隔离与 `.docx` 整表（`cell._tc` 去重）章表结构化聚合，并向 `hybrid_retrieve_windows` 透传 `client=client` 激活 L2 精排；`core/price_extractor.py` 新增 `_extract_bid_letter_total` 输出 `BID_LETTER_TOTAL_MISMATCH`（`warning`）；`backend/models.py`/`schemas.py`/`routers/model_config.py`/`worker.py` 新增 `user_model_configs.model_embedding`（14 表不变，方案 A 复用主 URL/Key 与非阻断 `/test` `embedding_ok` 探活）并在 `config/models.yaml` `prod.models` 追加注释占位；前端新增 `stores/notifications.ts`、`App.vue` 顶栏 `<el-popover>`/`<el-badge>` 通知中心与 `ElNotification` 跨页提醒（接线五大耗时任务）及 `ModelSettingsView.vue` 向量精排模型配置（`components.d.ts` 仅增 `ElBadge`/`ElPopover`） | 实现 + 验收 |

@@ -12,7 +12,11 @@ from sqlalchemy.orm import Session
 
 from backend.auth import AuthUser, get_current_user, record_audit
 from backend.database import get_db
-from backend.models import UserModelConfig, ensure_user_model_configs_columns
+from backend.models import (
+    UserModelConfig,
+    ensure_user_model_configs_columns,
+    ensure_user_model_configs_e44_columns,
+)
 from backend.schemas import (
     ModelConfigOut,
     ModelConfigTestOut,
@@ -86,6 +90,7 @@ def _row_to_out(row: Optional[UserModelConfig]) -> ModelConfigOut:
         api_key_last4=last4,
         model_flash=row.model_flash or '',
         model_flagship=row.model_flagship or row.model_flash or '',
+        model_embedding=str(getattr(row, 'model_embedding', None) or '').strip(),
         supports_reasoning_effort=bool(row.supports_reasoning_effort),
         supports_vision=bool(getattr(row, 'supports_vision', False)),
         updated_at=row.updated_at.isoformat() if row.updated_at else None,
@@ -190,6 +195,7 @@ def get_my_model_config(
 ) -> ModelConfigOut:
     """获取当前登录用户的模型配置（仅回显 configured: true 与尾四位，绝不返回明文 Key）。"""
     ensure_user_model_configs_columns(db.get_bind())
+    ensure_user_model_configs_e44_columns(db.get_bind())
     uid = current_user.get('id')
     if uid is None:
         return ModelConfigOut(configured=False)
@@ -207,10 +213,12 @@ def save_my_model_config(
 ) -> ModelConfigOut:
     """保存或更新当前用户的模型配置（经 backend/utils/crypto.py 加密落库）。"""
     ensure_user_model_configs_columns(db.get_bind())
+    ensure_user_model_configs_e44_columns(db.get_bind())
     uid = int(current_user.id)
     base_url = _validate_base_url(body.base_url)
     flash = body.model_flash.strip()
     flagship = (body.model_flagship or '').strip() or flash
+    embedding = (body.model_embedding or '').strip() or None
     raw_key = (body.api_key or '').strip()
 
     row = db.query(UserModelConfig).filter_by(user_id=uid).first()
@@ -231,6 +239,7 @@ def save_my_model_config(
             api_key_encrypted=cipher,
             model_flash=flash,
             model_flagship=flagship,
+            model_embedding=embedding,
             supports_reasoning_effort=bool(body.supports_reasoning_effort),
             supports_vision=bool(body.supports_vision),
         )
@@ -240,6 +249,7 @@ def save_my_model_config(
         row.api_key_encrypted = cipher
         row.model_flash = flash
         row.model_flagship = flagship
+        row.model_embedding = embedding
         row.supports_reasoning_effort = bool(body.supports_reasoning_effort)
         row.supports_vision = bool(body.supports_vision)
 
@@ -252,7 +262,11 @@ def save_my_model_config(
         tenant_id=current_user.tenant_id,
         user_id=uid,
         target=f"user:{current_user.username}",
-        detail_json={'base_url': base_url, 'model_flash': flash},
+        detail_json={
+            'base_url': base_url,
+            'model_flash': flash,
+            'model_embedding': embedding or '',
+        },
     )
     return _row_to_out(row)
 
@@ -287,10 +301,12 @@ def test_model_config_connection(
 ) -> ModelConfigTestOut:
     """两段式验证模型配置连通性并统计毫秒延迟（优先 GET /models 验鉴权与模型名；若 404/405 则回退最小 chat 请求）。"""
     ensure_user_model_configs_columns(db.get_bind())
+    ensure_user_model_configs_e44_columns(db.get_bind())
     uid = int(current_user.id)
     base_url = _validate_base_url(body.base_url)
     flash = body.model_flash.strip()
     flagship = (body.model_flagship or '').strip() or flash
+    embedding = (body.model_embedding or '').strip() or None
     raw_key = (body.api_key or '').strip()
 
     if not raw_key:
@@ -310,6 +326,8 @@ def test_model_config_connection(
     if flagship and flagship != flash:
         target_models.append(flagship)
 
+    embedding_ok: Optional[bool] = None
+    embedding_message: Optional[str] = None
     t0 = time.perf_counter()
     try:
         client = build_client_from_user_config(
@@ -317,6 +335,7 @@ def test_model_config_connection(
             api_key=raw_key,
             model_flash=flash,
             model_flagship=flagship,
+            model_embedding=embedding,
             supports_reasoning_effort=bool(body.supports_reasoning_effort),
             supports_vision=bool(body.supports_vision),
         )
@@ -352,6 +371,25 @@ def test_model_config_connection(
             latency_ms = int(round((time.perf_counter() - t0) * 1000))
             model_matched = True
             message = f"鉴权通过（{latency_ms}ms，模型：{flash}）"
+
+        # E44 §2.2：若填写了可选向量模型，追加非阻断轻量 embed(['ping']) 探活（失败仅告警降级 L1 BM25，不连坐 Chat）
+        if embedding:
+            try:
+                vecs = client.embed(['ping'])
+                dim = len(vecs[0]) if (vecs and isinstance(vecs[0], (list, tuple))) else 0
+                if dim > 0:
+                    embedding_ok = True
+                    embedding_message = f"向量模型 {embedding} 可用（维度 {dim}），已就绪激活 L2 混合精排 Rerank"
+                else:
+                    embedding_ok = False
+                    embedding_message = f"向量模型 {embedding} 返回空向量，检索将自动降级为 0-Token BM25"
+            except Exception as emb_exc:
+                safe_emb_err = _scrub_secret(str(emb_exc), raw_key)
+                embedding_ok = False
+                embedding_message = (
+                    f"向量模型 {embedding} 探活未通过（{safe_emb_err[:120]}）；"
+                    "不影响对话模型保存，检索将自动静默降级为 0-Token BM25"
+                )
     except Exception as exc:
         safe_err = _scrub_secret(str(exc), raw_key)
         record_audit(
@@ -376,7 +414,9 @@ def test_model_config_connection(
         detail_json={
             'base_url': base_url,
             'model_flash': flash,
+            'model_embedding': embedding or '',
             'ok': model_matched,
+            'embedding_ok': embedding_ok,
             'latency_ms': latency_ms,
         },
     )
@@ -385,4 +425,6 @@ def test_model_config_connection(
         latency_ms=latency_ms,
         model=flash,
         message=message,
+        embedding_ok=embedding_ok,
+        embedding_message=embedding_message,
     )

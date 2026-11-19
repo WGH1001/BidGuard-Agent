@@ -614,6 +614,7 @@ class ModelConfigUpsertRequest(BaseModel):
     api_key: Optional[str] = Field(default=None, max_length=512)
     model_flash: str = Field(min_length=1, max_length=128)
     model_flagship: Optional[str] = Field(default=None, max_length=128)
+    model_embedding: Optional[str] = Field(default=None, max_length=128)
     supports_reasoning_effort: bool = False
     supports_vision: bool = False
 
@@ -625,6 +626,7 @@ class ModelConfigOut(BaseModel):
     api_key_last4: str = ''
     model_flash: str = ''
     model_flagship: str = ''
+    model_embedding: str = ''
     supports_reasoning_effort: bool = False
     supports_vision: bool = False
     updated_at: Optional[str] = None
@@ -635,6 +637,8 @@ class ModelConfigTestOut(BaseModel):
     latency_ms: int = 0
     model: str
     message: str
+    embedding_ok: Optional[bool] = None
+    embedding_message: Optional[str] = None
 
 
 # ── 11. /api/similarity 契约（E36 多标书交叉比对）─────────────────────────

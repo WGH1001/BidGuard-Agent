@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { SSEProgressFrame } from '@/api/types'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { checksApi, reportsApi } from '@/api'
@@ -14,6 +14,7 @@ import type {
   ScoreEstimateOut,
 } from '@/api/types'
 import { useAppStore } from '@/stores/app'
+import { useNotificationStore } from '@/stores/notifications'
 
 import CheckTaskList from '@/components/CheckTaskList.vue'
 import SseProgress from '@/components/SseProgress.vue'
@@ -50,7 +51,9 @@ interface StageDurationItem {
 }
 
 const router = useRouter()
+const route = useRoute()
 const appStore = useAppStore()
+const notificationStore = useNotificationStore()
 
 const listLoading = ref(false)
 const detailLoading = ref(false)
@@ -276,8 +279,11 @@ async function loadTaskList(selectFirst = false): Promise<void> {
     total.value = res.total || 0
 
     if (selectFirst && tasks.value.length > 0 && !currentTask.value) {
+      const qTaskId = Number(route.query.task_id || 0)
       const preferred =
-        tasks.value.find((t) => t.id === appStore.activeTaskId) || tasks.value[0]
+        (qTaskId > 0 ? tasks.value.find((t) => t.id === qTaskId) : undefined) ||
+        tasks.value.find((t) => t.id === appStore.activeTaskId) ||
+        tasks.value[0]
       if (preferred) {
         await selectTask(preferred)
       }
@@ -322,10 +328,30 @@ function scheduleScorePoll(taskId: number): void {
       scoreEstimate.value = snap
       if (!['queued', 'running'].includes(snap.status)) {
         stopScorePoll()
+        const taskTitle = currentTask.value?.title || `任务 #${taskId}`
         if (snap.status === 'completed') {
-          ElMessage.success('标书评分预估与提分诊断已完成')
+          const vetoTxt = snap.has_veto_risk ? `（含 ${snap.veto_alerts.length} 项一票否决警示）` : ''
+          notificationStore.notifyTaskTerminal({
+            kind: 'score',
+            targetId: taskId,
+            title: taskTitle,
+            summary: `非价格项预估 ${snap.assessed_estimated_score}/${snap.assessed_max_score} 分${vetoTxt}`,
+            tone: snap.has_veto_risk ? 'warning' : 'success',
+            routePath: '/checks',
+            routeQuery: { task_id: String(taskId) },
+            dedupSuffix: `completed:${snap.updated_at || ''}`,
+          })
         } else if (snap.status === 'failed' && snap.error_msg) {
-          ElMessage.warning(snap.error_msg)
+          notificationStore.notifyTaskTerminal({
+            kind: 'score',
+            targetId: taskId,
+            title: taskTitle,
+            summary: snap.error_msg,
+            tone: 'error',
+            routePath: '/checks',
+            routeQuery: { task_id: String(taskId) },
+            dedupSuffix: `failed:${snap.updated_at || ''}`,
+          })
         }
       }
     } catch {
@@ -357,10 +383,29 @@ async function handleRunScoreEstimate(): Promise<void> {
     const res = await checksApi.runScoreEstimate(currentTask.value.id, true)
     scoreEstimate.value = res
     if (['queued', 'running'].includes(res.status)) {
-      ElMessage.info('标书评分预估已在后台启动，正在实时刷新进度…')
+      ElMessage.info('标书评分预估已在后台启动，切页不中断，完成后顶部将自动提醒')
+      notificationStore.registerTrackedJob({
+        kind: 'score',
+        targetId: currentTask.value.id,
+        title: currentTask.value.title,
+        status: res.status,
+        progress: res.progress,
+        stageDetail: res.stage_detail || '评分预估中…',
+        routePath: '/checks',
+        routeQuery: { task_id: String(currentTask.value.id) },
+      })
       scheduleScorePoll(currentTask.value.id)
     } else if (res.status === 'completed') {
-      ElMessage.success('标书评分预估与提分诊断已完成')
+      notificationStore.notifyTaskTerminal({
+        kind: 'score',
+        targetId: currentTask.value.id,
+        title: currentTask.value.title,
+        summary: `非价格项预估 ${res.assessed_estimated_score}/${res.assessed_max_score} 分`,
+        tone: res.has_veto_risk ? 'warning' : 'success',
+        routePath: '/checks',
+        routeQuery: { task_id: String(currentTask.value.id) },
+        dedupSuffix: `completed:${res.updated_at || ''}`,
+      })
     }
   } finally {
     triggeringScore.value = false
@@ -431,7 +476,16 @@ async function handleTriggerRun(): Promise<void> {
     const res = await checksApi.run(currentTask.value.id, false)
     currentTask.value.status = res.status
     sseRef.value?.startStream()
-    ElMessage.info('已启动防废标核验流水线，正在实时接收 SSE 进度')
+    notificationStore.registerTrackedJob({
+      kind: 'check',
+      targetId: currentTask.value.id,
+      title: currentTask.value.title,
+      status: res.status,
+      stageDetail: '防废标核验流水线运行中…',
+      routePath: '/checks',
+      routeQuery: { task_id: String(currentTask.value.id) },
+    })
+    ElMessage.info('已启动防废标核验流水线，切页不中断，完成后顶部将自动通知')
   } finally {
     runningTrigger.value = false
   }
@@ -449,13 +503,42 @@ async function handleSseDone(_stats?: BidTaskStats): Promise<void> {
   if (!currentTask.value) return
   await selectTask(currentTask.value)
   await loadTaskList(false)
-  ElMessage.success('封标前防废标核验已完成，已加载全量风险明细')
+  const t = currentTask.value
+  const errCnt = Number(t.stats_json?.error_count || 0)
+  const warnCnt = Number(t.stats_json?.warning_count || 0)
+  const needManual = t.stats_json?.price_status === 'NEED_MANUAL' || t.status === 'need_manual'
+  const summaryParts = [
+    errCnt > 0 ? `检出 ${errCnt} 项高危/否决风险` : '未发现高危否决风险',
+    warnCnt > 0 ? `${warnCnt} 项警告` : '',
+    needManual ? '报价需人工回填' : '',
+  ].filter(Boolean)
+  notificationStore.notifyTaskTerminal({
+    kind: 'check',
+    targetId: t.id,
+    title: t.title,
+    summary: summaryParts.join('，'),
+    tone: needManual || errCnt > 0 ? 'warning' : 'success',
+    routePath: '/checks',
+    routeQuery: { task_id: String(t.id) },
+    dedupSuffix: `done:${t.updated_at || ''}`,
+  })
 }
 
 async function handleSseError(): Promise<void> {
   if (!currentTask.value) return
   await selectTask(currentTask.value)
   await loadTaskList(false)
+  const t = currentTask.value
+  notificationStore.notifyTaskTerminal({
+    kind: 'check',
+    targetId: t.id,
+    title: t.title,
+    summary: t.error_msg || '防废标核验流水线执行失败',
+    tone: 'error',
+    routePath: '/checks',
+    routeQuery: { task_id: String(t.id) },
+    dedupSuffix: `failed:${t.updated_at || ''}`,
+  })
 }
 
 function handleFindingUpdated(updated: BidFindingOut): void {
@@ -531,6 +614,8 @@ async function handleDeleteTask(task: BidTaskOut): Promise<void> {
   }
 
   await checksApi.remove(task.id)
+  notificationStore.untrackJob('check', task.id)
+  notificationStore.untrackJob('score', task.id)
   ElMessage.success(`体检任务 #${task.id} 已删除`)
 
   if (currentTask.value?.id === task.id) {
@@ -563,6 +648,7 @@ async function handleCancelTask(task: BidTaskOut): Promise<void> {
   cancellingTask.value = true
   try {
     await checksApi.cancel(task.id)
+    notificationStore.untrackJob('check', task.id)
     if (currentTask.value?.id === task.id) {
       sseRef.value?.closeActiveStream()
     }
@@ -626,6 +712,26 @@ async function commitRenameDetailTask(): Promise<void> {
   }
   await handleRenameTask(task, nextTitle)
 }
+
+watch(
+  () => route.query.task_id,
+  (rawId) => {
+    const targetId = Number(rawId || 0)
+    if (targetId > 0 && currentTask.value?.id !== targetId) {
+      const hit = tasks.value.find((t) => t.id === targetId)
+      if (hit) {
+        void selectTask(hit)
+      } else {
+        void checksApi.detail(targetId).then((d) => {
+          currentTask.value = d.task
+          findings.value = d.findings || []
+          appStore.setActiveTaskId(d.task.id)
+          void loadScoreEstimate(d.task.id)
+        }).catch(() => undefined)
+      }
+    }
+  },
+)
 
 onMounted(() => {
   detailTickTimer = setInterval(() => {

@@ -280,6 +280,7 @@ class UserModelConfig(Base):
     api_key_encrypted = Column(Text, nullable=False)
     model_flash = Column(String(128), nullable=False)
     model_flagship = Column(String(128), nullable=True)
+    model_embedding = Column(String(128), nullable=True)  # E44：可选向量精排模型（留空静默降级 L1 BM25）
     supports_reasoning_effort = Column(Boolean, nullable=False, default=False)
     supports_vision = Column(Boolean, nullable=False, default=False)  # E24：是否支持原生 VLM 视觉传图
     created_at = Column(DateTime, nullable=False, default=_utc_now)
@@ -561,6 +562,21 @@ _E42_TASK_NEW_COLS = (
 )
 
 
+_E44_MODEL_CONFIG_NEW_COLS = (
+    ('model_embedding', 'VARCHAR(128)', 'VARCHAR(128)'),
+)
+
+
+def ensure_user_model_configs_e44_columns(bind_or_conn: Any, *, auto_commit: bool = True) -> list[str]:
+    """E44 §2.2：老库 user_model_configs 表平滑补齐 model_embedding 可选向量模型列。"""
+    return _ensure_table_columns_generic(
+        bind_or_conn,
+        'user_model_configs',
+        _E44_MODEL_CONFIG_NEW_COLS,
+        auto_commit=auto_commit,
+    )
+
+
 def ensure_bid_check_tasks_e42_columns(bind_or_conn: Any, *, auto_commit: bool = True) -> list[str]:
     """E42 §2.2：老库 bid_check_tasks 表平滑补齐 score_estimate_json 列。"""
     return _ensure_table_columns_generic(
@@ -608,6 +624,7 @@ def _auto_migrate_bid_check_tasks_after_create(target, connection, **kwargs):
     ensure_bid_check_tasks_e42_columns(connection, auto_commit=False)
     ensure_qa_sessions_columns(connection, auto_commit=False)
     ensure_user_model_configs_columns(connection, auto_commit=False)
+    ensure_user_model_configs_e44_columns(connection, auto_commit=False)
     ensure_company_certificates_columns(connection, auto_commit=False)
     ensure_company_certificates_e35_columns(connection, auto_commit=False)
     ensure_similarity_reports_columns(connection, auto_commit=False)
@@ -645,6 +662,8 @@ def apply_sqlite_pragmas(engine: Any) -> None:
             mc_cols = {row[1] for row in cursor.fetchall()}
             if mc_cols and 'supports_vision' not in mc_cols:
                 cursor.execute("ALTER TABLE user_model_configs ADD COLUMN supports_vision BOOLEAN NOT NULL DEFAULT 0")
+            if mc_cols and 'model_embedding' not in mc_cols:
+                cursor.execute("ALTER TABLE user_model_configs ADD COLUMN model_embedding VARCHAR(128)")
             # E25 / E35：同步探测补齐 company_certificates 的附件列与 is_long_term
             cursor.execute("PRAGMA table_info(company_certificates)")
             cc_cols = {row[1] for row in cursor.fetchall()}

@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { checksApi, composerApi, reportsApi, validateUploadFile } from '@/api'
+import { useNotificationStore } from '@/stores/notifications'
 import type {
   BidFindingOut,
   BidTaskOut,
@@ -24,6 +25,7 @@ import type {
 defineOptions({ name: 'BidComposerView' })
 
 const route = useRoute()
+const notificationStore = useNotificationStore()
 const mainTab = ref<'compose' | 'clean'>('compose')
 
 // ── Skills 状态与 GitHub/Gitee/本地导入弹窗 ───────────────────────────────
@@ -206,7 +208,25 @@ function scheduleDraftPoll(draftId: number): void {
       if (isRunningStatus(detail.status)) {
         scheduleDraftPoll(draftId)
       } else if (detail.status === 'completed') {
-        ElMessage.success(`标书初稿生成完成：${detail.title}`)
+        notificationStore.notifyTaskTerminal({
+          kind: 'composer',
+          targetId: detail.id,
+          title: detail.title,
+          summary: '投标文件初稿已生成，可前往预览并下载 .docx',
+          tone: 'success',
+          routePath: '/composer',
+          dedupSuffix: `completed:${detail.created_at || ''}`,
+        })
+      } else if (detail.status === 'failed') {
+        notificationStore.notifyTaskTerminal({
+          kind: 'composer',
+          targetId: detail.id,
+          title: detail.title,
+          summary: detail.error_msg || '标书初稿生成失败',
+          tone: 'error',
+          routePath: '/composer',
+          dedupSuffix: `failed:${detail.created_at || ''}`,
+        })
       }
     } catch {
       stopDraftPoll()
@@ -453,10 +473,27 @@ async function handleGenerateDraft(): Promise<void> {
     const listRes = await composerApi.listDrafts()
     draftList.value = listRes.items || []
     if (isRunningStatus(detail.status)) {
-      ElMessage.info('标书编制任务已在后台启动，切换其他页面不会中断')
+      ElMessage.info('标书编制任务已在后台启动，切页不中断，完成后顶部将自动通知')
+      notificationStore.registerTrackedJob({
+        kind: 'composer',
+        targetId: detail.id,
+        title: detail.title,
+        status: detail.status,
+        progress: detail.progress,
+        stageDetail: detail.stage_detail || '标书编制中…',
+        routePath: '/composer',
+      })
       scheduleDraftPoll(detail.id)
     } else {
-      ElMessage.success('标书初稿生成完成')
+      notificationStore.notifyTaskTerminal({
+        kind: 'composer',
+        targetId: detail.id,
+        title: detail.title,
+        summary: '投标文件初稿已生成，可前往预览并下载 .docx',
+        tone: 'success',
+        routePath: '/composer',
+        dedupSuffix: `completed:${detail.created_at || ''}`,
+      })
     }
   } finally {
     generating.value = false
@@ -468,6 +505,7 @@ async function handleCancelDraft(): Promise<void> {
   cancellingDraft.value = true
   try {
     await composerApi.cancelDraft(activeDraft.value.id)
+    notificationStore.untrackJob('composer', activeDraft.value.id)
     stopDraftPoll()
     await openDraftDetail(activeDraft.value.id)
     const listRes = await composerApi.listDrafts()

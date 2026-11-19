@@ -33,6 +33,7 @@ envs:
     models:
       flagship: GLM-5.3-Flash
       flash: GLM-5.3-Flash
+      # embedding: <可选：待公司内网网关上架向量模型后填入模型名，即可自动激活 L2 混合检索精排>
       supports_vision: false         # E24：是否开启原生 VLM 传图（切换至 glm-4v / qwen-vl 等多模态模型时可置 true）
     chat_options:
       reasoning_effort: low

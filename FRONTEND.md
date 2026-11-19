@@ -59,7 +59,7 @@
 | | `GET /api/reports/audit-logs/export`（admin） | 导出 UTF-8 BOM CSV 审计日志（带公式注入转义） |
 | 交叉比对 (E36/E38) | `POST /api/similarity/compare`、`POST /api/similarity/{id}/cancel`、`GET /api/similarity`、`GET /api/similarity/{id}`、`GET /api/similarity/{id}/export`、`DELETE /api/similarity/{id}` | 多标书五维查重对比（**仅卡 `>=2` 份、解除 6 份上限**）、可选 `enable_ai_review` 语义同构复核与 `async_run` 后台异步队列、中断取消、分析报告（含第五章 AI 综述）导出与级联清理 |
 | 编制输出 (E37/E38/E41/E43) | `GET/POST /api/composer/skills`、`PUT/DELETE /api/composer/skills/{id}`、`POST /api/composer/skills/preview-url\|import-url\|import-file`、`GET /api/composer/indicators?biz_line=`、`POST /api/composer/generate`、`POST /api/composer/drafts/{id}/cancel`、`GET /api/composer/drafts`、`GET /api/composer/drafts/{id}`、`GET /api/composer/drafts/{id}/download`、`DELETE /api/composer/drafts/{id}` | 写作 Skills 管理（内置 5 套含 `general/security/maas` 三业务线 + GitHub/Gitee 预览降级导入 + 本地 `.md`/`.json` 上传）、业务线核心指标与评分标准参考预览、AI 依据 Skill 与指标库动态构章撰稿（`skill_id` / `use_ai` / `use_indicator_library` / `blind_bid_mode` / `blind_rules_json` / `blind_custom_words_json` / `async_run` 后台不中断）、通用/暗标素颜双模式导出及删盘 |
-| 模型配置 | `GET/PUT /api/model-config`、`DELETE /api/model-config`、`POST /api/model-config/test` | PUT 入参 `{base_url,api_key,model_flash,model_flagship,supports_reasoning_effort,supports_vision}`；**响应永不回显明文 Key** |
+| 模型配置 | `GET/PUT /api/model-config`、`DELETE /api/model-config`、`POST /api/model-config/test` | PUT 入参 `{base_url,api_key,model_flash,model_flagship,model_embedding?,supports_reasoning_effort,supports_vision}`（E44 方案 A：`model_embedding` 复用主网关 `Base URL`/`API Key`，测试接口返回非阻断 `embedding_ok`/`embedding_message`）；**响应永不回显明文 Key** |
 
 文件下载统一走 `GET /api/files/{相对路径}`（已做租户归属校验，跨租户 404）。
 
@@ -89,7 +89,8 @@ event: error      data: {"task_id":1,"status":"failed","error_msg":"..."}
 8. `BidComposerView`（`/composer`，E37/E38/E39/E41/E43）：/api/composer + `/api/reports/{id}/clean-bid`——Tab 1 正向初稿（Skill 写作规范与业务线分组标签及 GitHub/Gitee/本地上传管理弹窗 + 「引用公司常见指标与业务线标准应答库」开关与核心指标/典型评分标准预览卡片 + **「按通用方式生成 vs 按暗标生成」双模式切换、6 项保护复选框与自定义屏蔽词标签组** + AI 动态规划与撰稿开关 + 后台队列进度/中断 + `<keep-alive>` + 紧凑分组待填抽屉 + 资格证照角色合并与逐项独立附页形态预览 + 暗标无痕徽标）与 Tab 2 采纳整改导 Clean 定稿工作台；
 9. `RulesAndCertsView`：规则配置 + 企业证照台账（支持 PDF/图片扫件 OCR 预填与原件留档、长期有效开关）+ 法规库（法条三态核验与单条条文删除维护）；
 10. `ReportsAndAuditView`：交付中心（按任务列 redline/clean-bid/deliver.zip/signoff 下载 + 批量打包）+ 安全操作审计日志表（admin，支持 UTF-8 BOM CSV 导出）；
-11. 管理与辅助：`UsersManageView`（`/users`，admin 部门重命名与账号管理）/ `LoginView` / `ChangePasswordView` / `ModelSettingsView`（/api/model-config + test 连通性测试 + 思考参数防御与多模态视觉开关）。
+11. 管理与辅助：`UsersManageView`（`/users`，admin 部门重命名与账号管理）/ `LoginView` / `ChangePasswordView` / `ModelSettingsView`（/api/model-config + test 连通性测试 + **E44 选填向量精排模型 `model_embedding` 与模板自动填充/非阻断探活提示** + 思考参数防御与多模态视觉开关）；
+12. 全局跨页后台任务追踪与通知中心（E44）：`frontend/src/stores/notifications.ts`（按当前用户/租户隔离、`2.5s` 单定时器自动启停、`dedupKey` 幂等去重）+ `App.vue` 顶栏 `.tb-right` `<el-popover>` + `<el-badge>` 通知中心与右上角 `ElNotification` 可点击直达提醒，贯通 `CheckDetailView`（F2–F4 体检 / E42 评分预估）、`BidComposerView`（F8 编制）、`SimilarityCheckView`（E36 查重）、`RadarView`（F6 控标雷达）五大耗时任务。
 
 ## 5. 工程约定
 
