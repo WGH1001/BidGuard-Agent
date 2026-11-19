@@ -12,9 +12,10 @@
 from __future__ import annotations
 
 import datetime
+import os
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Optional
 
 from core.parser import parse_document
 
@@ -52,6 +53,30 @@ _NON_BANK_ADJACENT_RE = re.compile(
 )
 
 _MONEY_OR_UNIT_SUFFIX_RE = re.compile(r'^\s*(?:万元|亿元|元|%|％)')
+
+# E45 §2.3：可选 11 位中国大陆手机号与电子邮箱候选正则（受 PRIVACY_MASK_CONTACT_ENABLED 控制）
+_MOBILE_CANDIDATE_RE = re.compile(
+    r'(?<![A-Za-z0-9.*])(1[3-9]\d{9})(?![A-Za-z0-9.*\-])'
+)
+
+_COUNTRY_CODE_PREFIX_RE = re.compile(r'(?:\+86|0086|\(86\)|\b86)[\- ]*$')
+
+_NON_PHONE_ADJACENT_RE = re.compile(
+    r'(?:项目编号|招标编号|采购编号|合同编号|统一社会信用代码|社会信用代码|信用代码|纳税人识别号|税号|'
+    r'营业执照号?|登记号|证书编号|专利号|标准号|流水号|凭证号|发票号|订单号|运单号|快递单号|档案号|'
+    r'传真|Fax|热线|400|800|0\d{2,3}|GB/T|GB|ISO|RFC|ZC|HT)\s*[：:.\-— ]*$',
+    re.IGNORECASE,
+)
+
+_EMAIL_CANDIDATE_RE = re.compile(
+    r'(?<![A-Za-z0-9._%+\-*])([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})(?![A-Za-z0-9._%+\-*])'
+)
+
+
+def is_contact_privacy_mask_enabled() -> bool:
+    """E45 §2.3：读取环境变量 `PRIVACY_MASK_CONTACT_ENABLED`（默认关闭 `'0'`，保持 E40 回归基线不变）。"""
+    val = (os.environ.get('PRIVACY_MASK_CONTACT_ENABLED') or '0').strip().lower()
+    return val in ('1', 'true', 'yes', 'on')
 
 
 def is_valid_cn_id_card(raw: str) -> bool:
@@ -124,17 +149,70 @@ def _is_bank_account_in_context(full_text: str, start: int, end: int, raw: str) 
     return bool(_BANK_CONTEXT_RE.search(context_window))
 
 
-def sanitize_text(text: str) -> tuple[str, dict[str, int]]:
-    """对文本执行身份证号（GB 11643 校验）与银行卡/对公账号（语境+等长掩码）脱敏。
+def _mask_phone_equal_len(raw: str) -> str:
+    """保留手机号前 3 后 4 位，中间 4 位等长替换为 `*`。"""
+    if len(raw) != 11 or not raw.isdigit():
+        return raw
+    return f"{raw[:3]}****{raw[-4:]}"
+
+
+def _is_valid_mobile_in_context(full_text: str, start: int, end: int, raw: str) -> bool:
+    if '*' in raw or len(raw) != 11 or not raw.isdigit():
+        return False
+    line_start = full_text.rfind('\n', 0, start) + 1
+    line_end = full_text.find('\n', end)
+    if line_end == -1:
+        line_end = len(full_text)
+    left_near = full_text[max(line_start, start - 28):start]
+    right_near = full_text[end:min(line_end, end + 12)]
+    if start >= 1 and full_text[start - 1] in '-/':
+        if not _COUNTRY_CODE_PREFIX_RE.search(left_near):
+            return False
+    if _NON_PHONE_ADJACENT_RE.search(left_near):
+        return False
+    if _MONEY_OR_UNIT_SUFFIX_RE.match(right_near):
+        return False
+    return True
+
+
+def _mask_email_equal_len(raw: str) -> str:
+    """保留邮箱首字符与 `@domain`，本地名其余字符等长替换为 `*`（严格等长且幂等）。"""
+    if '@' not in raw:
+        return raw
+    local, domain = raw.split('@', 1)
+    if not local or not domain or '*' in local:
+        return raw
+    if len(local) == 1:
+        masked_local = '*'
+    else:
+        masked_local = f"{local[0]}{'*' * (len(local) - 1)}"
+    return f"{masked_local}@{domain}"
+
+
+def sanitize_text(
+    text: str,
+    *,
+    mask_contacts: Optional[bool] = None,
+) -> tuple[str, dict[str, int]]:
+    """对文本执行身份证号（GB 11643 校验）、银行卡/对公账号（语境+等长掩码）及可选手机号/邮箱脱敏。
 
     Returns:
-        (sanitized_text, {'id_masked': int, 'bank_masked': int})
+        默认返回 `(sanitized_text, {'id_masked': int, 'bank_masked': int})`；
+        当开启 `PRIVACY_MASK_CONTACT_ENABLED=1` 或 `mask_contacts=True` 时，
+        返回字典额外包含 `'phone_masked'` 与 `'email_masked'`。
     """
+    use_contact = is_contact_privacy_mask_enabled() if mask_contacts is None else bool(mask_contacts)
     if not text or not isinstance(text, str):
-        return (text or ''), {'id_masked': 0, 'bank_masked': 0}
+        base_empty: dict[str, int] = {'id_masked': 0, 'bank_masked': 0}
+        if use_contact:
+            base_empty['phone_masked'] = 0
+            base_empty['email_masked'] = 0
+        return (text or ''), base_empty
 
     id_masked = 0
     bank_masked = 0
+    phone_masked = 0
+    email_masked = 0
 
     def _replace_id(m: re.Match) -> str:
         nonlocal id_masked
@@ -155,48 +233,116 @@ def sanitize_text(text: str) -> tuple[str, dict[str, int]]:
         return cand
 
     step2 = _BANK_CANDIDATE_RE.sub(_replace_bank, step1)
-    return step2, {'id_masked': id_masked, 'bank_masked': bank_masked}
+    if not use_contact:
+        return step2, {'id_masked': id_masked, 'bank_masked': bank_masked}
+
+    def _replace_phone(m: re.Match) -> str:
+        nonlocal phone_masked
+        cand = m.group(1)
+        if _is_valid_mobile_in_context(step2, m.start(1), m.end(1), cand):
+            phone_masked += 1
+            return _mask_phone_equal_len(cand)
+        return cand
+
+    step3 = _MOBILE_CANDIDATE_RE.sub(_replace_phone, step2)
+
+    def _replace_email(m: re.Match) -> str:
+        nonlocal email_masked
+        cand = m.group(1)
+        masked_em = _mask_email_equal_len(cand)
+        if masked_em != cand:
+            email_masked += 1
+            return masked_em
+        return cand
+
+    step4 = _EMAIL_CANDIDATE_RE.sub(_replace_email, step3)
+    return step4, {
+        'id_masked': id_masked,
+        'bank_masked': bank_masked,
+        'phone_masked': phone_masked,
+        'email_masked': email_masked,
+    }
 
 
-def scan_document_text(text: str) -> dict[str, int]:
-    """轻量级只读扫描统计（不改动原文本），返回 `{'id_masked': x, 'bank_masked': y}`。"""
+def scan_document_text(
+    text: str,
+    *,
+    mask_contacts: Optional[bool] = None,
+) -> dict[str, int]:
+    """轻量级只读扫描统计（不改动原文本）。"""
+    use_contact = is_contact_privacy_mask_enabled() if mask_contacts is None else bool(mask_contacts)
     if not text or not isinstance(text, str):
-        return {'id_masked': 0, 'bank_masked': 0}
-    _, stats = sanitize_text(text)
+        empty: dict[str, int] = {'id_masked': 0, 'bank_masked': 0}
+        if use_contact:
+            empty['phone_masked'] = 0
+            empty['email_masked'] = 0
+        return empty
+    _, stats = sanitize_text(text, mask_contacts=mask_contacts)
     return stats
 
 
-def scan_document_file(file_path: str | Path) -> dict[str, int]:
+def scan_document_file(
+    file_path: str | Path,
+    *,
+    mask_contacts: Optional[bool] = None,
+) -> dict[str, int]:
     """上传受理阶段零 OCR 快速扫描统计（强制 `ocr_images=False`，绝不触发耗时 OCR）。"""
+    use_contact = is_contact_privacy_mask_enabled() if mask_contacts is None else bool(mask_contacts)
+    empty: dict[str, int] = {'id_masked': 0, 'bank_masked': 0}
+    if use_contact:
+        empty['phone_masked'] = 0
+        empty['email_masked'] = 0
     path = Path(file_path)
     if not path.is_file():
-        return {'id_masked': 0, 'bank_masked': 0}
+        return dict(empty)
     try:
         parsed = parse_document(str(path), ocr_images=False)
-        return scan_document_text(getattr(parsed, 'text', '') or '')
+        return scan_document_text(getattr(parsed, 'text', '') or '', mask_contacts=mask_contacts)
     except Exception:
-        return {'id_masked': 0, 'bank_masked': 0}
+        return dict(empty)
 
 
 def merge_privacy_stats(*stats_list: dict[str, int] | None) -> dict[str, int]:
     """合并多份文档的脱敏计数统计。"""
     id_total = 0
     bank_total = 0
+    phone_total = 0
+    email_total = 0
+    has_contact_keys = is_contact_privacy_mask_enabled()
     for st in stats_list:
         if isinstance(st, dict):
             id_total += int(st.get('id_masked') or 0)
             bank_total += int(st.get('bank_masked') or 0)
-    return {'id_masked': id_total, 'bank_masked': bank_total}
+            if 'phone_masked' in st or 'email_masked' in st:
+                has_contact_keys = True
+                phone_total += int(st.get('phone_masked') or 0)
+                email_total += int(st.get('email_masked') or 0)
+    out: dict[str, int] = {'id_masked': id_total, 'bank_masked': bank_total}
+    if has_contact_keys:
+        out['phone_masked'] = phone_total
+        out['email_masked'] = email_total
+    return out
 
 
-def sanitize_chat_messages(messages: list[Any]) -> tuple[list[Any], dict[str, int]]:
+def sanitize_chat_messages(
+    messages: list[Any],
+    *,
+    mask_contacts: Optional[bool] = None,
+) -> tuple[list[Any], dict[str, int]]:
     """对 OpenAI 格式消息列表做深拷贝脱敏（仅处理文本段，完整保留 E24 `image_url` 等结构）。"""
+    use_contact = is_contact_privacy_mask_enabled() if mask_contacts is None else bool(mask_contacts)
     if not messages:
-        return [], {'id_masked': 0, 'bank_masked': 0}
+        empty: dict[str, int] = {'id_masked': 0, 'bank_masked': 0}
+        if use_contact:
+            empty['phone_masked'] = 0
+            empty['email_masked'] = 0
+        return [], empty
 
     out_msgs: list[Any] = []
     id_total = 0
     bank_total = 0
+    phone_total = 0
+    email_total = 0
 
     for msg in messages:
         if not isinstance(msg, dict):
@@ -205,20 +351,24 @@ def sanitize_chat_messages(messages: list[Any]) -> tuple[list[Any], dict[str, in
         new_msg = dict(msg)
         content = msg.get('content')
         if isinstance(content, str):
-            clean_c, st = sanitize_text(content)
+            clean_c, st = sanitize_text(content, mask_contacts=mask_contacts)
             new_msg['content'] = clean_c
             id_total += st['id_masked']
             bank_total += st['bank_masked']
+            phone_total += int(st.get('phone_masked') or 0)
+            email_total += int(st.get('email_masked') or 0)
         elif isinstance(content, list):
             new_blocks: list[Any] = []
             for blk in content:
                 if isinstance(blk, dict) and blk.get('type') == 'text' and isinstance(blk.get('text'), str):
-                    clean_t, st = sanitize_text(blk['text'])
+                    clean_t, st = sanitize_text(blk['text'], mask_contacts=mask_contacts)
                     nb = dict(blk)
                     nb['text'] = clean_t
                     new_blocks.append(nb)
                     id_total += st['id_masked']
                     bank_total += st['bank_masked']
+                    phone_total += int(st.get('phone_masked') or 0)
+                    email_total += int(st.get('email_masked') or 0)
                 else:
                     new_blocks.append(blk)
             new_msg['content'] = new_blocks
@@ -231,10 +381,12 @@ def sanitize_chat_messages(messages: list[Any]) -> tuple[list[Any], dict[str, in
                     fn_d = dict(tc['function'])
                     args_v = fn_d.get('arguments')
                     if isinstance(args_v, str):
-                        clean_a, st = sanitize_text(args_v)
+                        clean_a, st = sanitize_text(args_v, mask_contacts=mask_contacts)
                         fn_d['arguments'] = clean_a
                         id_total += st['id_masked']
                         bank_total += st['bank_masked']
+                        phone_total += int(st.get('phone_masked') or 0)
+                        email_total += int(st.get('email_masked') or 0)
                     tc_copy = dict(tc)
                     tc_copy['function'] = fn_d
                     new_tcs.append(tc_copy)
@@ -244,4 +396,8 @@ def sanitize_chat_messages(messages: list[Any]) -> tuple[list[Any], dict[str, in
 
         out_msgs.append(new_msg)
 
-    return out_msgs, {'id_masked': id_total, 'bank_masked': bank_total}
+    res_stats: dict[str, int] = {'id_masked': id_total, 'bank_masked': bank_total}
+    if use_contact:
+        res_stats['phone_masked'] = phone_total
+        res_stats['email_masked'] = email_total
+    return out_msgs, res_stats

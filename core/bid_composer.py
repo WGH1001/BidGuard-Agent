@@ -217,6 +217,12 @@ class BidBlueprint:
     stats: dict[str, Any] = field(default_factory=dict)
     blind_bid_mode: bool = False
     blind_rules: list[str] = field(default_factory=list)
+    compose_scope: str = 'full'
+    target_section_topic: Optional[str] = None
+    target_section_guidance: Optional[str] = None
+    density_preset: str = 'standard'
+    table_density: str = 'rich'
+    tender_scoring_focus: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -240,6 +246,12 @@ class BidBlueprint:
             'stats': dict(self.stats),
             'blind_bid_mode': bool(self.blind_bid_mode),
             'blind_rules': list(self.blind_rules),
+            'compose_scope': str(self.compose_scope or 'full'),
+            'target_section_topic': self.target_section_topic,
+            'target_section_guidance': self.target_section_guidance,
+            'density_preset': str(self.density_preset or 'standard'),
+            'table_density': str(self.table_density or 'rich'),
+            'tender_scoring_focus': list(self.tender_scoring_focus),
         }
 
 
@@ -860,6 +872,8 @@ def _draft_chapter_with_llm(
     skill_layout: dict[str, Any],
     allowed_context_for_guard: str,
     blind_prompt_note: str = '',
+    table_density: str = 'rich',
+    section_guidance: str = '',
     cancel_check: Optional[Callable[[], None]] = None,
 ) -> dict[str, Any]:
     """为单个动态章节并发撰写正本草稿（支持单章瞬时失败最多 2 次自动重试与防造假校验）。"""
@@ -874,19 +888,27 @@ def _draft_chapter_with_llm(
 
     snip_desc = '\n'.join(
         f"[参考《{sn['source_filename']}》]：{sn['snippet'][:750]}"
-        for sn in ref_snippets[:3]
+        for sn in ref_snippets[:4]
     ) or '（无额外历史参考片段，请仅紧扣招标需求与规范方法论撰写）'
 
     target_words = int(skill_layout.get('target_section_words') or 500)
     blind_block = f"【暗标编制约束（必须严格遵守）】：\n{blind_prompt_note}\n" if blind_prompt_note else ''
+    guidance_block = f"【专项提分补强指引】：\n{section_guidance[:800]}\n" if section_guidance else ''
+    if table_density == 'none':
+        table_hint = '无表格模式（table 字段必须固定返回 null）'
+    elif table_density == 'moderate':
+        table_hint = chapter.get('recommended_table') or '仅在确需量化里程碑/SLA时附1张简表，否则返回 null'
+    else:
+        table_hint = chapter.get('recommended_table') or '建议附带结构化实施分工/SLA量化承诺对照表'
     prompt = (
         f"你是投标方案专家，正在为《{project_name}》撰写标书章节：{chapter['chapter_no']} {chapter['title']}。\n"
         f"【选定 Skill】：{skill_name}｜行文语气：{skill_layout.get('tone')}｜目标字数约 {target_words} 字。\n"
         f"【Skill 规则与格式限制】：\n{skill_instructions[:1200] or '正式专业、逐点响应'}\n"
         f"{blind_block}"
+        f"{guidance_block}"
         f"【本章对应招标需求与评分细则】：\n{req_desc[:2200]}\n"
         f"【可借鉴企业参考片段（如有）】：\n{snip_desc[:2400]}\n"
-        f"【建议附带表格（可选）】：{chapter.get('recommended_table') or '如适合则给出实施分工/SLA承诺表'}\n"
+        f"【表格策略（{table_density}）】：{table_hint}\n"
         "严格约束：\n"
         "1. 严禁虚构任何投标报价金额、过往合同编号或未授权业绩年份；\n"
         "2. 用实实在在的可执行方案语言撰写正文，少喊口号，需企业人工核实的具体配置填 `[待人工确认：...]`；\n"
@@ -894,7 +916,7 @@ def _draft_chapter_with_llm(
         "4. 返回纯 JSON：{\"paragraphs\": [\"分段正文1\", \"分段正文2\"], \"table\": {\"title\": \"表名\", \"headers\": [\"列1\", \"列2\", \"列3\"], \"rows\": [[\"a\", \"b\", \"c\"]]} | null, \"needs_manual\": [\"待确认项1\"]}"
     )
 
-    guard_pool = f"{allowed_context_for_guard}\n{req_desc}\n{snip_desc}"
+    guard_pool = f"{allowed_context_for_guard}\n{req_desc}\n{snip_desc}\n{section_guidance}"
     for _attempt in range(3):
         if cancel_check is not None:
             cancel_check()
@@ -915,7 +937,7 @@ def _draft_chapter_with_llm(
                 if not clean_paras:
                     continue
                 clean_table = None
-                raw_tbl = parsed.get('table')
+                raw_tbl = None if table_density == 'none' else parsed.get('table')
                 if isinstance(raw_tbl, dict) and isinstance(raw_tbl.get('headers'), list) and isinstance(raw_tbl.get('rows'), list):
                     hdrs = [str(h or '').strip() for h in raw_tbl['headers'] if str(h or '').strip()]
                     if 2 <= len(hdrs) <= 6:
@@ -1056,12 +1078,28 @@ def compose_bid_blueprint(
     blind_rules: Optional[list[str]] = None,
     blind_custom_words: Optional[list[str]] = None,
     bidder_hints: Optional[list[str]] = None,
+    compose_scope: str = 'full',
+    target_section_topic: Optional[str] = None,
+    target_section_guidance: Optional[str] = None,
+    density_preset: str = 'standard',
+    table_density: str = 'rich',
     progress_cb: Optional[Callable[[int, str], None]] = None,
     cancel_check: Optional[Callable[[], None]] = None,
 ) -> BidBlueprint:
-    """E37 + E38 + E43：生成受写作 Skill 与可选 AI 驱动的统一投标蓝图 IR（支持暗标防废标双模式）。"""
+    """E37 + E38 + E43 + E45：生成受写作 Skill 与可选 AI 驱动的统一投标蓝图 IR（支持暗标防废标双模式与单章专项补写）。"""
     if compose_mode not in ('skeleton_v1', 'knowledge_draft_v2'):
         raise ValueError(f"不支持的编制模式 compose_mode={compose_mode!r}")
+
+    scope_clean = str(compose_scope or 'full').strip().lower()
+    if scope_clean not in ('full', 'section'):
+        raise ValueError(f"不支持的生成范围 compose_scope={compose_scope!r}（仅支持 'full' 或 'section'）")
+
+    density_clean = str(density_preset or 'standard').strip().lower()
+    if density_clean not in ('concise', 'standard', 'detailed'):
+        density_clean = 'standard'
+    tbl_density_clean = str(table_density or 'rich').strip().lower()
+    if tbl_density_clean not in ('rich', 'moderate', 'none'):
+        tbl_density_clean = 'rich'
 
     t_path = Path(tender_path)
     if not t_path.is_file():
@@ -1074,6 +1112,11 @@ def compose_bid_blueprint(
             progress_cb(pct, detail)
 
     skill_id, skill_name, skill_instructions, skill_layout = _resolve_skill_payload(skill)
+    base_target_words = int(skill_layout.get('target_section_words') or 500)
+    if density_clean == 'concise':
+        skill_layout = {**skill_layout, 'target_section_words': max(220, int(round(base_target_words * 0.65)))}
+    elif density_clean == 'detailed':
+        skill_layout = {**skill_layout, 'target_section_words': min(1800, max(800, int(round(base_target_words * 1.6))))}
 
     _emit_progress(12, '阶段 1/4：解析招标文件元信息与企业证照台账')
     doc = parse_document(str(t_path))
@@ -1470,11 +1513,66 @@ def compose_bid_blueprint(
         source_refs=[{'total_requirements': len(s4_blocks)}],
     )
 
-    # ── Section 5: 技术与商务实施方案（AI Skill 动态规划 + V2 参考方案库）──────
-    topics = _collect_scoring_topics(checklist, full_text)
+    # ── Section 5: 技术与商务实施方案（AI Skill 动态规划 + V2 参考方案库 + E45 单章专项补写）──
+    all_topics = _collect_scoring_topics(checklist, full_text)
+    guidance_clean = str(target_section_guidance or '').strip()
+    raw_target_topic = str(target_section_topic or '').strip()
+
+    if scope_clean == 'section':
+        if not raw_target_topic:
+            raw_target_topic = all_topics[0]['title'] if all_topics else '专项技术与商务应答方案'
+        tgt_low = raw_target_topic.lower()
+        tgt_norm = normalize_zh(raw_target_topic)
+        matched_topics: list[dict[str, Any]] = []
+        for t in all_topics:
+            t_title_l = str(t.get('title') or '').lower()
+            t_norm = normalize_zh(f"{t.get('title', '')} {t.get('tender_quote', '')}")
+            if (
+                tgt_low in t_title_l
+                or t_title_l in tgt_low
+                or (len(tgt_norm) >= 2 and tgt_norm[:4] in t_norm)
+            ):
+                matched_topics.append(dict(t))
+        if matched_topics:
+            primary_t = dict(matched_topics[0])
+            primary_t['title'] = raw_target_topic
+            if guidance_clean:
+                primary_t['tender_quote'] = f"{primary_t.get('tender_quote', '')}（提分诊断补强要点：{guidance_clean}）".strip()
+            topics = [primary_t] + matched_topics[1:3]
+        else:
+            topics = [
+                {
+                    'topic_id': 'topic_sec_1',
+                    'title': raw_target_topic,
+                    'score_points': '专项提分补写',
+                    'tender_quote': guidance_clean or f"针对招标文件关于「{raw_target_topic}」的评审要点与技术商务要求开展点对点专项应答。",
+                    'source': 'section_focus',
+                }
+            ]
+    else:
+        topics = all_topics
+
+    focus_source = topics if scope_clean == 'section' else all_topics
+    tender_scoring_focus = [
+        {
+            **dict(t),
+            'chapter': str(t.get('title') or ''),
+            'score': str(t.get('score_points') or ''),
+            'criteria': str(t.get('tender_quote') or ''),
+        }
+        for t in focus_source
+    ]
+
     provider = knowledge_provider
-    if provider is None and compose_mode == 'knowledge_draft_v2' and knowledge_paths:
-        provider = LocalKnowledgeSnippetProvider(list(knowledge_paths), client=client)
+    if knowledge_paths:
+        local_prov = LocalKnowledgeSnippetProvider(list(knowledge_paths), client=client)
+        if local_prov.has_documents:
+            if provider is None and (compose_mode == 'knowledge_draft_v2' or scope_clean == 'section'):
+                provider = local_prov
+            elif provider is not None and not hasattr(provider, '_providers'):
+                from core.indicator_library import CompositeKnowledgeSnippetProvider
+
+                provider = CompositeKnowledgeSnippetProvider([provider, local_prov])
 
     use_rag = (
         provider is not None
@@ -1487,11 +1585,14 @@ def compose_bid_blueprint(
     matched_rag_count = 0
     matched_indicator_count = 0
 
+    rag_top_k = 3 if scope_clean == 'section' else 2
+    rag_min_score = 0.25 if scope_clean == 'section' else 0.35
+
     for t in topics:
-        query_text = f"{t['title']} {t['tender_quote']}".strip()
+        query_text = f"{raw_target_topic if scope_clean == 'section' else ''} {t['title']} {guidance_clean} {t['tender_quote']}".strip()
         ref_snippets: list[dict[str, Any]] = []
         if use_rag:
-            raw_hits = provider.retrieve(query_text, top_k=2, min_score=0.35)
+            raw_hits = provider.retrieve(query_text, top_k=rag_top_k, min_score=rag_min_score)
             has_ind_hit = False
             for h in raw_hits:
                 snip = str(h.get('snippet') or '').strip()
@@ -1537,19 +1638,36 @@ def compose_bid_blueprint(
     planned_chapters: list[dict[str, Any]] = []
 
     if ai_active:
-        _emit_progress(40, f"阶段 3/4：AI 依据「{skill_name}」动态规划标书技术章节")
-        planned = _plan_chapters_with_llm(
-            client,
-            project_name=project_name,
-            buyer_name=buyer_name,
-            chapters_meta=list(checklist.get('chapters') or []),
-            topics=topics,
-            deviation_reqs=combined_reqs,
-            skill_name=skill_name,
-            skill_instructions=skill_instructions,
-            skill_layout=skill_layout,
-            blind_prompt_note=blind_prompt_note,
-        )
+        if scope_clean == 'section':
+            _emit_progress(45, f"阶段 3/4：AI 正在针对「{raw_target_topic}」执行单章专项深化撰稿")
+            planned = [
+                {
+                    'chapter_id': 'sec_ch_1',
+                    'chapter_no': '专项章节',
+                    'title': raw_target_topic,
+                    'chapter_kind': 'technical',
+                    'focus_topic_ids': [t['topic_id'] for t in topics],
+                    'writing_brief': (
+                        f"针对「{raw_target_topic}」进行专项深化补写。"
+                        + (f"提分诊断与改进重点：{guidance_clean}。" if guidance_clean else '')
+                    ),
+                    'recommended_table': '' if tbl_density_clean == 'none' else f"{raw_target_topic}量化指标与实施保障对照表",
+                }
+            ]
+        else:
+            _emit_progress(40, f"阶段 3/4：AI 依据「{skill_name}」动态规划标书技术章节")
+            planned = _plan_chapters_with_llm(
+                client,
+                project_name=project_name,
+                buyer_name=buyer_name,
+                chapters_meta=list(checklist.get('chapters') or []),
+                topics=topics,
+                deviation_reqs=combined_reqs,
+                skill_name=skill_name,
+                skill_instructions=skill_instructions,
+                skill_layout=skill_layout,
+                blind_prompt_note=blind_prompt_note,
+            )
         if planned:
             planned_chapters = planned
             draft_results: dict[str, dict[str, Any]] = {}
@@ -1576,6 +1694,8 @@ def compose_bid_blueprint(
                     skill_layout=skill_layout,
                     allowed_context_for_guard=allowed_guard_text,
                     blind_prompt_note=blind_prompt_note,
+                    table_density=tbl_density_clean,
+                    section_guidance=guidance_clean,
                     cancel_check=cancel_check,
                 )
                 return ch_item['chapter_id'], res_d
@@ -1601,7 +1721,7 @@ def compose_bid_blueprint(
                     ai_ok_cnt += 1
                 ch_refs: list[dict[str, Any]] = []
                 for tid in ch_item.get('focus_topic_ids') or []:
-                    ch_refs.extend(topic_snippets.get(tid, [])[:1])
+                    ch_refs.extend(topic_snippets.get(tid, [])[:2 if scope_clean == 'section' else 1])
                 mapped_titles = [topic_map[tid]['title'] for tid in ch_item.get('focus_topic_ids') or [] if tid in topic_map]
                 for mn in d_res.get('needs_manual') or []:
                     s5_manual.append(_add_manual('sec_scoring', f"{ch_item['chapter_no']} {ch_item['title'][:20]}", mn, 'AI提示需人工补齐或核验'))
@@ -1616,8 +1736,8 @@ def compose_bid_blueprint(
                     'chapter_kind': ch_item.get('chapter_kind', 'technical'),
                     'covered_topics': mapped_titles,
                     'paragraphs': d_res.get('paragraphs') or [],
-                    'table': d_res.get('table'),
-                    'reference_snippets': ch_refs[:2],
+                    'table': None if tbl_density_clean == 'none' else d_res.get('table'),
+                    'reference_snippets': ch_refs[:3 if scope_clean == 'section' else 2],
                     'ai_generated': bool(d_res.get('ai_generated')),
                     'highlight': not bool(d_res.get('ai_generated')),
                 })
@@ -1634,6 +1754,8 @@ def compose_bid_blueprint(
                 "2. 具体技术路线、架构设计与实施细则 [待人工补充：结合本项目参数展开]",
                 "3. 交付验收标准、风险应急预案与佐证截图索引 [待人工补充：附系统截图/检测报告]",
             ]
+            if guidance_clean and scope_clean == 'section':
+                sub_outline.insert(0, f"0. 专项提分诊断与补强方向：{guidance_clean}")
             if ref_snippets:
                 s5_manual.append(_add_manual('sec_scoring', f"确认改写参考片段：{t['title'][:28]}", 'V2 方案库检索片段须经技术负责人去重改写与参数校准', ref_snippets[0]['source_filename']))
             else:
@@ -1665,14 +1787,22 @@ def compose_bid_blueprint(
                     tbl['headers'] = [_san(h) for h in (tbl.get('headers') or [])]
                     tbl['rows'] = [[_san(c) for c in row] for row in (tbl.get('rows') or [])]
             elif sb.get('kind') == 'scoring_topic':
+                sb['title'] = _san(sb.get('title'))
+                sb['tender_quote'] = _san(sb.get('tender_quote'))
                 sb['sub_outline'] = [_san(ln) for ln in (sb.get('sub_outline') or [])]
             for sn in sb.get('reference_snippets') or []:
                 sn['snippet'] = _san(sn.get('snippet'))
+                sn['raw_quote'] = _san(sn.get('raw_quote'))
                 sn['notice'] = _san(sn.get('notice'))
 
+    sec_scoring_title = (
+        f"第二部分 {_san(raw_target_topic)}（专项高分应答方案）"
+        if scope_clean == 'section'
+        else '第五部分 技术与商务实施方案'
+    )
     sec_scoring = BlueprintSection(
         section_id='sec_scoring',
-        title='第五部分 技术与商务实施方案',
+        title=sec_scoring_title,
         slot_type='scoring_response_outline',
         fill_mode=sec_scoring_mode,
         tender_requirements=topics,
@@ -1681,46 +1811,108 @@ def compose_bid_blueprint(
         source_refs=s5_refs,
     )
 
-    # ── Section 6: 人工待填项汇总与台账备查附录 ──────────────────────────────
-    ledger_refs: list[dict[str, Any]] = []
-    for raw_c in ledger_certs or []:
-        c_name = _san(_obj_field(raw_c, 'cert_name', '') or '').strip()
-        if not c_name:
-            continue
-        is_long = bool(_obj_field(raw_c, 'is_long_term', False))
-        vu = _obj_field(raw_c, 'valid_until')
-        vu_str = '长期有效' if is_long else (vu.isoformat() if hasattr(vu, 'isoformat') else str(vu or ''))
-        ledger_refs.append({
-            'kind': 'ledger_appendix_row',
-            'cert_name': c_name,
-            'cert_no': '[暗标已隐去]' if hide_logo_media else (_obj_field(raw_c, 'cert_no') or '—'),
-            'valid_until': vu_str,
-            'is_long_term': is_long,
-            'has_attachment': False if hide_logo_media else bool(_obj_field(raw_c, 'attachment_path') or _obj_field(raw_c, 'has_attachment')),
-            'attachment_name': '暗标已隐去附件' if hide_logo_media else (_obj_field(raw_c, 'attachment_name') or '—'),
-        })
+    if scope_clean == 'section':
+        # 单章专项补写模式：不混入整本封面/资质附页/开标报价表/全量偏离表，仅保留「专项补写目标锚定 + 目标章节方案 + 待核清单」
+        manual_checklist = list(s5_manual)
+        if blind_bid_mode:
+            manual_checklist.insert(
+                0,
+                {
+                    'section_id': 'sec_section_anchor',
+                    'field': '暗标专项章节复核',
+                    'reason': '已开启暗标保护，导出已清空底纹、页眉页脚与特殊字体样式',
+                    'hint': '复制回原暗标正本时请保持无底纹无粗斜体格式',
+                },
+            )
+        sec_anchor = BlueprintSection(
+            section_id='sec_section_anchor',
+            title=f"第一部分 专项补写目标与招标评分依据锚定（{_san(raw_target_topic)}）",
+            slot_type='cover_and_letter',
+            fill_mode='deterministic',
+            tender_requirements=topics,
+            content_blocks=[
+                {'kind': 'meta', 'label': '所属招标项目', 'value': _san(project_name), 'highlight': False},
+                {'kind': 'meta', 'label': '专项补写目标章节', 'value': _san(raw_target_topic), 'highlight': False},
+                {
+                    'kind': 'meta',
+                    'label': '提分诊断与补强指引',
+                    'value': _san(guidance_clean or '对照招标评分细则与企业指标库点对点深化应答'),
+                    'highlight': False,
+                },
+                {
+                    'kind': 'meta',
+                    'label': '篇幅与表格策略',
+                    'value': f"篇幅档位：{density_clean} ｜ 表格密度：{tbl_density_clean}",
+                    'highlight': False,
+                },
+                {
+                    'kind': 'meta',
+                    'label': '暗标合规模式',
+                    'value': '已开启暗标素颜与身份保护' if blind_bid_mode else '通用明标模式',
+                    'highlight': False,
+                },
+            ],
+            needs_manual_items=[],
+            source_refs=[{'file': t_path.name, 'compose_scope': 'section'}],
+        )
+        sec_appendix = BlueprintSection(
+            section_id='sec_appendix',
+            title='第三部分 专项章节人工待核对清单',
+            slot_type='cert_ledger_appendix',
+            fill_mode='cert_ledger',
+            tender_requirements=[],
+            content_blocks=[
+                {'kind': 'manual_summary', 'count': len(manual_checklist), 'items': list(manual_checklist)},
+            ],
+            needs_manual_items=[],
+            source_refs=[],
+        )
+        sections = [sec_anchor, sec_scoring, sec_appendix]
+    else:
+        # ── Section 6: 人工待填项汇总与台账备查附录 ──────────────────────────────
+        ledger_refs: list[dict[str, Any]] = []
+        for raw_c in ledger_certs or []:
+            c_name = _san(_obj_field(raw_c, 'cert_name', '') or '').strip()
+            if not c_name:
+                continue
+            is_long = bool(_obj_field(raw_c, 'is_long_term', False))
+            vu = _obj_field(raw_c, 'valid_until')
+            vu_str = '长期有效' if is_long else (vu.isoformat() if hasattr(vu, 'isoformat') else str(vu or ''))
+            ledger_refs.append({
+                'kind': 'ledger_appendix_row',
+                'cert_name': c_name,
+                'cert_no': '[暗标已隐去]' if hide_logo_media else (_obj_field(raw_c, 'cert_no') or '—'),
+                'valid_until': vu_str,
+                'is_long_term': is_long,
+                'has_attachment': False if hide_logo_media else bool(_obj_field(raw_c, 'attachment_path') or _obj_field(raw_c, 'has_attachment')),
+                'attachment_name': '暗标已隐去附件' if hide_logo_media else (_obj_field(raw_c, 'attachment_name') or '—'),
+            })
 
-    sec_appendix = BlueprintSection(
-        section_id='sec_appendix',
-        title='第六部分 人工待填报清单总览与企业台账备查附录',
-        slot_type='cert_ledger_appendix',
-        fill_mode='cert_ledger',
-        tender_requirements=[],
-        content_blocks=[
-            {'kind': 'manual_summary', 'count': len(manual_checklist), 'items': list(manual_checklist)},
-            *ledger_refs,
-        ],
-        needs_manual_items=[],
-        source_refs=[{'ledger_count': len(ledger_refs)}],
-    )
+        sec_appendix = BlueprintSection(
+            section_id='sec_appendix',
+            title='第六部分 人工待填报清单总览与企业台账备查附录',
+            slot_type='cert_ledger_appendix',
+            fill_mode='cert_ledger',
+            tender_requirements=[],
+            content_blocks=[
+                {'kind': 'manual_summary', 'count': len(manual_checklist), 'items': list(manual_checklist)},
+                *ledger_refs,
+            ],
+            needs_manual_items=[],
+            source_refs=[{'ledger_count': len(ledger_refs)}],
+        )
+        sections = [sec_cover, sec_qual, sec_price, sec_deviation, sec_scoring, sec_appendix]
 
     _emit_progress(90, '阶段 4/4：正在封装蓝图结构与按 Skill 版式渲染 Word')
-    sections = [sec_cover, sec_qual, sec_price, sec_deviation, sec_scoring, sec_appendix]
     skill_biz_line = str(_obj_field(skill, 'biz_line', 'general') or 'general').strip() or 'general'
     stats = {
+        'compose_scope': scope_clean,
+        'target_section_topic': raw_target_topic if scope_clean == 'section' else None,
+        'density_preset': density_clean,
+        'table_density': tbl_density_clean,
         'section_count': len(sections),
-        'required_cert_count': len(matched_certs),
-        'deviation_row_count': len(s4_blocks),
+        'required_cert_count': 0 if scope_clean == 'section' else len(matched_certs),
+        'deviation_row_count': 0 if scope_clean == 'section' else len(s4_blocks),
         'scoring_topic_count': len(topics),
         'ai_chapter_count': len(planned_chapters),
         'rag_matched_topics': matched_rag_count,
@@ -1756,10 +1948,16 @@ def compose_bid_blueprint(
         planned_chapters=planned_chapters,
         sections=sections,
         manual_checklist=manual_checklist,
-        cert_match_summary=cert_summary,
+        cert_match_summary={} if scope_clean == 'section' else cert_summary,
         stats=stats,
         blind_bid_mode=bool(blind_bid_mode),
         blind_rules=list(active_rule_list),
+        compose_scope=scope_clean,
+        target_section_topic=raw_target_topic if scope_clean == 'section' else None,
+        target_section_guidance=guidance_clean if scope_clean == 'section' else None,
+        density_preset=density_clean,
+        table_density=tbl_density_clean,
+        tender_scoring_focus=tender_scoring_focus,
     )
 
 
@@ -1941,6 +2139,8 @@ def export_composed_bid_docx(
     """按 Skill `skill_layout` 规范渲染独立封面 + 原生目录/标题 + 洁净标书正文 `.docx`（支持 E43 暗标素颜导出）。"""
     bp = blueprint.to_dict() if isinstance(blueprint, BidBlueprint) else dict(blueprint)
     is_blind = bool(bp.get('blind_bid_mode'))
+    is_section_scope = str(bp.get('compose_scope') or (bp.get('stats') or {}).get('compose_scope') or 'full') == 'section'
+    target_sec_topic = str(bp.get('target_section_topic') or (bp.get('stats') or {}).get('target_section_topic') or '专项章节')
     blind_rules_set = set(bp.get('blind_rules') or (_BLIND_RULE_KEYS if is_blind else ()))
     blind_toc_forbidden = bool((bp.get('stats') or {}).get('blind_toc_forbidden')) if is_blind else False
     hide_media = is_blind and ('hide_logo_media' in blind_rules_set)
@@ -2009,8 +2209,17 @@ def export_composed_bid_docx(
             r_ftr = ftr.add_run("请结合招标文件终核报价、业绩证明及签章后正式封标提交")
             _set_run_font(r_ftr, name_zh=font_zh, size_pt=8.5, color=_COLOR_MUTED)
 
-    # ── 1. 独立居中封面页（暗标模式跳过装饰性封面与底纹表格）─────────────────
-    if is_blind:
+    # ── 1. 独立居中封面页（暗标模式或单章节专项补写模式跳过装饰性封面与底纹表格）──
+    if is_section_scope:
+        _add_doc_heading(
+            doc,
+            f"{project_name} · {target_sec_topic}（{'暗标' if is_blind else ''}专项章节补写稿）",
+            level=1,
+            heading_font_zh=heading_font,
+            accent_rgb=accent_rgb,
+            plain_blind=is_blind,
+        )
+    elif is_blind:
         _add_doc_heading(
             doc,
             f"{project_name} 投标文件（暗标编制稿）",
@@ -2075,8 +2284,8 @@ def export_composed_bid_docx(
 
         doc.add_page_break()
 
-    # ── 2. 目录索引页（include_toc=True 且未被暗标禁目录锁定）────────────────
-    if layout.get('include_toc', True) and not blind_toc_forbidden:
+    # ── 2. 目录索引页（include_toc=True 且未被暗标禁目录或单章补写跳过）──────
+    if not is_section_scope and layout.get('include_toc', True) and not blind_toc_forbidden:
         _add_doc_heading(doc, '目  录', level=1, heading_font_zh=heading_font, accent_rgb=accent_rgb, plain_blind=is_blind)
         p_toc_tip = doc.add_paragraph()
         _insert_toc_field(p_toc_tip)

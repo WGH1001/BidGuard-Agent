@@ -476,6 +476,8 @@ class LLMClient:
             'calls': 0,
             'privacy_id_masked': 0,
             'privacy_bank_masked': 0,
+            'privacy_phone_masked': 0,
+            'privacy_email_masked': 0,
         }
 
         try:
@@ -576,14 +578,18 @@ class LLMClient:
         return cost
 
     def _record_privacy_stats(self, stats: dict[str, int]) -> None:
-        """E40：线程安全记录网关出口脱敏屏蔽数量（不写日志明细、不打印号码）。"""
+        """E40 / E45：线程安全记录网关出口脱敏屏蔽数量（不写日志明细、不打印号码）。"""
         id_cnt = int((stats or {}).get('id_masked') or 0)
         bank_cnt = int((stats or {}).get('bank_masked') or 0)
-        if id_cnt <= 0 and bank_cnt <= 0:
+        phone_cnt = int((stats or {}).get('phone_masked') or 0)
+        email_cnt = int((stats or {}).get('email_masked') or 0)
+        if id_cnt <= 0 and bank_cnt <= 0 and phone_cnt <= 0 and email_cnt <= 0:
             return
         with self._lock:
             self._usage['privacy_id_masked'] = int(self._usage.get('privacy_id_masked') or 0) + id_cnt
             self._usage['privacy_bank_masked'] = int(self._usage.get('privacy_bank_masked') or 0) + bank_cnt
+            self._usage['privacy_phone_masked'] = int(self._usage.get('privacy_phone_masked') or 0) + phone_cnt
+            self._usage['privacy_email_masked'] = int(self._usage.get('privacy_email_masked') or 0) + email_cnt
 
     def _apply_outgoing_privacy(self, messages: list) -> list:
         if not is_privacy_sanitize_enabled():
@@ -827,12 +833,21 @@ class LLMClient:
             sanitized_texts: list[str] = []
             emb_id_cnt = 0
             emb_bank_cnt = 0
+            emb_phone_cnt = 0
+            emb_email_cnt = 0
             for item_t in texts_list:
                 cleaned_t, st = sanitize_text(item_t)
                 sanitized_texts.append(cleaned_t)
                 emb_id_cnt += int(st.get('id_masked') or 0)
                 emb_bank_cnt += int(st.get('bank_masked') or 0)
-            self._record_privacy_stats({'id_masked': emb_id_cnt, 'bank_masked': emb_bank_cnt})
+                emb_phone_cnt += int(st.get('phone_masked') or 0)
+                emb_email_cnt += int(st.get('email_masked') or 0)
+            self._record_privacy_stats({
+                'id_masked': emb_id_cnt,
+                'bank_masked': emb_bank_cnt,
+                'phone_masked': emb_phone_cnt,
+                'email_masked': emb_email_cnt,
+            })
             texts_list = sanitized_texts
 
         if self.use_openai:

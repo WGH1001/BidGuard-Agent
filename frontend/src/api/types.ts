@@ -172,6 +172,8 @@ export interface TaskDurationRecord {
 export interface PrivacyStatsOut {
   id_masked: number
   bank_masked: number
+  phone_masked?: number
+  email_masked?: number
 }
 
 export interface BidTaskOut {
@@ -1008,7 +1010,13 @@ export interface SimilarityReportListOut {
 
 export type ComposeModeType = 'skeleton_v1' | 'knowledge_draft_v2'
 
-export type BizLineType = 'general' | 'security' | 'maas'
+export type ComposeScopeType = 'full' | 'section'
+
+export type ComposeDensityPreset = 'concise' | 'standard' | 'detailed'
+
+export type ComposeTableDensity = 'rich' | 'moderate' | 'none'
+
+export type BizLineType = 'general' | 'security' | 'maas' | string
 
 export interface SkillLayoutSpec {
   cover_style: 'gov_clean' | 'navy_business' | 'tech_modern'
@@ -1074,7 +1082,7 @@ export interface IndicatorScoringRefOut {
 
 export interface IndicatorEntryOut {
   indicator_id: string
-  line: 'common' | 'security' | 'maas'
+  line: string
   category: string
   indicator_name: string
   standard_response: string
@@ -1101,6 +1109,58 @@ export interface BizLineIndicatorOverviewOut {
   indicators: IndicatorEntryOut[]
 }
 
+export interface IndicatorLineDetailOut {
+  line: string
+  display_name: string
+  description: string
+  is_builtin: boolean
+  review_status: string
+  reviewed_at?: string | null
+  reviewed_by?: string | null
+  content_hash: string
+  total_indicators: number
+  pending_slot_count: number
+  line_scoring_summary: LineScoringSummaryOut[]
+  indicators: IndicatorEntryOut[]
+}
+
+export interface IndicatorLineListOut {
+  total: number
+  items: IndicatorLineDetailOut[]
+}
+
+export interface IndicatorLineCreatePayload {
+  line: string
+  display_name: string
+  description?: string
+  line_scoring_summary?: LineScoringSummaryOut[]
+}
+
+export interface IndicatorEntryUpsertPayload {
+  line: string
+  indicator_id?: string | null
+  category: string
+  indicator_name: string
+  standard_response: string
+  scoring_ref?: Partial<IndicatorScoringRefOut>
+  param_slots?: string[]
+  keywords?: string[]
+  source_ref?: string
+}
+
+export interface IndicatorEntryUpsertOut {
+  line: string
+  entry: IndicatorEntryOut
+  money_sanitized: boolean
+  review_status: string
+  pending_slot_count: number
+}
+
+export interface IndicatorApprovePayload {
+  line: string
+  review_note?: string
+}
+
 export interface ComposeManualItem {
   section_id: string
   field: string
@@ -1119,6 +1179,13 @@ export interface ComposeBlueprintSection {
   source_refs: Array<Record<string, unknown>>
 }
 
+export interface ComposeScoringFocusItem {
+  chapter: string
+  score: string
+  criteria: string
+  clause_no?: string
+}
+
 export interface ComposeBlueprintData {
   project_name: string
   project_code: string
@@ -1128,6 +1195,12 @@ export interface ComposeBlueprintData {
   price_cap?: string | null
   package_no?: number | null
   compose_mode: ComposeModeType
+  compose_scope?: ComposeScopeType
+  target_section_topic?: string | null
+  target_section_guidance?: string | null
+  density_preset?: ComposeDensityPreset
+  table_density?: ComposeTableDensity
+  tender_scoring_focus?: ComposeScoringFocusItem[]
   tender_filename: string
   skill_id?: number | null
   skill_name?: string
@@ -1151,6 +1224,10 @@ export interface ComposeDraftSummaryOut {
   biz_line?: string
   use_indicator_library?: boolean
   blind_bid_mode?: boolean
+  compose_scope?: ComposeScopeType
+  target_section_topic?: string | null
+  density_preset?: ComposeDensityPreset | string
+  table_density?: ComposeTableDensity | string
   title: string
   status?: string
   progress?: number

@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
-import { regulationsApi, rulesApi } from '@/api'
+import { composerApi, regulationsApi, rulesApi } from '@/api'
 import {
   formatMoneyDisplay,
   type CertificateOut,
   type CustomRedlineItem,
+  type IndicatorEntryOut,
+  type IndicatorLineDetailOut,
   type RegulationArticleOut,
   type RegulationCrawlOut,
   type RegulationLawOut,
@@ -20,7 +22,7 @@ defineOptions({ name: 'RulesAndCertsView' })
 const authStore = useAuthStore()
 const route = useRoute()
 
-const activeTab = ref<'rules' | 'certs' | 'regulations'>('rules')
+const activeTab = ref<'rules' | 'certs' | 'regulations' | 'indicators'>('rules')
 const loadingRules = ref(false)
 const savingRules = ref(false)
 const loadingCerts = ref(false)
@@ -513,14 +515,299 @@ async function handleImportLawFile(ev: Event): Promise<void> {
   }
 }
 
+// ── 页签 ④：企业指标与业务线评分库在线维护及人工终审台 ─────────────────
+const loadingIndicatorLines = ref(false)
+const indicatorLines = ref<IndicatorLineDetailOut[]>([])
+const selectedLineKey = ref<string>('common')
+const indicatorSearchKeyword = ref('')
+const indicatorCategoryFilter = ref('')
+
+const lineDialogVisible = ref(false)
+const savingLine = ref(false)
+const newLineForm = reactive({
+  line: '',
+  display_name: '',
+  description: '',
+})
+
+const entryDialogVisible = ref(false)
+const savingEntry = ref(false)
+const editingIndicatorId = ref<string | null>(null)
+const entryForm = reactive({
+  line: 'common',
+  indicator_id: '',
+  category: '技术方案',
+  indicator_name: '',
+  standard_response: '',
+  weight_hint: '',
+  typical_points_text: '',
+  high_score_tips: '',
+  param_slots_text: '',
+  keywords_text: '',
+  source_ref: '',
+})
+
+const approvingLine = ref(false)
+
+const currentIndicatorLine = computed<IndicatorLineDetailOut | null>(() => {
+  if (!indicatorLines.value.length) return null
+  return (
+    indicatorLines.value.find((it) => it.line === selectedLineKey.value) ||
+    indicatorLines.value[0] ||
+    null
+  )
+})
+
+const availableIndicatorCategories = computed<string[]>(() => {
+  const line = currentIndicatorLine.value
+  if (!line) return []
+  const set = new Set<string>()
+  for (const item of line.indicators || []) {
+    if (item.category) set.add(item.category)
+  }
+  return Array.from(set)
+})
+
+const filteredIndicators = computed<IndicatorEntryOut[]>(() => {
+  const line = currentIndicatorLine.value
+  if (!line) return []
+  const kw = indicatorSearchKeyword.value.trim().toLowerCase()
+  const cat = indicatorCategoryFilter.value.trim()
+  return (line.indicators || []).filter((item) => {
+    if (cat && item.category !== cat) return false
+    if (!kw) return true
+    const blob = [
+      item.indicator_id,
+      item.category,
+      item.indicator_name,
+      item.standard_response,
+      ...(item.keywords || []),
+      ...(item.param_slots || []),
+    ]
+      .join(' ')
+      .toLowerCase()
+    return blob.includes(kw)
+  })
+})
+
+function hasPendingSlotInEntry(entry: IndicatorEntryOut): boolean {
+  const blob = [
+    entry.standard_response,
+    ...(entry.param_slots || []),
+    entry.scoring_ref?.high_score_tips || '',
+    ...(entry.scoring_ref?.typical_points || []),
+  ].join(' ')
+  return blob.includes('[待人工确认：') || blob.includes('[待人工填报：')
+}
+
+async function fetchIndicatorLines(keepSelected = true): Promise<void> {
+  loadingIndicatorLines.value = true
+  try {
+    const res = await composerApi.listIndicatorLines()
+    indicatorLines.value = res.items || []
+    if (!keepSelected || !indicatorLines.value.some((it) => it.line === selectedLineKey.value)) {
+      if (indicatorLines.value.length > 0) {
+        selectedLineKey.value = indicatorLines.value[0].line
+      }
+    }
+  } finally {
+    loadingIndicatorLines.value = false
+  }
+}
+
+function handleSelectIndicatorLine(lineKey: string): void {
+  selectedLineKey.value = lineKey
+  indicatorCategoryFilter.value = ''
+}
+
+function openCreateIndicatorLineDialog(): void {
+  newLineForm.line = ''
+  newLineForm.display_name = ''
+  newLineForm.description = ''
+  lineDialogVisible.value = true
+}
+
+async function handleCreateIndicatorLine(): Promise<void> {
+  const keyClean = newLineForm.line.trim().toLowerCase()
+  const nameClean = newLineForm.display_name.trim()
+  if (!/^[a-z][a-z0-9_]{1,23}$/.test(keyClean)) {
+    ElMessage.warning('业务线标识需为 2~24 位小写字母、数字或下划线，且以字母开头（如 cloud_ops）')
+    return
+  }
+  if (!nameClean) {
+    ElMessage.warning('请填写业务线显示名称')
+    return
+  }
+  savingLine.value = true
+  try {
+    const created = await composerApi.createIndicatorLine({
+      line: keyClean,
+      display_name: nameClean,
+      description: newLineForm.description.trim(),
+    })
+    ElMessage.success(`已创建业务线指标库「${created.display_name} (${created.line})」`)
+    lineDialogVisible.value = false
+    await fetchIndicatorLines(false)
+    selectedLineKey.value = created.line
+  } finally {
+    savingLine.value = false
+  }
+}
+
+function openCreateIndicatorEntry(): void {
+  const curLine = currentIndicatorLine.value?.line || 'common'
+  editingIndicatorId.value = null
+  entryForm.line = curLine
+  entryForm.indicator_id = ''
+  entryForm.category = '技术方案'
+  entryForm.indicator_name = ''
+  entryForm.standard_response = ''
+  entryForm.weight_hint = '4~8分'
+  entryForm.typical_points_text = ''
+  entryForm.high_score_tips = ''
+  entryForm.param_slots_text = ''
+  entryForm.keywords_text = ''
+  entryForm.source_ref = ''
+  entryDialogVisible.value = true
+}
+
+function openEditIndicatorEntry(row: IndicatorEntryOut): void {
+  editingIndicatorId.value = row.indicator_id
+  entryForm.line = row.line || currentIndicatorLine.value?.line || 'common'
+  entryForm.indicator_id = row.indicator_id
+  entryForm.category = row.category || '技术方案'
+  entryForm.indicator_name = row.indicator_name || ''
+  entryForm.standard_response = row.standard_response || ''
+  entryForm.weight_hint = row.scoring_ref?.weight_hint || ''
+  entryForm.typical_points_text = (row.scoring_ref?.typical_points || []).join('\n')
+  entryForm.high_score_tips = row.scoring_ref?.high_score_tips || ''
+  entryForm.param_slots_text = (row.param_slots || []).join('\n')
+  entryForm.keywords_text = (row.keywords || []).join('，')
+  entryForm.source_ref = row.source_ref || ''
+  entryDialogVisible.value = true
+}
+
+function splitLinesClean(raw: string): string[] {
+  return raw
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+}
+
+function splitKeywordsClean(raw: string): string[] {
+  return raw
+    .split(/[,，;；\r\n]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+}
+
+async function handleSaveIndicatorEntry(): Promise<void> {
+  if (!entryForm.indicator_name.trim()) {
+    ElMessage.warning('请填写指标名称')
+    return
+  }
+  if (!entryForm.standard_response.trim()) {
+    ElMessage.warning('请填写标准应答正文')
+    return
+  }
+  savingEntry.value = true
+  try {
+    const payload = {
+      line: entryForm.line,
+      indicator_id: entryForm.indicator_id.trim() || undefined,
+      category: entryForm.category.trim() || '技术方案',
+      indicator_name: entryForm.indicator_name.trim(),
+      standard_response: entryForm.standard_response.trim(),
+      scoring_ref: {
+        weight_hint: entryForm.weight_hint.trim(),
+        typical_points: splitLinesClean(entryForm.typical_points_text),
+        high_score_tips: entryForm.high_score_tips.trim(),
+      },
+      param_slots: splitLinesClean(entryForm.param_slots_text),
+      keywords: splitKeywordsClean(entryForm.keywords_text),
+      source_ref: entryForm.source_ref.trim(),
+    }
+    const res =
+      editingIndicatorId.value === null
+        ? await composerApi.createIndicatorEntry(payload)
+        : await composerApi.updateIndicatorEntry(editingIndicatorId.value, payload)
+
+    if (res.money_sanitized) {
+      ElMessage.warning(
+        '防造假红线已触发：所填内容中的具体人民币报价数字已被自动转化为「[待人工填报：...]」安全槽位！',
+      )
+    } else {
+      ElMessage.success(
+        editingIndicatorId.value === null
+          ? `已新增指标条目「${res.entry.indicator_name}」`
+          : `已更新指标条目「${res.entry.indicator_name}」`,
+      )
+    }
+    entryDialogVisible.value = false
+    await fetchIndicatorLines(true)
+  } finally {
+    savingEntry.value = false
+  }
+}
+
+async function handleDeleteIndicatorEntry(row: IndicatorEntryOut): Promise<void> {
+  const lineKey = currentIndicatorLine.value?.line || row.line || 'common'
+  try {
+    await ElMessageBox.confirm(
+      `确认从业务线「${currentIndicatorLine.value?.display_name || lineKey}」删除指标「${row.indicator_name} (${row.indicator_id})」吗？`,
+      '确认删除标准指标',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+  await composerApi.deleteIndicatorEntry(row.indicator_id, lineKey)
+  ElMessage.success(`已删除指标 ${row.indicator_id}`)
+  await fetchIndicatorLines(true)
+}
+
+async function handleApproveCurrentLine(): Promise<void> {
+  const line = currentIndicatorLine.value
+  if (!line) return
+  try {
+    await ElMessageBox.confirm(
+      `确认已完成对「${line.display_name}」共 ${line.total_indicators} 条指标的人工核对（当前含 ${line.pending_slot_count} 个待项目组填报槽位），并将其正式签批为「已人工终审 (approved)」吗？`,
+      '签署企业指标库人工终审',
+      {
+        type: 'info',
+        confirmButtonText: '确认签批通过',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+  approvingLine.value = true
+  try {
+    const updated = await composerApi.approveIndicatorLine({
+      line: line.line,
+      review_note: '经管理员在线核对确认，所有报价与待确认参数均已规范化为安全槽位，准予作为正式标书编制底座。',
+    })
+    ElMessage.success(`业务线「${updated.display_name}」已签署人工终审通过`)
+    await fetchIndicatorLines(true)
+  } finally {
+    approvingLine.value = false
+  }
+}
+
 onMounted(() => {
   const qTab = typeof route.query.tab === 'string' ? route.query.tab : ''
-  if (qTab === 'rules' || qTab === 'certs' || qTab === 'regulations') {
+  if (qTab === 'rules' || qTab === 'certs' || qTab === 'regulations' || qTab === 'indicators') {
     activeTab.value = qTab
   }
   void fetchRuleConfig()
   void fetchCerts()
   void fetchLaws(true)
+  void fetchIndicatorLines(true)
 })
 </script>
 <template>
@@ -976,8 +1263,376 @@ onMounted(() => {
             </div>
           </div>
         </el-tab-pane>
+
+        <!-- 页签 ④：企业指标与业务线评分库在线维护及人工终审台 -->
+        <el-tab-pane label="④ 企业指标与业务线评分库" name="indicators">
+          <div v-loading="loadingIndicatorLines" class="indicators-pane">
+            <div class="rp-top-bar">
+              <div>
+                <h3>企业指标与业务线评分库管理（F8 标书编制标准应答底座）</h3>
+                <p>
+                  在线维护跨业务线通用与垂直专精指标应答、评分参考及待确认槽位；所有保存操作均强制经过金额防造假锁。
+                </p>
+              </div>
+              <div class="cert-actions">
+                <el-button size="small" @click="fetchIndicatorLines(true)">刷新</el-button>
+                <el-button
+                  v-if="authStore.isAdmin"
+                  size="small"
+                  type="primary"
+                  plain
+                  @click="openCreateIndicatorLineDialog"
+                >
+                  + 新增业务线
+                </el-button>
+              </div>
+            </div>
+
+            <div class="reg-split-layout">
+              <!-- 左栏：业务线列表 -->
+              <div class="law-cards-col">
+                <div
+                  v-for="lineItem in indicatorLines"
+                  :key="lineItem.line"
+                  class="law-card-item"
+                  :class="{ active: lineItem.line === selectedLineKey }"
+                  @click="handleSelectIndicatorLine(lineItem.line)"
+                >
+                  <div class="lc-row1">
+                    <span class="lc-name">{{ lineItem.display_name }}</span>
+                    <span
+                      class="sev-pill"
+                      :class="lineItem.review_status === 'approved' ? 'ok' : 'warning'"
+                    >
+                      {{ lineItem.review_status === 'approved' ? '✓ 已人工终审' : '待人工终审' }}
+                    </span>
+                  </div>
+                  <div class="lc-meta">
+                    <div>
+                      业务线标识：<code>{{ lineItem.line }}</code>
+                      <span v-if="lineItem.is_builtin" class="ind-builtin-tag">内置</span>
+                    </div>
+                    <div>
+                      标准指标：<b>{{ lineItem.total_indicators }}</b> 条 ｜ 含待确认槽位：<b>{{
+                        lineItem.pending_slot_count
+                      }}</b> 条
+                    </div>
+                    <div v-if="lineItem.reviewed_at">
+                      终审：{{ lineItem.reviewed_by || 'admin' }} ·
+                      {{ lineItem.reviewed_at.slice(0, 19).replace('T', ' ') }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 右栏：当前业务线详情与条目 CRUD -->
+              <div v-if="currentIndicatorLine" class="law-articles-col">
+                <div class="ind-line-banner" :class="currentIndicatorLine.review_status">
+                  <div class="ilb-left">
+                    <div class="ilb-title-row">
+                      <h4>{{ currentIndicatorLine.display_name }}</h4>
+                      <code>{{ currentIndicatorLine.line }}.json</code>
+                      <span
+                        class="sev-pill"
+                        :class="currentIndicatorLine.review_status === 'approved' ? 'ok' : 'warning'"
+                      >
+                        {{
+                          currentIndicatorLine.review_status === 'approved'
+                            ? '✓ 已签署人工终审 (approved)'
+                            : '⚠ 待人工终审 (pending_human_review)'
+                        }}
+                      </span>
+                    </div>
+                    <p class="ilb-desc">{{ currentIndicatorLine.description }}</p>
+                    <div class="ilb-meta-row">
+                      <span>共 <b>{{ currentIndicatorLine.total_indicators }}</b> 条标准指标</span>
+                      <span>
+                        含 <code>[待人工确认/填报：...]</code> 安全槽位
+                        <b>{{ currentIndicatorLine.pending_slot_count }}</b> 条
+                      </span>
+                      <span v-if="currentIndicatorLine.content_hash" class="mono-num">
+                        SHA256: {{ currentIndicatorLine.content_hash }}
+                      </span>
+                      <span v-if="currentIndicatorLine.reviewed_at">
+                        签批人：<b>{{ currentIndicatorLine.reviewed_by || 'admin' }}</b> ({{
+                          currentIndicatorLine.reviewed_at.slice(0, 19).replace('T', ' ')
+                        }})
+                      </span>
+                    </div>
+                  </div>
+                  <div v-if="authStore.isAdmin" class="ilb-actions">
+                    <el-button
+                      size="small"
+                      type="success"
+                      :plain="currentIndicatorLine.review_status === 'approved'"
+                      :loading="approvingLine"
+                      @click="handleApproveCurrentLine"
+                    >
+                      {{
+                        currentIndicatorLine.review_status === 'approved'
+                          ? '重新签署终审'
+                          : '✓ 签署人工终审通过'
+                      }}
+                    </el-button>
+                    <el-button size="small" type="primary" @click="openCreateIndicatorEntry">
+                      + 新增标准指标
+                    </el-button>
+                  </div>
+                </div>
+
+                <!-- 典型评分权重参考 -->
+                <div
+                  v-if="currentIndicatorLine.line_scoring_summary?.length"
+                  class="ind-scoring-summary-bar"
+                >
+                  <div
+                    v-for="(sc, sIdx) in currentIndicatorLine.line_scoring_summary"
+                    :key="sIdx"
+                    class="iss-chip"
+                  >
+                    <div class="iss-top">
+                      <b>{{ sc.dimension }}</b>
+                      <span class="mono-num">{{ sc.typical_weight }}</span>
+                    </div>
+                    <div class="iss-focus">{{ sc.key_focus }}</div>
+                  </div>
+                </div>
+
+                <!-- 检索与分类筛选栏 -->
+                <div class="la-toolbar">
+                  <div class="la-current-title">
+                    <b>指标与标准应答列表</b>
+                    <span class="mono-num">（当前显示 {{ filteredIndicators.length }} 条）</span>
+                  </div>
+                  <div class="la-search">
+                    <el-select
+                      v-model="indicatorCategoryFilter"
+                      size="small"
+                      clearable
+                      placeholder="按章节分类筛选"
+                      style="width: 155px"
+                    >
+                      <el-option
+                        v-for="cat in availableIndicatorCategories"
+                        :key="cat"
+                        :label="cat"
+                        :value="cat"
+                      />
+                    </el-select>
+                    <el-input
+                      v-model="indicatorSearchKeyword"
+                      size="small"
+                      clearable
+                      placeholder="按指标名称 / 应答正文 / 关键词检索…"
+                      style="width: 240px"
+                    />
+                  </div>
+                </div>
+
+                <!-- 指标卡片列表 -->
+                <div class="articles-scroll-list">
+                  <div
+                    v-for="ind in filteredIndicators"
+                    :key="ind.indicator_id"
+                    class="art-item ind-entry-card"
+                  >
+                    <div class="art-head">
+                      <span class="art-no">{{ ind.indicator_id }}</span>
+                      <span class="sev-pill info">{{ ind.category }}</span>
+                      <b class="ind-entry-title">{{ ind.indicator_name }}</b>
+                      <span v-if="ind.scoring_ref?.weight_hint" class="ind-weight-pill mono-num">
+                        典型分值：{{ ind.scoring_ref.weight_hint }}
+                      </span>
+                      <span v-if="hasPendingSlotInEntry(ind)" class="sev-pill warning">
+                        含待人工确认槽位
+                      </span>
+                      <div v-if="authStore.isAdmin" style="margin-left: auto; display: flex; gap: 6px">
+                        <el-button
+                          size="small"
+                          link
+                          type="primary"
+                          @click="openEditIndicatorEntry(ind)"
+                        >
+                          编辑
+                        </el-button>
+                        <el-button
+                          size="small"
+                          link
+                          type="danger"
+                          @click="handleDeleteIndicatorEntry(ind)"
+                        >
+                          删除
+                        </el-button>
+                      </div>
+                    </div>
+
+                    <div class="art-content ind-resp-body">{{ ind.standard_response }}</div>
+
+                    <div
+                      v-if="ind.scoring_ref?.typical_points?.length || ind.scoring_ref?.high_score_tips"
+                      class="ind-scoring-ref-box"
+                    >
+                      <div v-if="ind.scoring_ref?.typical_points?.length">
+                        <b>典型评分点：</b>{{ ind.scoring_ref.typical_points.join('；') }}
+                      </div>
+                      <div v-if="ind.scoring_ref?.high_score_tips">
+                        <b>高分编制要领：</b>{{ ind.scoring_ref.high_score_tips }}
+                      </div>
+                    </div>
+
+                    <div class="ind-footer-tags">
+                      <span
+                        v-for="(slot, pIdx) in ind.param_slots || []"
+                        :key="'s-' + pIdx"
+                        class="ind-slot-chip"
+                      >
+                        {{ slot }}
+                      </span>
+                      <span
+                        v-for="(kw, kIdx) in ind.keywords || []"
+                        :key="'k-' + kIdx"
+                        class="ind-kw-chip"
+                      >
+                        #{{ kw }}
+                      </span>
+                    </div>
+                  </div>
+
+                  <el-empty
+                    v-if="filteredIndicators.length === 0"
+                    description="当前业务线暂无匹配的指标条目"
+                    :image-size="60"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </el-tab-pane>
       </el-tabs>
     </div>
+
+    <!-- 新增自定义业务线弹窗 -->
+    <el-dialog v-model="lineDialogVisible" title="新增自定义业务线指标库" width="480px">
+      <el-form label-position="top">
+        <el-form-item label="业务线英文标识 (line · 如 cloud_ops / gov_data)" required>
+          <el-input
+            v-model="newLineForm.line"
+            placeholder="2~24 位小写字母、数字或下划线，以字母开头"
+          />
+        </el-form-item>
+        <el-form-item label="业务线显示名称 (display_name)" required>
+          <el-input
+            v-model="newLineForm.display_name"
+            placeholder="例如：政务云与算力底座专精线"
+          />
+        </el-form-item>
+        <el-form-item label="适用范围与说明 (description)">
+          <el-input
+            v-model="newLineForm.description"
+            type="textarea"
+            :rows="2"
+            placeholder="简要说明该业务线适用的招标项目类型与核心技术栈…"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="lineDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="savingLine" @click="handleCreateIndicatorLine">
+          创建业务线
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 新增/编辑标准指标条目弹窗 -->
+    <el-dialog
+      v-model="entryDialogVisible"
+      :title="editingIndicatorId === null ? '新增企业标准指标应答' : `编辑标准指标 (${editingIndicatorId})`"
+      width="680px"
+    >
+      <div class="ind-anti-forgery-alert">
+        <b>防造假红线锁已启用：</b>标准指标库严禁写入具体人民币投标报价数字（如
+        <code>46000元</code>、<code>￥12.8万元</code>、<code>15元/M Tokens</code>）；任何包含具体价格的内容在保存时将由系统确定性替换为
+        <code>[待人工填报：价格/商务数值须由项目组按实际报价填报]</code>。未经公司证实的硬指标请使用
+        <code>[待人工确认：...]</code> 槽位。
+      </div>
+      <el-form label-position="top" style="margin-top: 12px">
+        <div class="rule-grid-2">
+          <el-form-item label="所属章节分类 (category)" required>
+            <el-input
+              v-model="entryForm.category"
+              placeholder="例如：技术方案 / 实施方案 / 售后服务 / 培训方案"
+            />
+          </el-form-item>
+          <el-form-item label="指标编号 (indicator_id · 留空自动生成)">
+            <el-input
+              v-model="entryForm.indicator_id"
+              :disabled="editingIndicatorId !== null"
+              placeholder="例如：SEC-009（留空自动编号）"
+            />
+          </el-form-item>
+        </div>
+
+        <el-form-item label="标准指标名称 (indicator_name)" required>
+          <el-input
+            v-model="entryForm.indicator_name"
+            placeholder="例如：零信任架构与多因子身份鉴别技术方案"
+          />
+        </el-form-item>
+
+        <el-form-item label="标准应答正文 (standard_response)" required>
+          <el-input
+            v-model="entryForm.standard_response"
+            type="textarea"
+            :rows="5"
+            placeholder="填写规范化投标技术/商务应答正文，待项目组确定的参数请以 [待人工确认：...] 标注…"
+          />
+        </el-form-item>
+
+        <div class="rule-grid-2">
+          <el-form-item label="典型分值权重参考 (weight_hint)">
+            <el-input v-model="entryForm.weight_hint" placeholder="例如：6~10分" />
+          </el-form-item>
+          <el-form-item label="检索触发关键词 (keywords · 逗号分隔)">
+            <el-input
+              v-model="entryForm.keywords_text"
+              placeholder="例如：零信任，身份鉴别，IAM，最小权限"
+            />
+          </el-form-item>
+        </div>
+
+        <div class="rule-grid-2">
+          <el-form-item label="典型评分考察点 (typical_points · 每行一条)">
+            <el-input
+              v-model="entryForm.typical_points_text"
+              type="textarea"
+              :rows="3"
+              placeholder="每行填写一条招标常见评分点…"
+            />
+          </el-form-item>
+          <el-form-item label="待人工确认参数槽 (param_slots · 每行一个)">
+            <el-input
+              v-model="entryForm.param_slots_text"
+              type="textarea"
+              :rows="3"
+              placeholder="例如：[待人工确认：并发吞吐性能指标]"
+            />
+          </el-form-item>
+        </div>
+
+        <el-form-item label="高分编制要领 (high_score_tips)">
+          <el-input
+            v-model="entryForm.high_score_tips"
+            placeholder="例如：建议配合架构流转表与权限矩阵表佐证"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="entryDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="savingEntry" @click="handleSaveIndicatorEntry">
+          保存指标条目
+        </el-button>
+      </template>
+    </el-dialog>
 
     <!-- 新增/编辑证照弹窗 -->
     <el-dialog
@@ -1519,5 +2174,178 @@ onMounted(() => {
   font-size: 12px;
   color: #b45309;
   font-weight: 600;
+}
+
+/* ── 页签 ④：企业指标与业务线评分库样式 ── */
+.ind-builtin-tag {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #e2e8f0;
+  color: #334155;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.ind-line-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border-line);
+  border-left: 4px solid #f59e0b;
+  background: #fffbeb;
+  margin-bottom: 14px;
+}
+
+.ind-line-banner.approved {
+  border-left-color: var(--sev-ok);
+  background: #f0fdf4;
+}
+
+.ilb-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.ilb-title-row h4 {
+  font-size: 15px;
+  font-weight: 900;
+  color: var(--txt-strong);
+  margin: 0;
+}
+
+.ilb-desc {
+  font-size: 12.5px;
+  color: var(--txt-body);
+  margin: 4px 0 6px;
+  line-height: 1.55;
+}
+
+.ilb-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--txt-sec);
+}
+
+.ilb-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.ind-scoring-summary-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.iss-chip {
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-line);
+  background: var(--bg-subtle);
+}
+
+.iss-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12.5px;
+  color: var(--txt-strong);
+  margin-bottom: 4px;
+}
+
+.iss-top span {
+  color: var(--brand);
+  font-weight: 800;
+}
+
+.iss-focus {
+  font-size: 11.5px;
+  color: var(--txt-sec);
+  line-height: 1.45;
+}
+
+.ind-entry-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ind-entry-title {
+  font-size: 13.5px;
+  font-weight: 900;
+  color: var(--txt-strong);
+}
+
+.ind-weight-pill {
+  padding: 1px 8px;
+  border-radius: 4px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 11.5px;
+  font-weight: 800;
+}
+
+.ind-resp-body {
+  white-space: pre-wrap;
+}
+
+.ind-scoring-ref-box {
+  margin-top: 2px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #ffffff;
+  border: 1px dashed var(--border-strong);
+  font-size: 12px;
+  color: var(--txt-sec);
+  line-height: 1.55;
+}
+
+.ind-footer-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.ind-slot-chip {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fde68a;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.ind-kw-chip {
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 11px;
+}
+
+.ind-anti-forgery-alert {
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 12px;
+  line-height: 1.6;
 }
 </style>

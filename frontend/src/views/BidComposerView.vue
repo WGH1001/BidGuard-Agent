@@ -13,10 +13,13 @@ import type {
   CleanBidExportOut,
   ComposeBlueprintData,
   ComposeBlueprintSection,
+  ComposeDensityPreset,
   ComposeDraftDetailOut,
   ComposeDraftSummaryOut,
   ComposeManualItem,
   ComposeModeType,
+  ComposeScopeType,
+  ComposeTableDensity,
   ComposerSkillOut,
   SkillImportPreviewOut,
   SkillLayoutSpec,
@@ -78,6 +81,20 @@ const selectedSourceTaskId = ref<number | undefined>(undefined)
 const composeTitle = ref('')
 const packageNo = ref<number | undefined>(undefined)
 const composeMode = ref<ComposeModeType>('skeleton_v1')
+const composeScope = ref<ComposeScopeType>('full')
+const targetSectionTopic = ref('')
+const targetSectionGuidance = ref('')
+const densityPreset = ref<ComposeDensityPreset>('standard')
+const tableDensity = ref<ComposeTableDensity>('rich')
+const showScoringFocusPanel = ref(false)
+const QUICK_SECTION_TOPICS = [
+  '技术方案',
+  '实施方案',
+  '售后服务方案',
+  '培训方案',
+  '应急响应与保障方案',
+  '项目团队与管理体系',
+] as const
 const useAi = ref(true)
 const useIndicatorLibrary = ref(false)
 const blindBidMode = ref(false)
@@ -104,6 +121,7 @@ const draftList = ref<ComposeDraftSummaryOut[]>([])
 const activeDraft = ref<ComposeDraftDetailOut | null>(null)
 const showManualDrawer = ref(false)
 const expandedSections = ref<string[]>([
+  'sec_section_anchor',
   'sec_cover',
   'sec_qual',
   'sec_price',
@@ -452,13 +470,26 @@ async function handleGenerateDraft(): Promise<void> {
     ElMessage.warning('请先选择一个已有体检任务作为招标依据')
     return
   }
+  if (composeScope.value === 'section' && !targetSectionTopic.value.trim()) {
+    ElMessage.warning('单章节专项补写模式下，请填写或点击快捷标签选择目标章节名称（如：培训方案）')
+    return
+  }
   generating.value = true
   try {
+    const useRefFiles =
+      composeMode.value === 'knowledge_draft_v2' || composeScope.value === 'section'
     const detail = await composerApi.generate({
       tenderFile: tenderSourceType.value === 'upload' ? tenderFile.value : null,
       taskId: tenderSourceType.value === 'task' ? selectedSourceTaskId.value : null,
-      knowledgeFiles: composeMode.value === 'knowledge_draft_v2' ? knowledgeFiles.value : [],
+      knowledgeFiles: useRefFiles ? knowledgeFiles.value : [],
       composeMode: composeMode.value,
+      composeScope: composeScope.value,
+      targetSectionTopic:
+        composeScope.value === 'section' ? targetSectionTopic.value.trim() : undefined,
+      targetSectionGuidance:
+        composeScope.value === 'section' ? targetSectionGuidance.value.trim() : undefined,
+      densityPreset: densityPreset.value,
+      tableDensity: tableDensity.value,
       title: composeTitle.value.trim() || undefined,
       packageNo: packageNo.value || undefined,
       skillId: selectedSkillId.value,
@@ -661,7 +692,7 @@ function removeBlindCustomWord(idx: number): void {
   blindCustomWords.value = blindCustomWords.value.filter((_, i) => i !== idx)
 }
 
-onMounted(async () => {
+function applyRouteQueryPrefill(): void {
   if (route.query.tab === 'clean') {
     mainTab.value = 'clean'
   }
@@ -683,7 +714,32 @@ onMounted(async () => {
   if (Number.isFinite(qTaskId) && qTaskId > 0) {
     cleanTaskId.value = qTaskId
     selectedSourceTaskId.value = qTaskId
+    tenderSourceType.value = 'task'
   }
+  const qScope = typeof route.query.compose_scope === 'string' ? route.query.compose_scope : ''
+  const qTopic = typeof route.query.topic === 'string' ? route.query.topic.trim() : ''
+  const qGuidance = typeof route.query.guidance === 'string' ? route.query.guidance.trim() : ''
+  if (qScope === 'section' || qTopic) {
+    mainTab.value = 'compose'
+    composeScope.value = 'section'
+  }
+  if (qTopic) {
+    targetSectionTopic.value = qTopic
+  }
+  if (qGuidance) {
+    targetSectionGuidance.value = qGuidance
+  }
+}
+
+watch(
+  () => [route.query.taskId, route.query.compose_scope, route.query.topic, route.query.guidance],
+  () => {
+    applyRouteQueryPrefill()
+  },
+)
+
+onMounted(async () => {
+  applyRouteQueryPrefill()
   await Promise.all([loadSkills(), loadDrafts(), loadTasks()])
   if (cleanTaskId.value) {
     await loadAcceptedForClean(cleanTaskId.value)
@@ -756,6 +812,72 @@ onUnmounted(() => {
                   placeholder="分包"
                   controls-position="right"
                 />
+              </div>
+
+              <!-- WPS 风格：生成范围（整书 vs 单章专项补写）与篇幅/表格密度快捷档位 -->
+              <div class="wps-scope-panel">
+                <div class="wps-scope-head">
+                  <span class="field-label">生成范围与篇幅密度</span>
+                  <el-tag
+                    v-if="composeScope === 'section'"
+                    size="small"
+                    type="primary"
+                    effect="dark"
+                  >
+                    单章专项补写模式
+                  </el-tag>
+                </div>
+                <el-radio-group v-model="composeScope" size="small" class="wps-scope-radios">
+                  <el-radio value="full">完整投标文件 (full)</el-radio>
+                  <el-radio value="section">单章节专项补写 (section)</el-radio>
+                </el-radio-group>
+
+                <div v-if="composeScope === 'section'" class="wps-section-target-box">
+                  <div class="wps-quick-topics">
+                    <span class="wps-qt-label">快捷定位：</span>
+                    <button
+                      v-for="tp in QUICK_SECTION_TOPICS"
+                      :key="tp"
+                      type="button"
+                      class="wps-topic-chip"
+                      :class="{ active: targetSectionTopic === tp }"
+                      @click="targetSectionTopic = tp"
+                    >
+                      {{ tp }}
+                    </button>
+                  </div>
+                  <el-input
+                    v-model="targetSectionTopic"
+                    size="small"
+                    placeholder="填写目标章节或评分项名称（例如：培训方案 / 零信任架构方案）"
+                    clearable
+                  />
+                  <el-input
+                    v-model="targetSectionGuidance"
+                    type="textarea"
+                    :rows="2"
+                    placeholder="专项补写指引或评分诊断缺口说明（可选，可从体检页评分面板一键带入）…"
+                  />
+                </div>
+
+                <div class="wps-density-grid">
+                  <div class="wps-density-row">
+                    <span class="wps-d-label">篇幅密度：</span>
+                    <el-radio-group v-model="densityPreset" size="small">
+                      <el-radio-button value="concise">简明 (~320字/节)</el-radio-button>
+                      <el-radio-button value="standard">标准 (Skill默认)</el-radio-button>
+                      <el-radio-button value="detailed">详尽 (~900字/节)</el-radio-button>
+                    </el-radio-group>
+                  </div>
+                  <div class="wps-density-row">
+                    <span class="wps-d-label">表格配比：</span>
+                    <el-radio-group v-model="tableDensity" size="small">
+                      <el-radio-button value="rich">丰富表格</el-radio-button>
+                      <el-radio-button value="moderate">适中表格</el-radio-button>
+                      <el-radio-button value="none">纯文字无表</el-radio-button>
+                    </el-radio-group>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -883,9 +1005,9 @@ onUnmounted(() => {
                 </el-radio>
               </el-radio-group>
 
-              <div v-if="composeMode === 'knowledge_draft_v2'" class="knowledge-box">
+              <div v-if="composeMode === 'knowledge_draft_v2' || composeScope === 'section'" class="knowledge-box">
                 <div class="kb-head">
-                  <span>上传历史优秀标书 / 企业方案库切片（可选 .docx/.pdf/.txt）</span>
+                  <span>上传历史优秀标书 / 企业方案库或多参考附件协同（可选 .docx/.pdf/.txt）</span>
                   <input
                     type="file"
                     multiple
@@ -1016,6 +1138,14 @@ onUnmounted(() => {
                   </el-tag>
                   <span>{{ item.skill_name || '标准版' }}</span>
                   <el-tag
+                    v-if="item.compose_scope === 'section' || Boolean((item.stats as Record<string, unknown>)?.compose_scope === 'section')"
+                    size="small"
+                    type="primary"
+                    effect="plain"
+                  >
+                    单章专项
+                  </el-tag>
+                  <el-tag
                     v-if="item.blind_bid_mode || Boolean((item.stats as Record<string, unknown>)?.blind_bid_applied)"
                     size="small"
                     type="danger"
@@ -1095,6 +1225,13 @@ onUnmounted(() => {
                       业务线：{{ bizLineLabel(activeDraft.biz_line) }}
                     </el-tag>
                     <el-tag
+                      v-if="activeBlueprint.compose_scope === 'section' || activeDraft.compose_scope === 'section'"
+                      size="small"
+                      type="primary"
+                    >
+                      单章节专项补写：{{ activeBlueprint.target_section_topic || activeDraft.target_section_topic || '专项章节' }}
+                    </el-tag>
+                    <el-tag
                       v-if="activeBlueprint.blind_bid_mode || activeDraft.blind_bid_mode || Boolean((activeBlueprint.stats as Record<string, unknown>)?.blind_bid_applied)"
                       size="small"
                       type="danger"
@@ -1126,6 +1263,34 @@ onUnmounted(() => {
                 >
                   下载排版初稿 (.docx)
                 </el-button>
+              </div>
+
+              <!-- 招标评分细则要点原文对照折叠面板（WPS 风格边看要求边审正文） -->
+              <div
+                v-if="activeBlueprint.tender_scoring_focus && activeBlueprint.tender_scoring_focus.length > 0"
+                class="scoring-focus-bar"
+              >
+                <div class="sfb-head">
+                  <div class="sfb-title">
+                    <strong>招标评分细则要点原文对照（共 {{ activeBlueprint.tender_scoring_focus.length }} 条匹配依据）</strong>
+                    <span class="sfb-sub">边对照招标评分原文边审校生成的章节正文</span>
+                  </div>
+                  <el-button
+                    size="small"
+                    link
+                    type="primary"
+                    @click="showScoringFocusPanel = !showScoringFocusPanel"
+                  >
+                    {{ showScoringFocusPanel ? '收起评分原文对照 ▲' : '展开评分原文对照 ▼' }}
+                  </el-button>
+                </div>
+                <div v-if="showScoringFocusPanel" class="sfb-body">
+                  <el-table :data="activeBlueprint.tender_scoring_focus" size="small" border max-height="220">
+                    <el-table-column prop="chapter" label="评分因素 / 章节" width="180" />
+                    <el-table-column prop="score" label="分值" width="90" />
+                    <el-table-column prop="criteria" label="招标评分标准与实质要求原文" min-width="280" />
+                  </el-table>
+                </div>
               </div>
 
               <!-- 紧凑分组人工待核对条（取代原 40 标签墙，点击展开明细抽屉） -->
@@ -1177,8 +1342,14 @@ onUnmounted(() => {
                     </div>
                   </template>
 
-                  <!-- Cover & Price KV -->
-                  <template v-if="sec.slot_type === 'cover_and_letter' || sec.slot_type === 'price_placeholder'">
+                  <!-- Cover & Price & Single-Section Anchor KV -->
+                  <template
+                    v-if="
+                      sec.slot_type === 'cover_and_letter' ||
+                      sec.slot_type === 'price_placeholder' ||
+                      sec.slot_type === 'section_focus_header'
+                    "
+                  >
                     <el-table
                       :data="sec.content_blocks.filter((b) => b.kind !== 'paragraph')"
                       size="small"
@@ -2276,5 +2447,126 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+/* ── WPS 风格：单章专项补写与篇幅/表格密度档位 ── */
+.wps-scope-panel {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wps-scope-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.wps-scope-radios {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.wps-section-target-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px dashed #93c5fd;
+  background: #eff6ff;
+}
+
+.wps-quick-topics {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.wps-qt-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #1e3a8a;
+}
+
+.wps-topic-chip {
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid #bfdbfe;
+  background: #ffffff;
+  color: #1e40af;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.wps-topic-chip:hover,
+.wps-topic-chip.active {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #ffffff;
+}
+
+.wps-density-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+  border-top: 1px dashed #e2e8f0;
+}
+
+.wps-density-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wps-d-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+  min-width: 66px;
+}
+
+.scoring-focus-bar {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+}
+
+.sfb-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sfb-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: #1e3a8a;
+}
+
+.sfb-sub {
+  font-size: 11.5px;
+  color: #475569;
+}
+
+.sfb-body {
+  margin-top: 8px;
 }
 </style>

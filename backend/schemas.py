@@ -9,7 +9,9 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
+
+from core.privacy_sanitizer import is_contact_privacy_mask_enabled
 
 
 # ── 0. 通用错误与基础响应 ─────────────────────────────────────────────────
@@ -167,10 +169,29 @@ class BidFindingOut(BaseModel):
 
 
 class PrivacyStatsOut(BaseModel):
-    """E40：上传与脱敏只读统计（不展示明文敏感编号）。"""
+    """E40 / E45：上传与脱敏只读统计（不展示明文敏感编号）。"""
 
     id_masked: int = 0
     bank_masked: int = 0
+    phone_masked: int = 0
+    email_masked: int = 0
+
+    @model_serializer
+    def _serialize_privacy_stats(self) -> dict[str, int]:
+        out: dict[str, int] = {
+            'id_masked': int(self.id_masked or 0),
+            'bank_masked': int(self.bank_masked or 0),
+        }
+        if (
+            is_contact_privacy_mask_enabled()
+            or 'phone_masked' in self.model_fields_set
+            or 'email_masked' in self.model_fields_set
+            or int(self.phone_masked or 0) > 0
+            or int(self.email_masked or 0) > 0
+        ):
+            out['phone_masked'] = int(self.phone_masked or 0)
+            out['email_masked'] = int(self.email_masked or 0)
+        return out
 
 
 class BidTaskOut(BaseModel):
@@ -744,7 +765,7 @@ class ComposerSkillOut(BaseModel):
     user_id: Optional[int] = None
     name: str
     description: str = ''
-    biz_line: Literal['general', 'security', 'maas'] = 'general'
+    biz_line: str = 'general'
     source_type: str = 'custom'
     source_url: Optional[str] = None
     writing_instructions: str = ''
@@ -762,7 +783,7 @@ class ComposerSkillListOut(BaseModel):
 class ComposerSkillUpsertRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     description: str = ''
-    biz_line: Literal['general', 'security', 'maas'] = 'general'
+    biz_line: str = 'general'
     writing_instructions: str = Field(..., min_length=1)
     layout_spec: dict[str, Any] = Field(default_factory=dict)
     is_default: bool = False
@@ -776,7 +797,7 @@ class SkillImportUrlRequest(BaseModel):
 class SkillImportPreviewOut(BaseModel):
     name: str
     description: str = ''
-    biz_line: Literal['general', 'security', 'maas'] = 'general'
+    biz_line: str = 'general'
     source_type: str = 'github'
     source_url: Optional[str] = None
     writing_instructions: str = ''
@@ -793,7 +814,7 @@ class IndicatorScoringRefOut(BaseModel):
 
 class IndicatorEntryOut(BaseModel):
     indicator_id: str
-    line: Literal['common', 'security', 'maas']
+    line: str = 'common'
     category: str = '技术方案'
     indicator_name: str
     standard_response: str
@@ -810,7 +831,7 @@ class LineScoringSummaryOut(BaseModel):
 
 
 class BizLineIndicatorOverviewOut(BaseModel):
-    biz_line: Literal['general', 'security', 'maas'] = 'general'
+    biz_line: str = 'general'
     biz_line_label: str = ''
     included_lines: list[str] = Field(default_factory=list)
     review_status: str = 'pending_human_review'
@@ -818,6 +839,61 @@ class BizLineIndicatorOverviewOut(BaseModel):
     total_indicators: int = 0
     line_scoring_summary: list[LineScoringSummaryOut] = Field(default_factory=list)
     indicators: list[IndicatorEntryOut] = Field(default_factory=list)
+
+
+class IndicatorLineDetailOut(BaseModel):
+    line: str
+    display_name: str
+    description: str = ''
+    is_builtin: bool = False
+    review_status: str = 'pending_human_review'
+    reviewed_at: Optional[str] = None
+    reviewed_by: Optional[str] = None
+    content_hash: str = ''
+    total_indicators: int = 0
+    pending_slot_count: int = 0
+    line_scoring_summary: list[LineScoringSummaryOut] = Field(default_factory=list)
+    indicators: list[IndicatorEntryOut] = Field(default_factory=list)
+
+
+class IndicatorLineListOut(BaseModel):
+    total: int = 0
+    items: list[IndicatorLineDetailOut] = Field(default_factory=list)
+
+
+class IndicatorLineCreateRequest(BaseModel):
+    line: str = Field(..., min_length=2, max_length=24)
+    display_name: str = Field(..., min_length=1, max_length=128)
+    description: str = Field(default='', max_length=500)
+    line_scoring_summary: list[LineScoringSummaryOut] = Field(default_factory=list)
+
+
+class IndicatorEntryUpsertRequest(BaseModel):
+    line: str = Field(..., min_length=2, max_length=24)
+    indicator_id: Optional[str] = Field(default=None, max_length=64)
+    category: str = Field(default='技术方案', min_length=1, max_length=64)
+    indicator_name: str = Field(..., min_length=1, max_length=160)
+    standard_response: str = Field(..., min_length=1, max_length=8000)
+    scoring_ref: IndicatorScoringRefOut = Field(default_factory=IndicatorScoringRefOut)
+    param_slots: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    source_ref: str = Field(default='', max_length=300)
+
+
+class IndicatorEntryUpsertOut(BaseModel):
+    line: str = 'common'
+    entry: IndicatorEntryOut
+    created: bool = True
+    money_sanitized: bool = False
+    review_status: str = 'pending_human_review'
+    line_review_status: str = 'pending_human_review'
+    pending_slot_count: int = 0
+    content_hash: str = ''
+
+
+class IndicatorApproveRequest(BaseModel):
+    line: str = Field(..., min_length=2, max_length=24)
+    review_note: Optional[str] = Field(default=None, max_length=500)
 
 
 class ComposeDraftSummaryOut(BaseModel):
@@ -829,6 +905,10 @@ class ComposeDraftSummaryOut(BaseModel):
     biz_line: str = 'general'
     use_indicator_library: bool = False
     blind_bid_mode: bool = False
+    compose_scope: Literal['full', 'section'] = 'full'
+    target_section_topic: Optional[str] = None
+    density_preset: str = 'standard'
+    table_density: str = 'rich'
     title: str
     status: str = 'completed'
     progress: int = 100

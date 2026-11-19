@@ -1308,7 +1308,7 @@ onBeforeUnmount(() => {
                   link
                   @click="router.push({ path: '/composer', query: { taskId: String(currentTask.id) } })"
                 >
-                  前往 F8 标书编制中心定向补强 →
+                  前往标书编制中心整书装配 →
                 </el-button>
               </div>
               <div class="spb-list">
@@ -1323,6 +1323,25 @@ onBeforeUnmount(() => {
                     可挽回 +{{ pr.gap_score }} 分（满分 {{ pr.max_score }}）
                   </el-tag>
                   <span class="spb-action">{{ pr.action_summary }}</span>
+                  <el-button
+                    size="small"
+                    type="primary"
+                    plain
+                    style="margin-left: auto"
+                    @click="
+                      router.push({
+                        path: '/composer',
+                        query: {
+                          taskId: String(currentTask.id),
+                          compose_scope: 'section',
+                          topic: pr.factor,
+                          guidance: pr.action_summary,
+                        },
+                      })
+                    "
+                  >
+                    定向补写本章 →
+                  </el-button>
                 </div>
               </div>
             </div>

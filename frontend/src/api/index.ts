@@ -21,8 +21,11 @@ import type {
   CertificateUpsertRequest,
   ChangePasswordRequest,
   CleanBidExportOut,
+  ComposeDensityPreset,
   ComposeDraftDetailOut,
   ComposeDraftListOut,
+  ComposeScopeType,
+  ComposeTableDensity,
   ComposerSkillListOut,
   ComposerSkillOut,
   ComposerSkillUpsertPayload,
@@ -33,6 +36,12 @@ import type {
   FindingFeedbackRequest,
   FindingListOut,
   HealthOut,
+  IndicatorApprovePayload,
+  IndicatorEntryUpsertOut,
+  IndicatorEntryUpsertPayload,
+  IndicatorLineCreatePayload,
+  IndicatorLineDetailOut,
+  IndicatorLineListOut,
   LoginRequest,
   LoginResponse,
   ModelConfigOut,
@@ -645,12 +654,35 @@ export const similarityApi = {
   },
 }
 
-/** E37 + E38 标书编制输出、Skills 管理与无损修订中心 API (/api/composer) */
+/** E37 + E38 + E45 标书编制输出、企业指标库终审、Skills 管理与无损修订中心 API (/api/composer) */
 export const composerApi = {
   listIndicators(bizLine: BizLineType = 'general'): Promise<BizLineIndicatorOverviewOut> {
     return get<BizLineIndicatorOverviewOut>('/composer/indicators', {
       params: { biz_line: bizLine },
     })
+  },
+  listIndicatorLines(): Promise<IndicatorLineListOut> {
+    return get<IndicatorLineListOut>('/composer/indicators/lines')
+  },
+  createIndicatorLine(payload: IndicatorLineCreatePayload): Promise<IndicatorLineDetailOut> {
+    return post<IndicatorLineDetailOut>('/composer/indicators/lines', payload)
+  },
+  createIndicatorEntry(payload: IndicatorEntryUpsertPayload): Promise<IndicatorEntryUpsertOut> {
+    return post<IndicatorEntryUpsertOut>('/composer/indicators/entries', payload)
+  },
+  updateIndicatorEntry(
+    indicatorId: string,
+    payload: IndicatorEntryUpsertPayload,
+  ): Promise<IndicatorEntryUpsertOut> {
+    return put<IndicatorEntryUpsertOut>(`/composer/indicators/entries/${encodeURIComponent(indicatorId)}`, payload)
+  },
+  deleteIndicatorEntry(indicatorId: string, line = 'common'): Promise<OkResponse> {
+    return del<OkResponse>(`/composer/indicators/entries/${encodeURIComponent(indicatorId)}`, {
+      params: { line },
+    })
+  },
+  approveIndicatorLine(payload: IndicatorApprovePayload): Promise<IndicatorLineDetailOut> {
+    return post<IndicatorLineDetailOut>('/composer/indicators/approve', payload)
   },
   listSkills(): Promise<ComposerSkillListOut> {
     return get<ComposerSkillListOut>('/composer/skills')
@@ -688,6 +720,11 @@ export const composerApi = {
     taskId?: number | null
     knowledgeFiles?: File[]
     composeMode?: 'skeleton_v1' | 'knowledge_draft_v2'
+    composeScope?: ComposeScopeType
+    targetSectionTopic?: string | null
+    targetSectionGuidance?: string | null
+    densityPreset?: ComposeDensityPreset
+    tableDensity?: ComposeTableDensity
     title?: string
     packageNo?: number | null
     skillId?: number | null
@@ -709,6 +746,15 @@ export const composerApi = {
       fd.append('knowledge_files', kf, kf.name)
     }
     fd.append('compose_mode', payload.composeMode || 'skeleton_v1')
+    fd.append('compose_scope', payload.composeScope || 'full')
+    if (payload.targetSectionTopic && payload.targetSectionTopic.trim()) {
+      fd.append('target_section_topic', payload.targetSectionTopic.trim())
+    }
+    if (payload.targetSectionGuidance && payload.targetSectionGuidance.trim()) {
+      fd.append('target_section_guidance', payload.targetSectionGuidance.trim())
+    }
+    fd.append('density_preset', payload.densityPreset || 'standard')
+    fd.append('table_density', payload.tableDensity || 'rich')
     if (payload.title && payload.title.trim()) {
       fd.append('title', payload.title.trim())
     }

@@ -13,9 +13,11 @@
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 from typing import Any, Optional, Sequence
@@ -52,24 +54,73 @@ _LINE_FILENAME_MAP: dict[str, str] = {
     'maas': 'maas_indicators.json',
 }
 
+_LINE_KEY_RE = re.compile(r'^[a-z][a-z0-9_]{1,23}$')
+_PENDING_SLOT_RE = re.compile(r'\[待人工(?:确认|填报)[^\]]*\]')
+
+
+def validate_indicator_line_key(raw: Any) -> str:
+    """校验并规范化指标库业务线标识（仅允许 `^[a-z][a-z0-9_]{1,23}$`，严防路径穿越）。"""
+    val = str(raw or '').strip().lower()
+    if val == 'general':
+        val = 'common'
+    if not _LINE_KEY_RE.match(val):
+        raise ValueError(
+            f"业务线标识 {raw!r} 格式非法：须以小写字母开头，仅含小写字母、数字或下划线，长度 2~24 位"
+        )
+    return val
+
+
+def _resolve_line_filepath(line_key: str, lib_dir: Path) -> Path:
+    clean_key = validate_indicator_line_key(line_key)
+    base_dir = lib_dir.resolve()
+    fname = _LINE_FILENAME_MAP.get(clean_key, f"{clean_key}_indicators.json")
+    fpath = (base_dir / fname).resolve()
+    if fpath.parent != base_dir:
+        raise ValueError(f"检测到非法路径穿越：{line_key!r}")
+    return fpath
+
+
+def _atomic_write_json(fpath: Path, payload: dict[str, Any]) -> None:
+    """UTF-8 + LF + 临时文件 os.replace 原子落盘。"""
+    fpath.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = fpath.with_name(f".{fpath.name}.{os.getpid()}.tmp")
+    content = json.dumps(payload, ensure_ascii=False, indent=2) + '\n'
+    try:
+        tmp_path.write_text(content, encoding='utf-8', newline='\n')
+        os.replace(str(tmp_path), str(fpath))
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+def count_pending_slots_in_entry(entry: dict[str, Any]) -> int:
+    """统计单条指标正文中仍保留的 `[待人工确认：...]` / `[待人工填报：...]` 槽位数。"""
+    resp = str(entry.get('standard_response') or '')
+    return len(_PENDING_SLOT_RE.findall(resp))
+
 
 def normalize_skill_biz_line(raw: Any) -> str:
-    """规范化 Skill 的业务线标识，非法值保守回退为 'general'。"""
+    """规范化 Skill 的业务线标识（兼容内置 general/security/maas 与自定义业务线，非法值回退 'general'）。"""
     val = str(raw or '').strip().lower()
     if val in VALID_SKILL_BIZ_LINES:
         return val
     if val == 'common':
         return 'general'
+    if _LINE_KEY_RE.match(val):
+        return val
     return 'general'
 
 
 def resolve_target_entry_lines(biz_line: Any) -> tuple[str, ...]:
     """根据 Skill 或请求选择的业务线，解析需加载的指标库层级（业务线专精 + common 底座）。"""
     cleaned = str(biz_line or '').strip().lower()
-    if cleaned == 'security':
-        return ('security', 'common')
-    if cleaned == 'maas':
-        return ('maas', 'common')
+    if cleaned in ('', 'general', 'common'):
+        return ('common',)
+    if _LINE_KEY_RE.match(cleaned):
+        return (cleaned, 'common')
     return ('common',)
 
 
@@ -106,21 +157,26 @@ def compute_library_content_hash(entries: Sequence[dict[str, Any]]) -> str:
 def _normalize_scoring_ref(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {'typical_points': [], 'weight_hint': '', 'high_score_tips': ''}
-    pts = [str(p).strip() for p in (raw.get('typical_points') or []) if str(p).strip()]
+    pts = [
+        sanitize_indicator_text(str(p).strip())
+        for p in (raw.get('typical_points') or [])
+        if str(p).strip()
+    ]
     return {
-        'typical_points': pts[:8],
-        'weight_hint': str(raw.get('weight_hint') or '').strip(),
-        'high_score_tips': str(raw.get('high_score_tips') or '').strip(),
+        'typical_points': [p for p in pts if p][:8],
+        'weight_hint': sanitize_indicator_text(str(raw.get('weight_hint') or '').strip()),
+        'high_score_tips': sanitize_indicator_text(str(raw.get('high_score_tips') or '').strip()),
     }
 
 
 def _normalize_entry(raw: Any, *, fallback_line: str) -> Optional[dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
-    line = str(raw.get('line') or fallback_line).strip().lower()
-    if line not in VALID_ENTRY_LINES:
-        line = fallback_line if fallback_line in VALID_ENTRY_LINES else 'common'
-    name = str(raw.get('indicator_name') or '').strip()
+    fb_clean = fallback_line if _LINE_KEY_RE.match(str(fallback_line or '')) else 'common'
+    line = str(raw.get('line') or fb_clean).strip().lower()
+    if not _LINE_KEY_RE.match(line):
+        line = fb_clean
+    name = sanitize_indicator_text(str(raw.get('indicator_name') or '').strip())
     std_resp = sanitize_indicator_text(str(raw.get('standard_response') or ''))
     if not name or not std_resp:
         return None
@@ -129,21 +185,31 @@ def _normalize_entry(raw: Any, *, fallback_line: str) -> Optional[dict[str, Any]
     if not iid:
         iid = f"{line}_{hashlib.sha256(name.encode('utf-8')).hexdigest()[:8]}"
 
-    keywords = [str(k).strip() for k in (raw.get('keywords') or []) if str(k).strip()]
+    keywords = [
+        sanitize_indicator_text(str(k).strip())
+        for k in (raw.get('keywords') or [])
+        if str(k).strip()
+    ]
+    keywords = [k for k in keywords if k]
     if name not in keywords:
         keywords.insert(0, name)
 
-    slots = [str(s).strip() for s in (raw.get('param_slots') or []) if str(s).strip()]
+    slots = [
+        sanitize_indicator_text(str(s).strip())
+        for s in (raw.get('param_slots') or [])
+        if str(s).strip()
+    ]
+    slots = [s for s in slots if s]
     return {
         'indicator_id': iid,
         'line': line,
-        'category': str(raw.get('category') or '技术方案').strip(),
+        'category': sanitize_indicator_text(str(raw.get('category') or '技术方案').strip()) or '技术方案',
         'indicator_name': name,
         'standard_response': std_resp,
         'scoring_ref': _normalize_scoring_ref(raw.get('scoring_ref')),
         'param_slots': slots,
         'keywords': keywords,
-        'source_ref': str(raw.get('source_ref') or '').strip(),
+        'source_ref': sanitize_indicator_text(str(raw.get('source_ref') or '').strip()),
     }
 
 
@@ -151,10 +217,10 @@ def _load_single_line_payload(
     line: str,
     lib_dir: Path,
 ) -> dict[str, Any]:
-    fname = _LINE_FILENAME_MAP.get(line)
-    if not fname:
+    try:
+        fpath = _resolve_line_filepath(line, lib_dir)
+    except ValueError:
         return {}
-    fpath = lib_dir / fname
     if not fpath.is_file():
         return {}
     try:
@@ -164,19 +230,24 @@ def _load_single_line_payload(
     if not isinstance(raw_obj, dict):
         return {}
 
+    clean_line = validate_indicator_line_key(line)
     raw_entries = raw_obj.get('entries')
     if not isinstance(raw_entries, list):
         raw_entries = []
     norm_entries: list[dict[str, Any]] = []
     for raw_e in raw_entries:
-        norm_e = _normalize_entry(raw_e, fallback_line=line)
-        if norm_e is not None and norm_e['line'] == line:
+        norm_e = _normalize_entry(raw_e, fallback_line=clean_line)
+        if norm_e is not None and norm_e['line'] == clean_line:
             norm_entries.append(norm_e)
+
+    disp_name = str(raw_obj.get('display_name') or _BIZ_LINE_LABELS.get(clean_line, clean_line))
+    if clean_line not in _BIZ_LINE_LABELS and disp_name:
+        _BIZ_LINE_LABELS[clean_line] = disp_name
 
     return {
         'schema_version': str(raw_obj.get('schema_version') or '1.0'),
-        'line': line,
-        'display_name': str(raw_obj.get('display_name') or _BIZ_LINE_LABELS.get(line, line)),
+        'line': clean_line,
+        'display_name': disp_name,
         'description': str(raw_obj.get('description') or ''),
         'review_status': str(raw_obj.get('review_status') or 'pending_human_review'),
         'reviewed_at': raw_obj.get('reviewed_at'),
@@ -234,7 +305,10 @@ def get_biz_line_indicator_overview(
             scoring_summary.extend(payload.get('line_scoring_summary') or [])
         entries.extend(payload.get('entries') or [])
 
-    overall_review = 'reviewed' if (review_statuses and all(s == 'reviewed' for s in review_statuses)) else 'pending_human_review'
+    if review_statuses and all(s in ('approved', 'reviewed') for s in review_statuses):
+        overall_review = 'approved' if 'approved' in review_statuses else 'reviewed'
+    else:
+        overall_review = 'pending_human_review'
     return {
         'biz_line': norm_line,
         'biz_line_label': _BIZ_LINE_LABELS.get(norm_line, norm_line),
@@ -245,6 +319,270 @@ def get_biz_line_indicator_overview(
         'line_scoring_summary': scoring_summary,
         'indicators': entries,
     }
+
+
+def _normalize_line_scoring_summary(raw_list: Any) -> list[dict[str, str]]:
+    if not isinstance(raw_list, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in raw_list[:16]:
+        if not isinstance(item, dict):
+            continue
+        dim = sanitize_indicator_text(str(item.get('dimension') or '').strip())
+        if not dim:
+            continue
+        out.append({
+            'dimension': dim,
+            'typical_weight': sanitize_indicator_text(str(item.get('typical_weight') or '').strip()),
+            'key_focus': sanitize_indicator_text(str(item.get('key_focus') or '').strip()),
+        })
+    return out
+
+
+def _format_line_record(payload: dict[str, Any]) -> dict[str, Any]:
+    ln = str(payload.get('line') or 'common')
+    entries = list(payload.get('entries') or [])
+    return {
+        'line': ln,
+        'display_name': str(payload.get('display_name') or _BIZ_LINE_LABELS.get(ln, ln)),
+        'description': str(payload.get('description') or ''),
+        'is_builtin': ln in VALID_ENTRY_LINES,
+        'review_status': str(payload.get('review_status') or 'pending_human_review'),
+        'reviewed_at': payload.get('reviewed_at'),
+        'reviewed_by': payload.get('reviewed_by'),
+        'content_hash': str(payload.get('content_hash') or compute_library_content_hash(entries)),
+        'total_indicators': len(entries),
+        'pending_slot_count': sum(count_pending_slots_in_entry(e) for e in entries),
+        'line_scoring_summary': list(payload.get('line_scoring_summary') or []),
+        'indicators': entries,
+    }
+
+
+def list_indicator_lines(
+    *,
+    library_dir: Optional[str | Path] = None,
+) -> list[dict[str, Any]]:
+    """E45 §2.1：列出全部可用指标库业务线（内置三线 + 同目录下合法自定义 `{line}_indicators.json`）。"""
+    lib_dir = Path(library_dir) if library_dir else DEFAULT_INDICATOR_LIBRARY_DIR
+    discovered_keys: list[str] = list(VALID_ENTRY_LINES)
+    if lib_dir.is_dir():
+        for fp in sorted(lib_dir.glob('*_indicators.json')):
+            stem = fp.name[:-len('_indicators.json')]
+            if stem not in discovered_keys and _LINE_KEY_RE.match(stem):
+                discovered_keys.append(stem)
+
+    lines_out: list[dict[str, Any]] = []
+    for lk in discovered_keys:
+        payload = _load_single_line_payload(lk, lib_dir)
+        if not payload:
+            continue
+        lines_out.append(_format_line_record(payload))
+    return lines_out
+
+
+def create_indicator_line(
+    line_key: Optional[str] = None,
+    display_name: str = '',
+    description: str = '',
+    line_scoring_summary: Optional[list[dict[str, Any]]] = None,
+    *,
+    line: Optional[str] = None,
+    library_dir: Optional[str | Path] = None,
+) -> dict[str, Any]:
+    """E45 §2.1：创建新的自定义业务线指标库文件（原子落盘，默认 `pending_human_review`）。"""
+    eff_key = line_key if line_key is not None else line
+    raw_key = str(eff_key or '').strip().lower()
+    if raw_key == 'general' or not _LINE_KEY_RE.match(raw_key):
+        raise ValueError(
+            f"业务线标识 {eff_key!r} 非法：须以小写字母开头，仅含小写字母/数字/下划线，长度 2~24 位，且不可为 'general'"
+        )
+    disp = sanitize_indicator_text(str(display_name or '').strip())
+    if not disp:
+        raise ValueError('业务线显示名称不能为空')
+
+    lib_dir = Path(library_dir) if library_dir else DEFAULT_INDICATOR_LIBRARY_DIR
+    fpath = _resolve_line_filepath(raw_key, lib_dir)
+    if fpath.exists():
+        raise FileExistsError(f"业务线 {raw_key!r} 已存在，请勿重复创建")
+
+    norm_summary = _normalize_line_scoring_summary(line_scoring_summary)
+    payload: dict[str, Any] = {
+        'schema_version': '1.0',
+        'line': raw_key,
+        'display_name': disp,
+        'description': sanitize_indicator_text(str(description or '').strip()),
+        'review_status': 'pending_human_review',
+        'reviewed_at': None,
+        'reviewed_by': None,
+        'content_hash': compute_library_content_hash([]),
+        'line_scoring_summary': norm_summary,
+        'entries': [],
+    }
+    _atomic_write_json(fpath, payload)
+    _BIZ_LINE_LABELS[raw_key] = disp
+    return _format_line_record(payload)
+
+
+def _contains_raw_bid_money(raw_obj: Any) -> bool:
+    if isinstance(raw_obj, str):
+        return bool(_BID_MONEY_RE.search(raw_obj) or _PRICE_UNIT_LINE_HINT_RE.search(raw_obj))
+    if isinstance(raw_obj, dict):
+        return any(_contains_raw_bid_money(v) for v in raw_obj.values())
+    if isinstance(raw_obj, (list, tuple)):
+        return any(_contains_raw_bid_money(v) for v in raw_obj)
+    return False
+
+
+def upsert_indicator_entry(
+    line_key: Optional[str] = None,
+    entry_payload: Optional[dict[str, Any]] = None,
+    *,
+    line: Optional[str] = None,
+    indicator_id: Optional[str] = None,
+    library_dir: Optional[str | Path] = None,
+) -> dict[str, Any]:
+    """E45 §2.1：新增或更新单条指标标准应答（强制执行 `_BID_MONEY_RE` 防造假锁与原子写回，禁止绕过）。"""
+    eff_key = line_key if line_key is not None else line
+    clean_line = validate_indicator_line_key(str(eff_key or ''))
+    lib_dir = Path(library_dir) if library_dir else DEFAULT_INDICATOR_LIBRARY_DIR
+    fpath = _resolve_line_filepath(clean_line, lib_dir)
+    payload = _load_single_line_payload(clean_line, lib_dir)
+    if not payload or not fpath.is_file():
+        raise FileNotFoundError(f"未找到业务线指标库：{clean_line}")
+
+    if not isinstance(entry_payload, dict):
+        raise ValueError('指标条目载荷必须为对象')
+
+    merged_payload = {**entry_payload, 'line': clean_line}
+    if indicator_id and str(indicator_id).strip():
+        merged_payload['indicator_id'] = str(indicator_id).strip()
+
+    had_raw_money = _contains_raw_bid_money(merged_payload)
+    norm_entry = _normalize_entry(merged_payload, fallback_line=clean_line)
+    if norm_entry is None:
+        raise ValueError('指标名称（indicator_name）与标准应答正文（standard_response）均不能为空')
+
+    # 防造假硬锁二次校验：确保落盘字段绝不残留任何裸人民币报价数字
+    if _BID_MONEY_RE.search(norm_entry['standard_response']) or _PRICE_UNIT_LINE_HINT_RE.search(norm_entry['standard_response']):
+        norm_entry['standard_response'] = sanitize_indicator_text(norm_entry['standard_response'])
+    if had_raw_money:
+        slot_note = '[待人工填报：具体商务报价金额（系统已自动拦截裸报价数字并转为槽位）]'
+        if not any('报价' in s or '金额' in s or '单价' in s or '待人工填报' in s for s in norm_entry['param_slots']):
+            norm_entry['param_slots'].append(slot_note)
+
+    entries: list[dict[str, Any]] = list(payload.get('entries') or [])
+    target_id = norm_entry['indicator_id']
+    replaced = False
+    for idx, existing in enumerate(entries):
+        if existing.get('indicator_id') == target_id:
+            entries[idx] = norm_entry
+            replaced = True
+            break
+    if not replaced:
+        entries.append(norm_entry)
+
+    old_hash = str(payload.get('content_hash') or '')
+    new_hash = compute_library_content_hash(entries)
+    payload['entries'] = entries
+    payload['content_hash'] = new_hash
+    if payload.get('review_status') in ('approved', 'reviewed') and new_hash != old_hash:
+        payload['review_status'] = 'pending_human_review'
+        payload['reviewed_at'] = None
+        payload['reviewed_by'] = None
+
+    _atomic_write_json(fpath, payload)
+    return {
+        'line': clean_line,
+        'entry': norm_entry,
+        'created': not replaced,
+        'money_sanitized': had_raw_money,
+        'review_status': payload['review_status'],
+        'line_review_status': payload['review_status'],
+        'pending_slot_count': sum(count_pending_slots_in_entry(e) for e in entries),
+        'content_hash': new_hash,
+    }
+
+
+def delete_indicator_entry(
+    line_key: Optional[str] = None,
+    indicator_id: str = '',
+    *,
+    line: Optional[str] = None,
+    library_dir: Optional[str | Path] = None,
+) -> dict[str, Any]:
+    """E45 §2.1：从指定业务线删除单条指标并重算哈希。"""
+    eff_key = line_key if line_key is not None else line
+    clean_line = validate_indicator_line_key(str(eff_key or ''))
+    clean_id = str(indicator_id or '').strip()
+    if not clean_id:
+        raise ValueError('indicator_id 不能为空')
+
+    lib_dir = Path(library_dir) if library_dir else DEFAULT_INDICATOR_LIBRARY_DIR
+    fpath = _resolve_line_filepath(clean_line, lib_dir)
+    payload = _load_single_line_payload(clean_line, lib_dir)
+    if not payload or not fpath.is_file():
+        raise FileNotFoundError(f"未找到业务线指标库：{clean_line}")
+
+    entries: list[dict[str, Any]] = list(payload.get('entries') or [])
+    new_entries = [e for e in entries if e.get('indicator_id') != clean_id]
+    if len(new_entries) == len(entries):
+        raise KeyError(f"未在业务线 {clean_line} 中找到指标 {clean_id}")
+
+    new_hash = compute_library_content_hash(new_entries)
+    payload['entries'] = new_entries
+    payload['content_hash'] = new_hash
+    if payload.get('review_status') in ('approved', 'reviewed'):
+        payload['review_status'] = 'pending_human_review'
+        payload['reviewed_at'] = None
+        payload['reviewed_by'] = None
+
+    _atomic_write_json(fpath, payload)
+    return {
+        'deleted_id': clean_id,
+        'line': clean_line,
+        'remaining_count': len(new_entries),
+        'review_status': payload['review_status'],
+        'line_review_status': payload['review_status'],
+        'content_hash': new_hash,
+    }
+
+
+def approve_indicator_line(
+    line_key: Optional[str] = None,
+    reviewed_by: str = 'admin',
+    *,
+    line: Optional[str] = None,
+    review_note: Optional[str] = None,
+    library_dir: Optional[str | Path] = None,
+) -> dict[str, Any]:
+    """E45 §2.1：管理员对指定业务线签署「人工终审通过（`approved`）」，写回审核人与 UTC 时间戳。"""
+    eff_key = line_key if line_key is not None else line
+    clean_line = validate_indicator_line_key(str(eff_key or ''))
+    lib_dir = Path(library_dir) if library_dir else DEFAULT_INDICATOR_LIBRARY_DIR
+    fpath = _resolve_line_filepath(clean_line, lib_dir)
+    payload = _load_single_line_payload(clean_line, lib_dir)
+    if not payload or not fpath.is_file():
+        raise FileNotFoundError(f"未找到业务线指标库：{clean_line}")
+
+    entries: list[dict[str, Any]] = []
+    for raw_e in payload.get('entries') or []:
+        ne = _normalize_entry(raw_e, fallback_line=clean_line)
+        if ne is not None:
+            if _BID_MONEY_RE.search(ne['standard_response']) or _PRICE_UNIT_LINE_HINT_RE.search(ne['standard_response']):
+                ne['standard_response'] = sanitize_indicator_text(ne['standard_response'])
+            entries.append(ne)
+
+    reviewer = str(reviewed_by or 'admin').strip() or 'admin'
+    if review_note and str(review_note).strip():
+        payload['review_note'] = sanitize_indicator_text(str(review_note).strip())
+    now_iso = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+    payload['entries'] = entries
+    payload['review_status'] = 'approved'
+    payload['reviewed_by'] = reviewer
+    payload['reviewed_at'] = now_iso
+    payload['content_hash'] = compute_library_content_hash(entries)
+    _atomic_write_json(fpath, payload)
+    return _format_line_record(payload)
 
 
 def _build_entry_searchable_text(entry: dict[str, Any]) -> str:
@@ -386,7 +724,7 @@ class IndicatorLibraryProvider:
                 continue
 
             # 3) 综合归一化分值（专精线微幅优先于通用底座）
-            line_bonus = 0.15 if (self.biz_line in ('security', 'maas') and entry['line'] == self.biz_line) else 0.0
+            line_bonus = 0.15 if (self.biz_line not in ('general', 'common') and entry['line'] == self.biz_line) else 0.0
             norm_score = min(
                 1.0,
                 0.25 * min(kw_hits, 3) + 0.12 * cat_hit + 0.08 * min(bm25_score, 5.0) + line_bonus,

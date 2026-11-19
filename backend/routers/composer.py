@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from backend.auth import AuthUser, get_current_user, record_audit
+from backend.auth import AuthUser, get_current_user, record_audit, require_admin
 from backend.database import PROJECT_ROOT, get_db
 from backend.models import (
     BidCheckTask,
@@ -31,6 +31,12 @@ from backend.schemas import (
     ComposeDraftDetailOut,
     ComposeDraftListOut,
     ComposeDraftSummaryOut,
+    IndicatorApproveRequest,
+    IndicatorEntryUpsertOut,
+    IndicatorEntryUpsertRequest,
+    IndicatorLineCreateRequest,
+    IndicatorLineDetailOut,
+    IndicatorLineListOut,
     OkResponse,
     SkillImportPreviewOut,
     SkillImportUrlRequest,
@@ -59,8 +65,13 @@ from core.composer_skills import (
 from core.indicator_library import (
     CompositeKnowledgeSnippetProvider,
     IndicatorLibraryProvider,
+    approve_indicator_line,
+    create_indicator_line,
+    delete_indicator_entry,
     get_biz_line_indicator_overview,
+    list_indicator_lines,
     normalize_skill_biz_line,
+    upsert_indicator_entry,
 )
 
 router = APIRouter(prefix='/api/composer', tags=['composer'])
@@ -198,6 +209,8 @@ def _to_summary_out(row: BidComposeDraft) -> ComposeDraftSummaryOut:
     bp = row.blueprint_json or {}
     stats = row.stats_json or bp.get('stats') or {}
     mode = row.compose_mode if row.compose_mode in ('skeleton_v1', 'knowledge_draft_v2') else 'skeleton_v1'
+    scope_raw = str(bp.get('compose_scope') or stats.get('compose_scope') or 'full')
+    compose_scope = 'section' if scope_raw == 'section' else 'full'
     return ComposeDraftSummaryOut(
         id=row.id,
         tenant_id=row.tenant_id,
@@ -207,6 +220,10 @@ def _to_summary_out(row: BidComposeDraft) -> ComposeDraftSummaryOut:
         biz_line=normalize_skill_biz_line(stats.get('biz_line') or 'general'),
         use_indicator_library=bool(stats.get('use_indicator_library', False)),
         blind_bid_mode=bool(bp.get('blind_bid_mode') or stats.get('blind_bid_applied', False)),
+        compose_scope=compose_scope,  # type: ignore[arg-type]
+        target_section_topic=(bp.get('target_section_topic') or stats.get('target_section_topic')),
+        density_preset=str(bp.get('density_preset') or stats.get('density_preset') or 'standard'),
+        table_density=str(bp.get('table_density') or stats.get('table_density') or 'rich'),
         title=row.title,
         status=str(row.status or 'completed'),
         progress=int(row.progress if row.progress is not None else 100),
@@ -235,16 +252,224 @@ def _to_detail_out(row: BidComposeDraft) -> ComposeDraftDetailOut:
     )
 
 
-# ── Skills 管理与 GitHub / Gitee / 本地导入端点 ─────────────────────────────
+# ── E41 + E45 企业指标与业务线评分库管理端点 ──────────────────────────────
 
 @router.get('/indicators', response_model=BizLineIndicatorOverviewOut)
 def get_composer_indicators_overview(
     biz_line: str = 'general',
     _current_user: AuthUser = Depends(get_current_user),
 ) -> BizLineIndicatorOverviewOut:
-    """E41：按业务线（general/security/maas）预览常见/专精指标标准应答与典型评分标准参考。"""
+    """E41 + E45：按业务线（general/security/maas 或自定义业务线）预览常见/专精指标标准应答与典型评分标准参考。"""
     overview = get_biz_line_indicator_overview(biz_line)
     return BizLineIndicatorOverviewOut(**overview)
+
+
+@router.get('/indicators/lines', response_model=IndicatorLineListOut)
+def get_indicator_lines_api(
+    _current_user: AuthUser = Depends(get_current_user),
+) -> IndicatorLineListOut:
+    """E45：列出全部业务线指标库文件（common / security / maas 及自定义业务线）、终审状态与待确认槽位数。"""
+    items = list_indicator_lines()
+    return IndicatorLineListOut(
+        total=len(items),
+        items=[IndicatorLineDetailOut(**it) for it in items],
+    )
+
+
+@router.post('/indicators/lines', response_model=IndicatorLineDetailOut)
+def create_indicator_line_api(
+    body: IndicatorLineCreateRequest,
+    current_user: AuthUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> IndicatorLineDetailOut:
+    """E45：新增自定义业务线指标库文件（仅 admin）。"""
+    try:
+        created = create_indicator_line(
+            line=body.line,
+            display_name=body.display_name,
+            description=body.description,
+            line_scoring_summary=[item.model_dump() for item in (body.line_scoring_summary or [])],
+        )
+    except FileExistsError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={'code': 'INDICATOR_LINE_EXISTS', 'message': str(exc)},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'INVALID_INDICATOR_LINE', 'message': str(exc)},
+        ) from exc
+
+    record_audit(
+        db,
+        action='indicator_line_create',
+        tenant_id=int(current_user.tenant_id),
+        user_id=current_user.get('id'),
+        target=f"indicator_line:{created['line']}",
+        detail_json={'line': created['line'], 'display_name': created['display_name']},
+    )
+    return IndicatorLineDetailOut(**created)
+
+
+@router.post('/indicators/entries', response_model=IndicatorEntryUpsertOut)
+def create_indicator_entry_api(
+    body: IndicatorEntryUpsertRequest,
+    current_user: AuthUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> IndicatorEntryUpsertOut:
+    """E45：向指定业务线新增指标条目（强制经过 _BID_MONEY_RE 金额防造假锁，仅 admin）。"""
+    try:
+        res = upsert_indicator_entry(
+            line=body.line,
+            entry_payload=body.model_dump(),
+            indicator_id=body.indicator_id,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'INDICATOR_LINE_NOT_FOUND', 'message': str(exc)},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'INVALID_INDICATOR_ENTRY', 'message': str(exc)},
+        ) from exc
+
+    entry_obj = res['entry']
+    record_audit(
+        db,
+        action='indicator_entry_create',
+        tenant_id=int(current_user.tenant_id),
+        user_id=current_user.get('id'),
+        target=f"indicator:{body.line}:{entry_obj['indicator_id']}",
+        detail_json={
+            'line': body.line,
+            'indicator_id': entry_obj['indicator_id'],
+            'indicator_name': entry_obj['indicator_name'],
+            'money_sanitized': bool(res.get('money_sanitized')),
+            'review_status': res.get('review_status'),
+        },
+    )
+    return IndicatorEntryUpsertOut(**res)
+
+
+@router.put('/indicators/entries/{indicator_id}', response_model=IndicatorEntryUpsertOut)
+def update_indicator_entry_api(
+    indicator_id: str,
+    body: IndicatorEntryUpsertRequest,
+    current_user: AuthUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> IndicatorEntryUpsertOut:
+    """E45：在线编辑指定业务线指标条目（强制经过 _BID_MONEY_RE 金额防造假锁，仅 admin）。"""
+    try:
+        res = upsert_indicator_entry(
+            line=body.line,
+            entry_payload=body.model_dump(),
+            indicator_id=indicator_id,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'INDICATOR_LINE_NOT_FOUND', 'message': str(exc)},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'INVALID_INDICATOR_ENTRY', 'message': str(exc)},
+        ) from exc
+
+    entry_obj = res['entry']
+    record_audit(
+        db,
+        action='indicator_entry_update',
+        tenant_id=int(current_user.tenant_id),
+        user_id=current_user.get('id'),
+        target=f"indicator:{body.line}:{entry_obj['indicator_id']}",
+        detail_json={
+            'line': body.line,
+            'indicator_id': entry_obj['indicator_id'],
+            'indicator_name': entry_obj['indicator_name'],
+            'money_sanitized': bool(res.get('money_sanitized')),
+            'review_status': res.get('review_status'),
+        },
+    )
+    return IndicatorEntryUpsertOut(**res)
+
+
+@router.delete('/indicators/entries/{indicator_id}', response_model=OkResponse)
+def delete_indicator_entry_api(
+    indicator_id: str,
+    line: str = 'common',
+    current_user: AuthUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> OkResponse:
+    """E45：从指定业务线删除指标条目（仅 admin）。"""
+    try:
+        delete_indicator_entry(line=line, indicator_id=indicator_id)
+    except (FileNotFoundError, KeyError) as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'INDICATOR_NOT_FOUND', 'message': str(exc)},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'INVALID_INDICATOR_LINE', 'message': str(exc)},
+        ) from exc
+
+    record_audit(
+        db,
+        action='indicator_entry_delete',
+        tenant_id=int(current_user.tenant_id),
+        user_id=current_user.get('id'),
+        target=f"indicator:{line}:{indicator_id}",
+        detail_json={'line': line, 'indicator_id': indicator_id},
+    )
+    return OkResponse(ok=True, message=f"指标条目 {indicator_id} 已从 {line} 业务线删除")
+
+
+@router.post('/indicators/approve', response_model=IndicatorLineDetailOut)
+def approve_indicator_line_api(
+    body: IndicatorApproveRequest,
+    current_user: AuthUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> IndicatorLineDetailOut:
+    """E45：将指定业务线指标库正式签批为 approved（人工终审通过，仅 admin）。"""
+    reviewer_name = str(current_user.get('username') or current_user.get('display_name') or 'admin')
+    try:
+        detail = approve_indicator_line(
+            line=body.line,
+            reviewed_by=reviewer_name,
+            review_note=body.review_note,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'INDICATOR_LINE_NOT_FOUND', 'message': str(exc)},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'INVALID_INDICATOR_LINE', 'message': str(exc)},
+        ) from exc
+
+    record_audit(
+        db,
+        action='approve_indicator_library',
+        tenant_id=int(current_user.tenant_id),
+        user_id=current_user.get('id'),
+        target=f"indicator_line:{detail['line']}",
+        detail_json={
+            'line': detail['line'],
+            'review_status': detail['review_status'],
+            'reviewed_by': detail['reviewed_by'],
+            'reviewed_at': detail['reviewed_at'],
+            'content_hash': detail['content_hash'],
+            'pending_slot_count': detail['pending_slot_count'],
+        },
+    )
+    return IndicatorLineDetailOut(**detail)
 
 
 @router.get('/skills', response_model=ComposerSkillListOut)
@@ -522,6 +747,11 @@ def generate_composed_draft(
     task_id: Optional[int] = Form(default=None),
     knowledge_files: list[UploadFile] = File(default=[]),
     compose_mode: str = Form(default='skeleton_v1'),
+    compose_scope: str = Form(default='full'),
+    target_section_topic: Optional[str] = Form(default=None),
+    target_section_guidance: Optional[str] = Form(default=None),
+    density_preset: str = Form(default='standard'),
+    table_density: str = Form(default='rich'),
     title: Optional[str] = Form(default=None),
     package_no: Optional[int] = Form(default=None),
     skill_id: Optional[int] = Form(default=None),
@@ -534,13 +764,27 @@ def generate_composed_draft(
     current_user: AuthUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ComposeDraftDetailOut:
-    """E37 + E38 + E43：上传招标书或复用体检任务，结合选定写作 Skill 与可选暗标双模式撰写标书初稿。"""
+    """E37 + E38 + E43 + E45：上传招标书或复用体检任务，结合选定写作 Skill、可选暗标与整书/单章补写模式生成标书初稿。"""
     mode_clean = (compose_mode or 'skeleton_v1').strip()
     if mode_clean not in ('skeleton_v1', 'knowledge_draft_v2'):
         raise HTTPException(
             status_code=422,
             detail={'code': 'INVALID_COMPOSE_MODE', 'message': f"非法编制模式: {mode_clean}"},
         )
+    scope_clean = (compose_scope or 'full').strip().lower()
+    if scope_clean not in ('full', 'section'):
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'INVALID_COMPOSE_SCOPE', 'message': f"非法生成范围: {scope_clean}，仅支持 full / section"},
+        )
+    topic_clean = str(target_section_topic or '').strip()[:120] or None
+    guidance_clean = str(target_section_guidance or '').strip()[:1500] or None
+    density_clean = (density_preset or 'standard').strip().lower()
+    if density_clean not in ('concise', 'standard', 'detailed'):
+        density_clean = 'standard'
+    table_density_clean = (table_density or 'rich').strip().lower()
+    if table_density_clean not in ('rich', 'moderate', 'none'):
+        table_density_clean = 'rich'
 
     parsed_blind_rules = _parse_blind_json_list(blind_rules_json, 'blind_rules_json')
     parsed_custom_words = _parse_blind_json_list(blind_custom_words_json, 'blind_custom_words_json')
@@ -609,9 +853,15 @@ def generate_composed_draft(
         else (source_task.tender_filename or '招标文件.docx')  # type: ignore[union-attr]
     )
     custom_title = (title or '').strip()
-    eff_title = custom_title or (
+    base_title = (
         source_task.title if source_task is not None and not tender_bytes_info else Path(tender_filename_disp).stem
     ) or '未命名投标编制初稿'
+    if custom_title:
+        eff_title = custom_title
+    elif scope_clean == 'section' and topic_clean:
+        eff_title = f"{base_title} · 专项补写：{topic_clean}"
+    else:
+        eff_title = base_title
 
     draft = BidComposeDraft(
         tenant_id=tenant_id,
@@ -633,6 +883,10 @@ def generate_composed_draft(
             'blind_bid_applied': bool(blind_bid_mode),
             'blind_rules': list(active_blind_rules),
             'blind_custom_word_count': len(clean_custom_words),
+            'compose_scope': scope_clean,
+            'target_section_topic': topic_clean,
+            'density_preset': density_clean,
+            'table_density': table_density_clean,
         },
         started_at=_utc_now(),
     )
@@ -737,7 +991,7 @@ def generate_composed_draft(
             effective_provider: Any = None
             if should_use_indicator_lib:
                 ind_provider = IndicatorLibraryProvider(biz_line=skill_biz_line)
-                if mode_clean == 'knowledge_draft_v2' and saved_k_paths:
+                if saved_k_paths:
                     local_provider = LocalKnowledgeSnippetProvider(saved_k_paths, client=llm_client)
                     effective_provider = CompositeKnowledgeSnippetProvider([ind_provider, local_provider])
                 else:
@@ -761,6 +1015,11 @@ def generate_composed_draft(
                 task_title=eff_title,
                 package_no=package_no,
                 compose_mode=mode_clean,
+                compose_scope=scope_clean,
+                target_section_topic=topic_clean,
+                target_section_guidance=guidance_clean,
+                density_preset=density_clean,
+                table_density=table_density_clean,
                 knowledge_provider=effective_provider,
                 knowledge_paths=saved_k_paths,
                 client=llm_client,
@@ -777,6 +1036,10 @@ def generate_composed_draft(
             bp_stats = bp_dict.setdefault('stats', {})
             bp_stats['biz_line'] = skill_biz_line
             bp_stats['use_indicator_library'] = should_use_indicator_lib
+            bp_stats['compose_scope'] = scope_clean
+            bp_stats['target_section_topic'] = topic_clean
+            bp_stats['density_preset'] = density_clean
+            bp_stats['table_density'] = table_density_clean
 
             _COMPOSER_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
             out_docx_abs = (_COMPOSER_OUTPUT_ROOT / f"{tenant_id}_{draft_id}_投标文件初稿骨架.docx").resolve()
@@ -800,7 +1063,10 @@ def generate_composed_draft(
             d_row.stats_json = bp_dict.get('stats') or {}
             d_row.output_path = out_rel
             if not custom_title and bp_dict.get('project_name'):
-                d_row.title = str(bp_dict['project_name'])[:250]
+                if scope_clean == 'section' and topic_clean:
+                    d_row.title = f"{bp_dict['project_name']} · 专项补写：{topic_clean}"[:250]
+                else:
+                    d_row.title = str(bp_dict['project_name'])[:250]
             d_row.status = 'completed'
             d_row.progress = 100
             d_row.stage_detail = '标书初稿编排与导出完成'
@@ -818,6 +1084,10 @@ def generate_composed_draft(
                 detail_json={
                     'title': d_row.title,
                     'compose_mode': mode_clean,
+                    'compose_scope': scope_clean,
+                    'target_section_topic': topic_clean,
+                    'density_preset': density_clean,
+                    'table_density': table_density_clean,
                     'skill_name': bp_dict.get('skill_name'),
                     'ai_status': bp_dict.get('ai_status'),
                     'knowledge_count': len(saved_k_paths),
