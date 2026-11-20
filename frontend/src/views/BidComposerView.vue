@@ -30,6 +30,7 @@ defineOptions({ name: 'BidComposerView' })
 const route = useRoute()
 const notificationStore = useNotificationStore()
 const mainTab = ref<'compose' | 'clean'>('compose')
+const setupCollapsed = ref(false)
 const draftFocusPulse = ref(false)
 let draftFocusTimer: number | null = null
 let lastHandledComposerSeq = 0
@@ -176,6 +177,21 @@ function bizLineTagType(line?: string | null): 'info' | 'danger' | 'primary' {
   if (line === 'security') return 'danger'
   if (line === 'maas') return 'primary'
   return 'info'
+}
+
+function fillModeLabel(mode?: string | null): string {
+  if (mode === 'deterministic') return '确定性填充'
+  if (mode === 'cert_ledger') return '台账自动对账'
+  if (mode === 'ai_skill_draft') return 'AI 动态撰稿'
+  if (mode === 'outline_stub') return '大纲骨架'
+  if (mode === 'knowledge_draft' || mode === 'rag_draft') return '方案库辅助'
+  return mode || '标准填充'
+}
+
+function fillModeClass(mode?: string | null): string {
+  if (mode === 'ai_skill_draft') return 'is-ok'
+  if (mode === 'cert_ledger') return 'is-brand'
+  return ''
 }
 
 async function loadIndicatorOverview(bizLine: BizLineType = 'general'): Promise<void> {
@@ -745,6 +761,7 @@ function applyRouteQueryPrefill(): void {
   if (qScope === 'section' || qTopic) {
     mainTab.value = 'compose'
     composeScope.value = 'section'
+    setupCollapsed.value = false
   }
   if (qTopic) {
     targetSectionTopic.value = qTopic
@@ -827,10 +844,10 @@ onUnmounted(() => {
 <template>
   <div class="composer-page">
     <div class="page-intro">
-      <div>
+      <div class="intro-text">
         <h2>标书编制输出与无损修订中心</h2>
         <p class="sub-desc">
-          由「写作 Skill 规范 + AI 动态构章撰稿 + 报价/证照/覆盖三锁」驱动生成独立封面、目录与投标初稿（.docx），支持从 GitHub/Gitee 或本地导入 Skills；后期支持将已采纳整改无损导出 Clean 定稿。
+          写作 Skill + AI 动态构章撰稿 + 报价/证照/覆盖三锁，一键输出独立排版初稿（.docx）或无损修订 Clean 定稿。
         </p>
       </div>
     </div>
@@ -838,76 +855,67 @@ onUnmounted(() => {
     <el-tabs v-model="mainTab" class="composer-tabs">
       <!-- ── Tab 1: 正向智能编制初稿 ───────────────────────────────────── -->
       <el-tab-pane label="AI + Skill 智能编制初稿" name="compose">
-        <el-card shadow="never" class="setup-card">
-          <div class="setup-grid">
+        <div class="setup-panel" :class="{ collapsed: setupCollapsed }">
+          <div v-show="!setupCollapsed" class="setup-grid">
+            <!-- 左列：招标依据 + 生成范围与篇幅 + 编制模式 -->
             <div class="setup-col">
-              <div class="field-label">1. 招标依据来源</div>
-              <el-radio-group v-model="tenderSourceType" size="small" class="mb-8">
-                <el-radio value="upload">直接上传招标文件</el-radio>
-                <el-radio value="task">复用已有体检任务</el-radio>
-              </el-radio-group>
-
-              <div v-if="tenderSourceType === 'upload'" class="upload-box">
-                <input
-                  type="file"
-                  accept=".docx,.pdf,.txt"
-                  @change="handleTenderFileChange"
-                />
-                <div v-if="tenderFile" class="file-picked">已选择：{{ tenderFile.name }}</div>
-                <div v-else class="file-hint">支持 .docx / .pdf / .txt，自动提取限价/开标日/★▲/资格证照/评分细则</div>
-              </div>
-              <div v-else>
-                <el-select
-                  v-model="selectedSourceTaskId"
-                  placeholder="请选择一个已有体检任务"
-                  style="width: 100%"
-                  filterable
-                >
-                  <el-option
-                    v-for="t in taskList"
-                    :key="t.id"
-                    :label="`#${t.id} ${t.title}（${t.tender_filename}）`"
-                    :value="t.id"
-                  />
-                </el-select>
-              </div>
-
-              <div class="row-inputs">
-                <el-input
-                  v-model="composeTitle"
-                  placeholder="初稿标题（可选，默认带出招标项目名）"
-                  clearable
-                />
-                <el-input-number
-                  v-model="packageNo"
-                  :min="1"
-                  :max="99"
-                  placeholder="分包"
-                  controls-position="right"
-                />
-              </div>
-
-              <!-- WPS 风格：生成范围（整书 vs 单章专项补写）与篇幅/表格密度快捷档位 -->
-              <div class="wps-scope-panel">
-                <div class="wps-scope-head">
-                  <span class="field-label">生成范围与篇幅密度</span>
-                  <el-tag
-                    v-if="composeScope === 'section'"
-                    size="small"
-                    type="primary"
-                    effect="dark"
+              <section class="cfg-section">
+                <header class="cfg-sec-head">
+                  <span class="cfg-step">01</span>
+                  <span class="cfg-sec-title">招标依据来源</span>
+                  <el-radio-group v-model="tenderSourceType" size="small" class="seg-group cfg-head-extra">
+                    <el-radio-button value="upload">上传招标文件</el-radio-button>
+                    <el-radio-button value="task">复用体检任务</el-radio-button>
+                  </el-radio-group>
+                </header>
+                <label v-if="tenderSourceType === 'upload'" class="file-drop" :class="{ picked: !!tenderFile }">
+                  <input type="file" accept=".docx,.pdf,.txt" class="file-drop-input" @change="handleTenderFileChange" />
+                  <span class="file-drop-icon">{{ tenderFile ? '✓' : '+' }}</span>
+                  <span class="file-drop-text">
+                    <strong>{{ tenderFile ? tenderFile.name : '点击选择招标文件' }}</strong>
+                    <small>{{ tenderFile ? '已就绪，点击可重新选择' : '支持 .docx / .pdf / .txt，自动提取限价、开标日、★▲条款与评分细则' }}</small>
+                  </span>
+                </label>
+                <div v-else>
+                  <el-select
+                    v-model="selectedSourceTaskId"
+                    placeholder="请选择一个已有体检任务"
+                    style="width: 100%"
+                    filterable
                   >
-                    单章专项补写模式
-                  </el-tag>
+                    <el-option
+                      v-for="t in taskList"
+                      :key="t.id"
+                      :label="`#${t.id} ${t.title}（${t.tender_filename}）`"
+                      :value="t.id"
+                    />
+                  </el-select>
                 </div>
-                <el-radio-group v-model="composeScope" size="small" class="wps-scope-radios">
-                  <el-radio value="full">完整投标文件</el-radio>
-                  <el-radio value="section">单章节专项补写</el-radio>
-                </el-radio-group>
+                <div class="row-inputs">
+                  <el-input v-model="composeTitle" placeholder="初稿标题（可选，默认带出招标项目名）" clearable />
+                  <el-input-number
+                    v-model="packageNo"
+                    :min="1"
+                    :max="99"
+                    placeholder="分包号"
+                    controls-position="right"
+                    class="pkg-input"
+                  />
+                </div>
+              </section>
 
+              <section class="cfg-section">
+                <header class="cfg-sec-head">
+                  <span class="cfg-step">02</span>
+                  <span class="cfg-sec-title">生成范围与篇幅密度</span>
+                  <el-radio-group v-model="composeScope" size="small" class="seg-group cfg-head-extra">
+                    <el-radio-button value="full">完整投标文件</el-radio-button>
+                    <el-radio-button value="section">单章节专项补写</el-radio-button>
+                  </el-radio-group>
+                </header>
                 <div v-if="composeScope === 'section'" class="wps-section-target-box">
                   <div class="wps-quick-topics">
-                    <span class="wps-qt-label">快捷定位：</span>
+                    <span class="wps-qt-label">快捷定位</span>
                     <button
                       v-for="tp in QUICK_SECTION_TOPICS"
                       :key="tp"
@@ -932,38 +940,75 @@ onUnmounted(() => {
                     placeholder="专项补写指引或评分诊断缺口说明（可选，可从体检页评分面板一键带入）…"
                   />
                 </div>
-
                 <div class="wps-density-grid">
                   <div class="wps-density-row">
-                    <span class="wps-d-label">篇幅密度：</span>
-                    <el-radio-group v-model="densityPreset" size="small">
-                      <el-radio-button value="concise">简明 (~320字/节)</el-radio-button>
-                      <el-radio-button value="standard">标准 (Skill默认)</el-radio-button>
-                      <el-radio-button value="detailed">详尽 (~900字/节)</el-radio-button>
+                    <span class="wps-d-label">篇幅密度</span>
+                    <el-radio-group v-model="densityPreset" size="small" class="seg-group">
+                      <el-radio-button value="concise">简明 ~320字</el-radio-button>
+                      <el-radio-button value="standard">标准（默认）</el-radio-button>
+                      <el-radio-button value="detailed">详尽 ~900字</el-radio-button>
                     </el-radio-group>
                   </div>
                   <div class="wps-density-row">
-                    <span class="wps-d-label">表格配比：</span>
-                    <el-radio-group v-model="tableDensity" size="small">
+                    <span class="wps-d-label">表格配比</span>
+                    <el-radio-group v-model="tableDensity" size="small" class="seg-group">
                       <el-radio-button value="rich">丰富表格</el-radio-button>
                       <el-radio-button value="moderate">适中表格</el-radio-button>
                       <el-radio-button value="none">纯文字无表</el-radio-button>
                     </el-radio-group>
                   </div>
                 </div>
-              </div>
+              </section>
+
+              <section class="cfg-section cfg-section-fill">
+                <header class="cfg-sec-head">
+                  <span class="cfg-step">03</span>
+                  <span class="cfg-sec-title">编制模式</span>
+                </header>
+                <el-radio-group v-model="composeMode" class="option-cards" :class="{ 'is-stretched': composeMode !== 'knowledge_draft_v2' && composeScope !== 'section' }">
+                  <el-radio value="skeleton_v1">
+                    <span class="radio-title">依据招标文件标准编制</span>
+                    <span class="radio-desc">按 Skill 与评分结构规划正文，报价与缺证项严格锁定</span>
+                  </el-radio>
+                  <el-radio value="knowledge_draft_v2">
+                    <span class="radio-title">结合企业参考方案库</span>
+                    <span class="radio-desc">检索历史方案赋能撰写，无参考库时安全回退</span>
+                  </el-radio>
+                </el-radio-group>
+                <div v-if="composeMode === 'knowledge_draft_v2' || composeScope === 'section'" class="knowledge-box">
+                  <label class="file-drop file-drop-sm">
+                    <input type="file" multiple accept=".docx,.pdf,.txt" class="file-drop-input" @change="handleKnowledgeFilesChange" />
+                    <span class="file-drop-icon">+</span>
+                    <span class="file-drop-text">
+                      <strong>添加历史优秀标书 / 企业方案库 / 参考附件</strong>
+                      <small>可多选，支持 .docx / .pdf / .txt（可选）</small>
+                    </span>
+                  </label>
+                  <div v-if="knowledgeFiles.length > 0" class="kb-list">
+                    <el-tag
+                      v-for="(kf, idx) in knowledgeFiles"
+                      :key="`${kf.name}-${idx}`"
+                      closable
+                      @close="removeKnowledgeFile(idx)"
+                    >
+                      {{ kf.name }}
+                    </el-tag>
+                  </div>
+                </div>
+              </section>
             </div>
 
+            <!-- 右列：写作 Skill 与指标库 + 暗标设置 -->
             <div class="setup-col">
-              <div class="skill-row-head">
-                <span class="field-label">2. 写作风格与版式 Skill + AI 选项</span>
-                <el-button size="small" type="primary" link @click="openSkillModal('list')">
-                  管理 / GitHub·Gitee·本地导入 Skills
-                </el-button>
-              </div>
-
-              <div class="skill-picker-bar">
-                <el-select v-model="selectedSkillId" placeholder="选择写作 Skill" style="flex: 1">
+              <section class="cfg-section">
+                <header class="cfg-sec-head">
+                  <span class="cfg-step">04</span>
+                  <span class="cfg-sec-title">写作 Skill 与指标库</span>
+                  <el-button size="small" type="primary" link class="cfg-head-extra" @click="openSkillModal('list')">
+                    管理 / 导入 Skills
+                  </el-button>
+                </header>
+                <el-select v-model="selectedSkillId" placeholder="选择写作 Skill" style="width: 100%">
                   <el-option
                     v-for="sk in skillList"
                     :key="sk.id"
@@ -978,152 +1023,126 @@ onUnmounted(() => {
                     </div>
                   </el-option>
                 </el-select>
-                <el-checkbox v-model="useAi">启用 AI 动态构章撰稿</el-checkbox>
-              </div>
-              <div v-if="selectedSkill" class="skill-summary-line">
-                <el-tag size="small" :type="bizLineTagType(selectedSkill.biz_line)" class="mr-6">
-                  {{ bizLineLabel(selectedSkill.biz_line) }}
-                </el-tag>
-                {{ selectedSkill.description }}（{{ selectedSkill.layout_spec.font_zh }} {{ selectedSkill.layout_spec.font_size_pt }}pt · 行距 {{ selectedSkill.layout_spec.line_spacing }} · 目标 {{ selectedSkill.layout_spec.target_section_words }} 字/节）
-              </div>
-
-              <div class="indicator-bar">
-                <div class="ind-switch-wrap">
-                  <el-switch v-model="useIndicatorLibrary" size="small" />
-                  <span>引用公司常见指标与业务线标准应答库</span>
+                <div v-if="selectedSkill" class="skill-summary-line">
+                  <div class="skill-summary-top">
+                    <span class="meta-pill">{{ bizLineLabel(selectedSkill.biz_line) }}</span>
+                    <span class="skill-spec-inline">
+                      {{ selectedSkill.layout_spec.font_zh }} {{ selectedSkill.layout_spec.font_size_pt }}pt · 行距 {{ selectedSkill.layout_spec.line_spacing }} · {{ selectedSkill.layout_spec.target_section_words }} 字/节
+                    </span>
+                  </div>
+                  <div class="skill-desc-text">{{ selectedSkill.description }}</div>
                 </div>
-                <el-button
-                  size="small"
-                  link
-                  type="primary"
-                  :loading="loadingIndicators"
-                  @click="showIndicatorPreview = !showIndicatorPreview"
-                >
-                  {{
-                    showIndicatorPreview
-                      ? '收起核心指标与评分参考'
-                      : `预览核心指标与评分标准参考（${indicatorOverview?.total_indicators || 0} 项）`
-                  }}
-                </el-button>
-              </div>
-
-              <div v-if="showIndicatorPreview && indicatorOverview" class="indicator-preview-box">
-                <div class="ind-pv-head">
-                  <strong>{{ indicatorOverview.biz_line_label }} · 核心指标与评分参考</strong>
-                  <el-tag
-                    size="small"
-                    :type="indicatorOverview.review_status === 'reviewed' ? 'success' : 'warning'"
-                    effect="plain"
-                  >
-                    {{ indicatorOverview.review_status === 'reviewed' ? '已人工终审' : '待人工终审口径（缺项均留槽位）' }}
-                  </el-tag>
-                </div>
-
-                <div v-if="indicatorOverview.line_scoring_summary.length > 0" class="ind-score-summary">
-                  <div class="ind-sub-title">典型评分标准维度与权重参考</div>
-                  <div
-                    v-for="(sd, sdi) in indicatorOverview.line_scoring_summary"
-                    :key="sdi"
-                    class="ind-score-row"
-                  >
-                    <el-tag size="small" effect="plain">{{ sd.dimension }}</el-tag>
-                    <span class="ind-weight">{{ sd.typical_weight }}</span>
-                    <span class="ind-focus">{{ sd.key_focus }}</span>
+                <div class="toggle-group">
+                  <div class="opt-row">
+                    <div class="ind-switch-wrap">
+                      <el-switch v-model="useAi" size="small" />
+                      <span>启用 AI 动态构章撰稿</span>
+                    </div>
+                  </div>
+                  <div class="opt-row">
+                    <div class="ind-switch-wrap">
+                      <el-switch v-model="useIndicatorLibrary" size="small" />
+                      <span>引用公司常见指标与业务线标准应答库</span>
+                    </div>
+                    <el-button
+                      size="small"
+                      link
+                      type="primary"
+                      :loading="loadingIndicators"
+                      @click="showIndicatorPreview = !showIndicatorPreview"
+                    >
+                      {{ showIndicatorPreview ? '收起指标参考' : `预览指标参考（${indicatorOverview?.total_indicators || 0} 项）` }}
+                    </el-button>
                   </div>
                 </div>
+                <div v-if="showIndicatorPreview && indicatorOverview" class="indicator-preview-box">
+                  <div class="ind-pv-head">
+                    <strong>{{ indicatorOverview.biz_line_label }} · 核心指标与评分参考</strong>
+                    <el-tag
+                      size="small"
+                      :type="indicatorOverview.review_status === 'reviewed' ? 'success' : 'warning'"
+                      effect="plain"
+                    >
+                      {{ indicatorOverview.review_status === 'reviewed' ? '已人工终审' : '待人工终审口径（缺项均留槽位）' }}
+                    </el-tag>
+                  </div>
 
-                <div class="ind-sub-title mt-8">标准应答指标清单（含评分点与参数槽）</div>
-                <el-table
-                  v-if="indicatorOverview.indicators.length > 0"
-                  :data="indicatorOverview.indicators"
-                  size="small"
-                  border
-                  max-height="230"
-                >
-                  <el-table-column prop="category" label="分类" width="88" />
-                  <el-table-column label="指标名称" min-width="160">
-                    <template #default="{ row }">
-                      <div>
-                        <strong>{{ (row as Record<string, unknown>).indicator_name }}</strong>
-                      </div>
-                      <el-tag
-                        size="small"
-                        :type="(row as Record<string, unknown>).line === 'common' ? 'info' : bizLineTagType(String((row as Record<string, unknown>).line))"
-                        effect="plain"
-                      >
-                        {{ (row as Record<string, unknown>).line === 'common' ? '通用底座' : bizLineLabel(String((row as Record<string, unknown>).line)) }}
-                      </el-tag>
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="常见评分标准与高分提示" min-width="210">
-                    <template #default="{ row }">
-                      <div class="ind-cell-text">
-                        <div>{{ ((row as Record<string, unknown>).scoring_ref as Record<string, unknown>)?.weight_hint || '—' }}</div>
-                        <div class="ind-tip-line">
-                          {{ ((row as Record<string, unknown>).scoring_ref as Record<string, unknown>)?.high_score_tips || '' }}
-                        </div>
-                      </div>
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="标准应答口径 / 待确认槽" min-width="230">
-                    <template #default="{ row }">
-                      <div class="ind-cell-text">
-                        {{ String((row as Record<string, unknown>).standard_response || '').slice(0, 110) }}…
-                      </div>
-                    </template>
-                  </el-table-column>
-                </el-table>
-                <div v-else class="ind-empty-note">当前业务线暂未收录标准应答指标条目。</div>
-              </div>
+                  <div v-if="indicatorOverview.line_scoring_summary.length > 0" class="ind-score-summary">
+                    <div class="ind-sub-title">典型评分标准维度与权重参考</div>
+                    <div
+                      v-for="(sd, sdi) in indicatorOverview.line_scoring_summary"
+                      :key="sdi"
+                      class="ind-score-row"
+                    >
+                      <el-tag size="small" effect="plain">{{ sd.dimension }}</el-tag>
+                      <span class="ind-weight">{{ sd.typical_weight }}</span>
+                      <span class="ind-focus">{{ sd.key_focus }}</span>
+                    </div>
+                  </div>
 
-              <el-radio-group v-model="composeMode" class="mode-radios">
-                <el-radio value="skeleton_v1">
-                  标准依据招标文件编制（按 Skill 与招标评分结构规划正文，报价/缺证严格锁定）
-                </el-radio>
-                <el-radio value="knowledge_draft_v2">
-                  结合企业参考方案库编制（检索参考片段赋能 AI 撰写，无参考库安全回退）
-                </el-radio>
-              </el-radio-group>
-
-              <div v-if="composeMode === 'knowledge_draft_v2' || composeScope === 'section'" class="knowledge-box">
-                <div class="kb-head">
-                  <span>上传历史优秀标书 / 企业方案库或多参考附件协同（可选 .docx/.pdf/.txt）</span>
-                  <input
-                    type="file"
-                    multiple
-                    accept=".docx,.pdf,.txt"
-                    @change="handleKnowledgeFilesChange"
-                  />
-                </div>
-                <div v-if="knowledgeFiles.length > 0" class="kb-list">
-                  <el-tag
-                    v-for="(kf, idx) in knowledgeFiles"
-                    :key="`${kf.name}-${idx}`"
-                    closable
-                    @close="removeKnowledgeFile(idx)"
+                  <div class="ind-sub-title mt-8">标准应答指标清单（含评分点与参数槽）</div>
+                  <el-table
+                    v-if="indicatorOverview.indicators.length > 0"
+                    :data="indicatorOverview.indicators"
+                    size="small"
+                    border
+                    max-height="230"
                   >
-                    {{ kf.name }}
-                  </el-tag>
+                    <el-table-column prop="category" label="分类" width="88" />
+                    <el-table-column label="指标名称" min-width="160">
+                      <template #default="{ row }">
+                        <div>
+                          <strong>{{ (row as Record<string, unknown>).indicator_name }}</strong>
+                        </div>
+                        <el-tag
+                          size="small"
+                          :type="(row as Record<string, unknown>).line === 'common' ? 'info' : bizLineTagType(String((row as Record<string, unknown>).line))"
+                          effect="plain"
+                        >
+                          {{ (row as Record<string, unknown>).line === 'common' ? '通用底座' : bizLineLabel(String((row as Record<string, unknown>).line)) }}
+                        </el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="常见评分标准与高分提示" min-width="210">
+                      <template #default="{ row }">
+                        <div class="ind-cell-text">
+                          <div>{{ ((row as Record<string, unknown>).scoring_ref as Record<string, unknown>)?.weight_hint || '—' }}</div>
+                          <div class="ind-tip-line">
+                            {{ ((row as Record<string, unknown>).scoring_ref as Record<string, unknown>)?.high_score_tips || '' }}
+                          </div>
+                        </div>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="标准应答口径 / 待确认槽" min-width="230">
+                      <template #default="{ row }">
+                        <div class="ind-cell-text">
+                          {{ String((row as Record<string, unknown>).standard_response || '').slice(0, 110) }}…
+                        </div>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                  <div v-else class="ind-empty-note">当前业务线暂未收录标准应答指标条目。</div>
                 </div>
-              </div>
+              </section>
 
-              <!-- E43：暗标防护双模式切换（按通用方式 vs 按暗标生成） -->
-              <div class="blind-mode-box">
-                <div class="bmb-head">
-                  <span class="bmb-title">暗标设置（生成方式双模式）</span>
-                  <el-tag v-if="blindBidMode" size="small" type="danger" effect="dark">
+              <section class="cfg-section cfg-section-fill" :class="{ 'is-danger': blindBidMode }">
+                <header class="cfg-sec-head">
+                  <span class="cfg-step">05</span>
+                  <span class="cfg-sec-title">暗标设置</span>
+                  <el-tag v-if="blindBidMode" size="small" type="danger" effect="plain" class="cfg-head-extra">
                     暗标保护已开启（{{ blindRules.length }}/6 项）
                   </el-tag>
-                </div>
-                <el-radio-group v-model="blindBidMode" class="bmb-radios">
+                </header>
+                <el-radio-group v-model="blindBidMode" class="option-cards" :class="{ 'is-stretched': !blindBidMode }">
                   <el-radio :value="false">
-                    按通用方式生成（独立封面 · 目录 · Skill 底纹配色）
+                    <span class="radio-title">按通用方式生成</span>
+                    <span class="radio-desc">独立封面 · 目录 · Skill 底纹配色</span>
                   </el-radio>
                   <el-radio :value="true">
-                    按暗标生成（去封面与底纹粗斜体 · 隐去身份/Logo · 禁目录自动清理）
+                    <span class="radio-title">按暗标生成</span>
+                    <span class="radio-desc">去封面与底纹粗斜体 · 隐去身份/Logo</span>
                   </el-radio>
                 </el-radio-group>
-
                 <div v-if="blindBidMode" class="bmb-panel">
                   <el-alert
                     type="warning"
@@ -1167,27 +1186,41 @@ onUnmounted(() => {
                     </el-tag>
                   </div>
                 </div>
-              </div>
-
-              <div class="action-bar">
-                <el-button
-                  type="primary"
-                  :loading="generating"
-                  @click="handleGenerateDraft"
-                >
-                  {{ useAi ? '发起 AI + Skill 标书编排与生成 (.docx)' : '生成确定性结构初稿 (.docx)' }}
-                </el-button>
-              </div>
+              </section>
             </div>
           </div>
-        </el-card>
+
+          <div class="setup-footer">
+            <div class="summary-chips">
+              <span class="sum-label">本次配置</span>
+              <span class="sum-chip">{{ selectedSkill ? selectedSkill.name : '未选 Skill' }}</span>
+              <span class="sum-chip">{{ composeScope === 'section' ? `单章：${targetSectionTopic || '未指定'}` : '完整投标文件' }}</span>
+              <span class="sum-chip">{{ densityPreset === 'concise' ? '简明' : densityPreset === 'detailed' ? '详尽' : '标准' }}篇幅 · {{ tableDensity === 'rich' ? '丰富表格' : tableDensity === 'moderate' ? '适中表格' : '纯文字' }}</span>
+              <span class="sum-chip" :class="{ on: useAi }">{{ useAi ? 'AI 撰稿' : '确定性骨架' }}</span>
+              <span v-if="useIndicatorLibrary" class="sum-chip on">指标库</span>
+              <span v-if="blindBidMode" class="sum-chip danger">暗标</span>
+            </div>
+            <div class="footer-actions">
+              <el-button
+                size="small"
+                class="collapse-toggle-btn"
+                @click="setupCollapsed = !setupCollapsed"
+              >
+                {{ setupCollapsed ? '展开修改配置' : '收起配置' }}
+              </el-button>
+              <el-button type="primary" class="primary-cta-btn" :loading="generating" @click="handleGenerateDraft">
+                {{ useAi ? '发起 AI + Skill 标书编排与生成 (.docx)' : '生成确定性结构初稿 (.docx)' }}
+              </el-button>
+            </div>
+          </div>
+        </div>
 
         <div class="workspace-split">
           <!-- 左侧草稿历史列表 -->
           <el-card shadow="never" class="history-pane" v-loading="loadingDrafts">
             <template #header>
               <div class="pane-head">
-                <span>历史编制草稿箱（{{ draftList.length }}）</span>
+                <span>历史编制草稿箱 <em class="count-badge">{{ draftList.length }}</em></span>
                 <el-button size="small" text @click="loadDrafts">刷新</el-button>
               </div>
             </template>
@@ -1202,9 +1235,9 @@ onUnmounted(() => {
               >
                 <div class="draft-title">{{ item.title }}</div>
                 <div class="draft-meta">
-                  <el-tag
-                    size="small"
-                    :type="isRunningStatus(item.status) ? 'warning' : (item.status === 'failed' ? 'danger' : 'success')"
+                  <span
+                    class="status-dot-pill"
+                    :class="isRunningStatus(item.status) ? 'is-running' : (item.status === 'failed' ? 'is-failed' : 'is-done')"
                   >
                     {{
                       isRunningStatus(item.status)
@@ -1215,24 +1248,30 @@ onUnmounted(() => {
                             ? 'AI 已撰稿'
                             : '结构初稿'
                     }}
-                  </el-tag>
-                  <span>{{ item.skill_name || '标准版' }}</span>
-                  <el-tag
+                  </span>
+                  <span class="draft-skill-name">{{ item.skill_name || '标准版' }}</span>
+                </div>
+                <div
+                  v-if="
+                    item.compose_scope === 'section' ||
+                    Boolean((item.stats as Record<string, unknown>)?.compose_scope === 'section') ||
+                    item.blind_bid_mode ||
+                    Boolean((item.stats as Record<string, unknown>)?.blind_bid_applied)
+                  "
+                  class="draft-flags"
+                >
+                  <span
                     v-if="item.compose_scope === 'section' || Boolean((item.stats as Record<string, unknown>)?.compose_scope === 'section')"
-                    size="small"
-                    type="primary"
-                    effect="plain"
+                    class="meta-pill is-brand"
                   >
                     单章专项
-                  </el-tag>
-                  <el-tag
+                  </span>
+                  <span
                     v-if="item.blind_bid_mode || Boolean((item.stats as Record<string, unknown>)?.blind_bid_applied)"
-                    size="small"
-                    type="danger"
-                    effect="plain"
+                    class="meta-pill is-danger"
                   >
                     暗标无痕
-                  </el-tag>
+                  </span>
                 </div>
                 <div class="draft-actions" @click.stop>
                   <el-button
@@ -1299,66 +1338,67 @@ onUnmounted(() => {
 
             <template v-else-if="activeBlueprint">
               <div class="bp-header">
-                <div>
+                <div class="bp-header-main">
                   <h3>{{ activeBlueprint.project_name }}</h3>
                   <div class="bp-sub">
-                    编号：{{ activeBlueprint.project_code }} ｜ 开标日：{{ activeBlueprint.open_date || '待人工核对' }} ｜ 参考限价：{{ activeBlueprint.price_cap ? `${activeBlueprint.price_cap} 元` : '未识别/待核对' }}
+                    <span>编号：{{ activeBlueprint.project_code }}</span>
+                    <span class="bp-sep">·</span>
+                    <span>开标日：{{ activeBlueprint.open_date || '待人工核对' }}</span>
+                    <span class="bp-sep">·</span>
+                    <span>参考限价：{{ activeBlueprint.price_cap ? `${activeBlueprint.price_cap} 元` : '未识别/待核对' }}</span>
                   </div>
                   <div class="bp-sub-tags">
-                    <el-tag size="small" type="info">Skill：{{ activeBlueprint.skill_name || activeDraft.skill_name }}</el-tag>
-                    <el-tag size="small" :type="bizLineTagType(activeDraft.biz_line)">
-                      业务线：{{ bizLineLabel(activeDraft.biz_line) }}
-                    </el-tag>
-                    <el-tag
+                    <span class="meta-pill">Skill：{{ activeBlueprint.skill_name || activeDraft.skill_name }}</span>
+                    <span class="meta-pill">业务线：{{ bizLineLabel(activeDraft.biz_line) }}</span>
+                    <span
                       v-if="activeBlueprint.compose_scope === 'section' || activeDraft.compose_scope === 'section'"
-                      size="small"
-                      type="primary"
+                      class="meta-pill is-brand"
                     >
-                      单章节专项补写：{{ activeBlueprint.target_section_topic || activeDraft.target_section_topic || '专项章节' }}
-                    </el-tag>
-                    <el-tag
+                      单章专项：{{ activeBlueprint.target_section_topic || activeDraft.target_section_topic || '专项章节' }}
+                    </span>
+                    <span
                       v-if="activeBlueprint.blind_bid_mode || activeDraft.blind_bid_mode || Boolean((activeBlueprint.stats as Record<string, unknown>)?.blind_bid_applied)"
-                      size="small"
-                      type="danger"
+                      class="meta-pill is-danger"
                     >
-                      暗标素颜模式已生效（{{ (activeBlueprint.blind_rules || []).length || 6 }} 项屏蔽）
-                    </el-tag>
-                    <el-tag
+                      暗标素颜（{{ (activeBlueprint.blind_rules || []).length || 6 }} 项屏蔽）
+                    </span>
+                    <span
                       v-if="activeDraft.use_indicator_library || Boolean((activeBlueprint.stats as Record<string, unknown>)?.use_indicator_library)"
-                      size="small"
-                      type="success"
-                      effect="plain"
+                      class="meta-pill"
                     >
-                      公司指标库已注入（命中 {{ (activeBlueprint.stats as Record<string, unknown>)?.indicator_matched_topics || 0 }} 节）
-                    </el-tag>
-                    <el-tag size="small" :type="activeBlueprint.ai_status === 'done' ? 'success' : 'warning'">
+                      指标库已注入（命中 {{ (activeBlueprint.stats as Record<string, unknown>)?.indicator_matched_topics || 0 }} 节）
+                    </span>
+                    <span
+                      class="meta-pill"
+                      :class="activeBlueprint.ai_status === 'done' ? 'is-ok' : 'is-warn'"
+                    >
                       {{
                         activeBlueprint.ai_status === 'done'
-                          ? 'AI 动态规划章节与正文已生成'
+                          ? 'AI 动态规划与正文已生成'
                           : activeBlueprint.ai_status === 'partial'
                             ? 'AI 部分章节已生成'
-                            : '0-Token 骨架模式（未启用或未配模型）'
+                            : '0-Token 骨架模式'
                       }}
-                    </el-tag>
+                    </span>
                   </div>
                 </div>
                 <el-button
-                  type="success"
+                  class="btn-download-docx"
                   @click="handleDownloadDraft(activeDraft)"
                 >
                   下载排版初稿 (.docx)
                 </el-button>
               </div>
 
-              <!-- 招标评分细则要点原文对照折叠面板（WPS 风格边看要求边审正文） -->
+              <!-- 招标评分细则要点原文对照折叠面板 -->
               <div
                 v-if="activeBlueprint.tender_scoring_focus && activeBlueprint.tender_scoring_focus.length > 0"
-                class="scoring-focus-bar"
+                class="info-strip is-info"
               >
-                <div class="sfb-head">
-                  <div class="sfb-title">
+                <div class="strip-head">
+                  <div class="strip-title">
                     <strong>招标评分细则要点原文对照（共 {{ activeBlueprint.tender_scoring_focus.length }} 条匹配依据）</strong>
-                    <span class="sfb-sub">边对照招标评分原文边审校生成的章节正文</span>
+                    <span class="strip-sub">边对照招标评分原文边审校生成的章节正文</span>
                   </div>
                   <el-button
                     size="small"
@@ -1366,10 +1406,10 @@ onUnmounted(() => {
                     type="primary"
                     @click="showScoringFocusPanel = !showScoringFocusPanel"
                   >
-                    {{ showScoringFocusPanel ? '收起评分原文对照 ▲' : '展开评分原文对照 ▼' }}
+                    {{ showScoringFocusPanel ? '收起评分原文对照' : '展开评分原文对照' }}
                   </el-button>
                 </div>
-                <div v-if="showScoringFocusPanel" class="sfb-body">
+                <div v-if="showScoringFocusPanel" class="strip-body">
                   <el-table :data="activeBlueprint.tender_scoring_focus" size="small" border max-height="220">
                     <el-table-column prop="chapter" label="评分因素 / 章节" width="180" />
                     <el-table-column prop="score" label="分值" width="90" />
@@ -1378,38 +1418,39 @@ onUnmounted(() => {
                 </div>
               </div>
 
-              <!-- 紧凑分组人工待核对条（取代原 40 标签墙，点击展开明细抽屉） -->
-              <div class="manual-compact-bar">
-                <div class="mc-summary">
-                  <strong>人工终核提醒（共 {{ manualGroupStats.total }} 项）</strong>
-                  <el-tag size="small" type="danger" effect="plain">资格证照 {{ manualGroupStats.qual }}</el-tag>
-                  <el-tag size="small" type="warning" effect="plain">报价锁定 {{ manualGroupStats.price }}</el-tag>
-                  <el-tag size="small" type="info" effect="plain">偏离核对 {{ manualGroupStats.deviation }}</el-tag>
-                  <el-tag size="small" type="success" effect="plain">方案审校 {{ manualGroupStats.scoring }}</el-tag>
+              <!-- 紧凑分组人工待核对条 -->
+              <div class="info-strip is-warn">
+                <div class="strip-head">
+                  <div class="mc-summary">
+                    <strong>人工终核提醒（共 {{ manualGroupStats.total }} 项）</strong>
+                    <span class="mc-stat is-danger">资格证照 <b>{{ manualGroupStats.qual }}</b></span>
+                    <span class="mc-stat is-warn">报价锁定 <b>{{ manualGroupStats.price }}</b></span>
+                    <span class="mc-stat">偏离核对 <b>{{ manualGroupStats.deviation }}</b></span>
+                    <span class="mc-stat">方案审校 <b>{{ manualGroupStats.scoring }}</b></span>
+                  </div>
+                  <el-button size="small" link type="primary" @click="showManualDrawer = !showManualDrawer">
+                    {{ showManualDrawer ? '收起待核对明细' : '展开待核对明细' }}
+                  </el-button>
                 </div>
-                <el-button size="small" link type="primary" @click="showManualDrawer = !showManualDrawer">
-                  {{ showManualDrawer ? '收起待核对明细' : '展开待核对明细' }}
-                </el-button>
-              </div>
-
-              <div v-if="showManualDrawer" class="manual-drawer-panel">
-                <el-table :data="activeBlueprint.manual_checklist" size="small" max-height="260" border>
-                  <el-table-column prop="field" label="待处理项" min-width="180" />
-                  <el-table-column prop="reason" label="原因说明" min-width="200" />
-                  <el-table-column prop="hint" label="建议动作" min-width="200" />
-                  <el-table-column label="定位" width="80" align="center">
-                    <template #default="{ row }">
-                      <el-button
-                        link
-                        type="primary"
-                        size="small"
-                        @click="jumpToSection(String((row as ComposeManualItem).section_id))"
-                      >
-                        跳转
-                      </el-button>
-                    </template>
-                  </el-table-column>
-                </el-table>
+                <div v-if="showManualDrawer" class="strip-body">
+                  <el-table :data="activeBlueprint.manual_checklist" size="small" max-height="260" border>
+                    <el-table-column prop="field" label="待处理项" min-width="180" />
+                    <el-table-column prop="reason" label="原因说明" min-width="200" />
+                    <el-table-column prop="hint" label="建议动作" min-width="200" />
+                    <el-table-column label="定位" width="80" align="center">
+                      <template #default="{ row }">
+                        <el-button
+                          link
+                          type="primary"
+                          size="small"
+                          @click="jumpToSection(String((row as ComposeManualItem).section_id))"
+                        >
+                          跳转
+                        </el-button>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                </div>
               </div>
 
               <el-collapse v-model="expandedSections" class="bp-sections">
@@ -1423,7 +1464,7 @@ onUnmounted(() => {
                   <template #title>
                     <div class="sec-title-row">
                       <span>{{ sec.title }}</span>
-                      <el-tag size="small" effect="plain">{{ sec.fill_mode }}</el-tag>
+                      <span class="meta-pill" :class="fillModeClass(sec.fill_mode)">{{ fillModeLabel(sec.fill_mode) }}</span>
                     </div>
                   </template>
 
@@ -1529,7 +1570,7 @@ onUnmounted(() => {
                     >
                       <div class="topic-head">
                         <strong>{{ ch.chapter_no }} {{ ch.title }}</strong>
-                        <el-tag size="small" :type="ch.ai_generated ? 'success' : 'warning'">
+                        <el-tag size="small" :type="ch.ai_generated ? 'success' : 'warning'" effect="plain">
                           {{ ch.ai_generated ? 'AI 草稿·待人工审定' : '结构兜底' }}
                         </el-tag>
                       </div>
@@ -1587,7 +1628,7 @@ onUnmounted(() => {
                     >
                       <div class="topic-head">
                         <strong>{{ tp.title }}</strong>
-                        <el-tag size="small" type="warning">{{ tp.score_points }}</el-tag>
+                        <el-tag size="small" type="warning" effect="plain">{{ tp.score_points }}</el-tag>
                       </div>
                       <div v-if="tp.tender_quote" class="topic-quote">招标依据：{{ tp.tender_quote }}</div>
                       <ul class="topic-outline">
@@ -1632,6 +1673,7 @@ onUnmounted(() => {
             </div>
             <el-button
               type="primary"
+              class="primary-cta-btn"
               :disabled="!cleanTaskId || cleanIsPdfTask"
               :loading="exportingClean"
               @click="handleExportCleanBid"
@@ -1705,7 +1747,7 @@ onUnmounted(() => {
               </span>
               <el-button
                 size="small"
-                type="success"
+                class="btn-download-docx"
                 @click="cleanTaskId && reportsApi.downloadCleanBid(cleanTaskId, cleanResult.output_filename)"
               >
                 再次下载定稿 Word
@@ -1906,67 +1948,376 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* ── 全页主色统一对齐 main.css (--brand: #1d4ed8) ── */
 .composer-page {
+  --el-color-primary: var(--brand, #1d4ed8);
+  --el-color-primary-light-3: #3b82f6;
+  --el-color-primary-light-5: #93c5fd;
+  --el-color-primary-light-7: #bfdbfe;
+  --el-color-primary-light-8: #dbeafe;
+  --el-color-primary-light-9: #eff6ff;
+  --el-color-primary-dark-2: var(--brand-hover, #1e40af);
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
 }
 
-.page-intro h2 {
-  margin: 0 0 6px;
-  font-size: 20px;
-  color: #0f172a;
+.page-intro {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.intro-text h2 {
+  margin: 0 0 3px;
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--txt-strong, #0b1324);
+  letter-spacing: -0.01em;
 }
 
 .sub-desc {
   margin: 0;
-  font-size: 13px;
-  color: #475569;
-  line-height: 1.5;
+  font-size: 12.5px;
+  color: var(--txt-muted, #64748b);
+  line-height: 1.45;
 }
 
-.setup-card {
-  border: 1px solid #e2e8f0;
+.collapse-toggle-btn {
+  border-color: var(--border-line, #dce3ec);
+  color: var(--txt-sec, #475569);
+  background: #ffffff;
+}
+
+.collapse-toggle-btn:hover {
+  border-color: var(--brand-border, #bfdbfe);
+  color: var(--brand, #1d4ed8);
+  background: var(--brand-soft, #eff6ff);
+}
+
+.composer-tabs :deep(.el-tabs__header) {
+  margin-bottom: 12px;
+}
+
+.composer-tabs :deep(.el-tabs__item) {
+  font-weight: 500;
+  color: var(--txt-sec, #475569);
+}
+
+.composer-tabs :deep(.el-tabs__item.is-active) {
+  font-weight: 600;
+  color: var(--brand, #1d4ed8);
+}
+
+/* ── 顶部配置面板：去“框套框”，采用统一精工面板 + 浅灰分格 ── */
+.setup-panel {
+  background: var(--bg-panel, #ffffff);
+  border: 1px solid var(--border-line, #dce3ec);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card, 0 2px 6px rgba(11, 19, 36, 0.04));
+  overflow: hidden;
+  margin-bottom: 14px;
 }
 
 .setup-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-  gap: 20px;
+  grid-template-columns: minmax(0, 1.04fr) minmax(0, 0.96fr);
+  align-items: stretch;
+  background: var(--border-line, #e2e8f0);
+  gap: 1px;
+}
+
+@media (max-width: 1180px) {
+  .setup-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .setup-col {
   display: flex;
   flex-direction: column;
+  background: var(--bg-panel, #ffffff);
+  min-width: 0;
+}
+
+.cfg-section {
+  display: flex;
+  flex-direction: column;
   gap: 10px;
+  padding: 14px 18px;
+  background: var(--bg-panel, #ffffff);
+  border-bottom: 1px solid #eef2f6;
+  transition: background-color 0.15s ease;
 }
 
-.field-label {
-  font-size: 13px;
+.cfg-section:last-child {
+  border-bottom: none;
+}
+
+.cfg-section-fill {
+  flex: 1;
+}
+
+.cfg-section.is-danger {
+  background: #fffcfc;
+}
+
+.cfg-sec-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 26px;
+}
+
+.cfg-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--brand-soft, #eff6ff);
+  border: 1px solid #dbeafe;
+  color: var(--brand, #1d4ed8);
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.5;
+  flex-shrink: 0;
+}
+
+.cfg-section.is-danger .cfg-step {
+  background: var(--sev-error-bg, #fef2f2);
+  border-color: var(--sev-error-border, #fecaca);
+  color: var(--sev-error, #dc2626);
+}
+
+.cfg-sec-title {
+  font-size: 13.5px;
   font-weight: 600;
-  color: #1e293b;
+  color: var(--txt-strong, #0b1324);
 }
 
-.skill-row-head {
+.cfg-head-extra {
+  margin-left: auto;
+}
+
+/* ── 现代 SaaS 浅灰轨道分段控件（消除满屏亮蓝块） ── */
+.seg-group {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 7px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  gap: 2px;
+}
+
+.seg-group :deep(.el-radio-button__inner) {
+  border: none !important;
+  background: transparent;
+  color: #475569;
+  font-weight: 500;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 5px !important;
+  box-shadow: none !important;
+  transition: color 0.15s, background-color 0.15s, box-shadow 0.15s;
+}
+
+.seg-group :deep(.el-radio-button__inner:hover) {
+  color: #0f172a;
+}
+
+.seg-group :deep(.el-radio-button__original-radio:checked + .el-radio-button__inner) {
+  background: #ffffff !important;
+  color: var(--txt-strong, #0b1324) !important;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08), 0 0 0 1px rgba(15, 23, 42, 0.04) !important;
+}
+
+/* ── 文件选择区（克制蓝灰质感，不再扎眼跳绿） ── */
+.file-drop {
   display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 13px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.file-drop:hover {
+  border-color: var(--brand, #1d4ed8);
+  background: #f4f7ff;
+}
+
+.file-drop.picked {
+  border-style: solid;
+  border-color: #c7d7f4;
+  background: #f5f8ff;
+}
+
+.file-drop-sm {
+  padding: 8px 11px;
+}
+
+.file-drop-input {
+  display: none;
+}
+
+.file-drop-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: #e2e8f0;
+  color: #334155;
+  font-size: 14px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.file-drop.picked .file-drop-icon {
+  background: var(--brand, #1d4ed8);
+  color: #ffffff;
+}
+
+.file-drop-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.file-drop-text strong {
+  font-size: 13px;
+  color: var(--txt-strong, #0b1324);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-drop-text small {
+  font-size: 11.5px;
+  color: var(--txt-muted, #64748b);
+}
+
+.row-inputs {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.pkg-input {
+  width: 114px;
+  flex-shrink: 0;
+}
+
+/* ── 两列并排可选卡片（节省高度且配平左右双栏） ── */
+.option-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  align-items: stretch;
+  width: 100%;
+}
+
+@media (max-width: 680px) {
+  .option-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.option-cards :deep(.el-radio) {
+  height: auto;
+  margin-right: 0;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #fafbfd;
+  align-items: flex-start;
+  white-space: normal;
+  transition: border-color 0.15s, background-color 0.15s, box-shadow 0.15s;
+}
+
+.option-cards :deep(.el-radio:hover) {
+  border-color: #cbd5e1;
+  background: #ffffff;
+}
+
+.option-cards :deep(.el-radio.is-checked) {
+  border-color: var(--brand, #1d4ed8);
+  background: #f5f8ff;
+  box-shadow: 0 0 0 1px rgba(29, 78, 216, 0.12);
+}
+
+.cfg-section.is-danger .option-cards :deep(.el-radio.is-checked) {
+  border-color: var(--sev-error, #dc2626);
+  background: #fef2f2;
+  box-shadow: 0 0 0 1px rgba(220, 38, 38, 0.1);
+}
+
+.option-cards :deep(.el-radio__input) {
+  margin-top: 2px;
+}
+
+.option-cards :deep(.el-radio__label) {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.4;
+  padding-left: 7px;
+}
+
+.radio-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--txt-strong, #0b1324);
+}
+
+.radio-desc {
+  font-size: 11.5px;
+  color: var(--txt-muted, #64748b);
+  font-weight: 400;
+}
+
+/* ── Skill 摘要与开关分组 ── */
+.skill-summary-line {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 11px;
+  border-radius: 7px;
+  background: #f8fafc;
+  border: 1px solid #e6ebf2;
+}
+
+.skill-summary-top {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
-  align-items: center;
-}
-
-.skill-picker-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
-.skill-summary-line {
+.skill-spec-inline {
+  font-size: 11.5px;
+  color: var(--txt-muted, #64748b);
+  font-family: "JetBrains Mono", Consolas, monospace;
+}
+
+.skill-desc-text {
   font-size: 12px;
-  color: #475569;
-  background: #f8fafc;
-  border-left: 3px solid #2563eb;
-  padding: 6px 10px;
-  border-radius: 4px;
+  color: var(--txt-sec, #475569);
+  line-height: 1.45;
 }
 
 .skill-opt-row {
@@ -1977,20 +2328,20 @@ onUnmounted(() => {
   width: 100%;
 }
 
-.mr-6 {
-  margin-right: 6px;
+.toggle-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 2px;
 }
 
-.indicator-bar {
+.opt-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  flex-wrap: wrap;
   gap: 8px;
-  padding: 6px 10px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
+  flex-wrap: wrap;
+  min-height: 24px;
 }
 
 .ind-switch-wrap {
@@ -1999,14 +2350,415 @@ onUnmounted(() => {
   gap: 8px;
   font-size: 12.5px;
   font-weight: 500;
-  color: #1e293b;
+  color: var(--txt-body, #1e293b);
 }
 
+/* ── 底部操作条 ── */
+.setup-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 11px 18px;
+  background: #f8fafc;
+  border-top: 1px solid #e6ebf2;
+}
+
+.setup-panel.collapsed .setup-footer {
+  border-top: none;
+}
+
+.summary-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sum-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--txt-muted, #64748b);
+  margin-right: 2px;
+}
+
+.sum-chip {
+  padding: 2px 9px;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  font-size: 12px;
+  color: #334155;
+}
+
+.sum-chip.on {
+  border-color: #c7d7f4;
+  background: #eff6ff;
+  color: var(--brand, #1d4ed8);
+  font-weight: 500;
+}
+
+.sum-chip.danger {
+  border-color: var(--sev-error-border, #fecaca);
+  background: var(--sev-error-bg, #fef2f2);
+  color: var(--sev-error, #dc2626);
+  font-weight: 500;
+}
+
+.footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.option-cards.is-stretched {
+  flex: 1;
+}
+
+.option-cards.is-stretched :deep(.el-radio) {
+  padding: 12px 13px;
+}
+
+.primary-cta-btn {
+  font-weight: 600;
+  padding-left: 18px;
+  padding-right: 18px;
+  border-radius: 8px;
+}
+
+/* ── 中性微胶囊（替代详情区彩虹标签墙） ── */
+.meta-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.45;
+  background: #f1f5f9;
+  color: #334155;
+  border: 1px solid #e2e8f0;
+  white-space: nowrap;
+}
+
+.meta-pill.is-brand {
+  background: #eff6ff;
+  color: var(--brand, #1d4ed8);
+  border-color: #dbeafe;
+}
+
+.meta-pill.is-ok {
+  background: #ecfdf5;
+  color: #047857;
+  border-color: #a7f3d0;
+}
+
+.meta-pill.is-warn {
+  background: #fffbeb;
+  color: #b45309;
+  border-color: #fde68a;
+}
+
+.meta-pill.is-danger {
+  background: #fef2f2;
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+
+/* ── 工作区拆分：左侧草稿箱 + 右侧蓝图预览 ── */
+.workspace-split {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+@media (max-width: 960px) {
+  .workspace-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.history-pane,
+.detail-pane,
+.setup-card {
+  border: 1px solid var(--border-line, #dce3ec);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card, 0 2px 6px rgba(11, 19, 36, 0.04));
+}
+
+.history-pane {
+  max-height: 76vh;
+  overflow-y: auto;
+}
+
+.pane-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--txt-strong, #0b1324);
+}
+
+.count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 6px;
+  margin-left: 4px;
+  border-radius: 9px;
+  background: #f1f5f9;
+  color: var(--txt-sec, #475569);
+  font-style: normal;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.draft-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.draft-item {
+  padding: 10px 12px;
+  border: 1px solid #e6ebf2;
+  border-left: 3px solid transparent;
+  border-radius: 8px;
+  background: #ffffff;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.draft-item:hover {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+
+.draft-item.active {
+  border-color: #c7d7f4;
+  border-left-color: var(--brand, #1d4ed8);
+  background: #f5f8ff;
+}
+
+.draft-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--txt-strong, #0b1324);
+  margin-bottom: 6px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.draft-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--txt-muted, #64748b);
+  margin-bottom: 6px;
+}
+
+.draft-skill-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-dot-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.status-dot-pill::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status-dot-pill.is-done {
+  color: #059669;
+}
+
+.status-dot-pill.is-running {
+  color: #d97706;
+}
+
+.status-dot-pill.is-failed {
+  color: #dc2626;
+}
+
+.draft-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.draft-actions {
+  display: flex;
+  gap: 10px;
+  padding-top: 4px;
+  border-top: 1px dashed #e6ebf2;
+}
+
+/* ── 右侧详情头部与收敛后的横幅条 ── */
+.bp-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  padding-bottom: 14px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid #eef2f6;
+}
+
+.bp-header-main {
+  min-width: 0;
+}
+
+.bp-header h3 {
+  margin: 0 0 5px;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--txt-strong, #0b1324);
+}
+
+.bp-sub {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--txt-muted, #64748b);
+}
+
+.bp-sep {
+  color: #cbd5e1;
+}
+
+.bp-sub-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* 克制深炭灰下载主按钮，避免亮绿与亮蓝撞色 */
+.btn-download-docx {
+  background: #0f172a;
+  border-color: #0f172a;
+  color: #ffffff;
+  font-weight: 600;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.btn-download-docx:hover,
+.btn-download-docx:focus {
+  background: #1e293b;
+  border-color: #1e293b;
+  color: #ffffff;
+}
+
+/* 统一轻边框语义条（替代整块蓝底/黄底叠加） */
+.info-strip {
+  margin-bottom: 10px;
+  padding: 9px 13px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  border-left-width: 3px;
+  background: #ffffff;
+}
+
+.info-strip.is-info {
+  border-left-color: var(--brand, #1d4ed8);
+}
+
+.info-strip.is-warn {
+  border-left-color: #d97706;
+  background: #fffdf9;
+}
+
+.strip-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.strip-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: var(--txt-strong, #0b1324);
+}
+
+.strip-sub {
+  font-size: 12px;
+  color: var(--txt-muted, #64748b);
+}
+
+.strip-body {
+  margin-top: 10px;
+}
+
+.mc-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--txt-strong, #0b1324);
+}
+
+.mc-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 5px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 11.5px;
+}
+
+.mc-stat b {
+  font-family: "JetBrains Mono", Consolas, monospace;
+}
+
+.mc-stat.is-danger {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.mc-stat.is-warn {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+/* ── 辅助面板与章节样式 ── */
 .indicator-preview-box {
   padding: 10px 12px;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fafbfd;
 }
 
 .ind-pv-head {
@@ -2016,7 +2768,7 @@ onUnmounted(() => {
   gap: 8px;
   margin-bottom: 8px;
   font-size: 13px;
-  color: #0f172a;
+  color: var(--txt-strong, #0b1324);
 }
 
 .ind-score-summary {
@@ -2044,7 +2796,7 @@ onUnmounted(() => {
 
 .ind-weight {
   font-weight: 600;
-  color: #1d4ed8;
+  color: var(--brand, #1d4ed8);
 }
 
 .ind-focus {
@@ -2059,49 +2811,20 @@ onUnmounted(() => {
 
 .ind-tip-line {
   margin-top: 3px;
-  color: #0f766e;
+  color: #047857;
 }
 
-.upload-box,
+.ind-empty-note {
+  font-size: 12px;
+  color: var(--txt-muted, #64748b);
+  padding: 6px 0;
+}
+
 .knowledge-box {
-  padding: 10px 12px;
+  padding: 8px 10px;
   border: 1px dashed #cbd5e1;
-  border-radius: 6px;
+  border-radius: 8px;
   background: #f8fafc;
-}
-
-.file-picked {
-  margin-top: 6px;
-  font-size: 12px;
-  color: #0f766e;
-  font-weight: 600;
-}
-
-.file-hint {
-  margin-top: 6px;
-  font-size: 12px;
-  color: #64748b;
-}
-
-.row-inputs {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-
-.mode-radios {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-}
-
-.kb-head {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 12px;
-  color: #334155;
 }
 
 .kb-list {
@@ -2118,75 +2841,11 @@ onUnmounted(() => {
   margin-top: auto;
 }
 
-.workspace-split {
-  display: grid;
-  grid-template-columns: 290px minmax(0, 1fr);
-  gap: 14px;
-  align-items: start;
-}
-
-.history-pane {
-  max-height: 74vh;
-  overflow-y: auto;
-}
-
-.pane-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-weight: 600;
-}
-
-.draft-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.draft-item {
-  padding: 10px;
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
-}
-
-.draft-item:hover {
-  border-color: #94a3b8;
-}
-
-.draft-item.active {
-  border-color: #2563eb;
-  background: #eff6ff;
-}
-
-.draft-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: #0f172a;
-  margin-bottom: 6px;
-  word-break: break-all;
-}
-
-.draft-meta {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 12px;
-  color: #64748b;
-  margin-bottom: 4px;
-}
-
-.draft-actions {
-  display: flex;
-  gap: 10px;
-}
-
 .async-status-card {
   padding: 20px;
   border: 1px solid #bfdbfe;
-  background: #eff6ff;
-  border-radius: 8px;
+  background: #f5f8ff;
+  border-radius: 10px;
 }
 
 .async-top {
@@ -2200,64 +2859,13 @@ onUnmounted(() => {
 .async-top h3 {
   margin: 0 0 4px;
   font-size: 16px;
-  color: #0f172a;
+  color: var(--txt-strong, #0b1324);
 }
 
 .async-sub {
   margin: 0;
   font-size: 13px;
-  color: #1e40af;
-}
-
-.bp-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.bp-header h3 {
-  margin: 0 0 4px;
-  font-size: 17px;
-  color: #0f172a;
-}
-
-.bp-sub {
-  font-size: 12px;
-  color: #475569;
-}
-
-.bp-sub-tags {
-  display: flex;
-  gap: 6px;
-  margin-top: 6px;
-}
-
-.manual-compact-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid #fde68a;
-  background: #fffbeb;
-  border-radius: 6px;
-  margin-bottom: 10px;
-}
-
-.mc-summary {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  font-size: 12.5px;
-  color: #92400e;
-}
-
-.manual-drawer-panel {
-  margin-bottom: 12px;
+  color: var(--brand-hover, #1e40af);
 }
 
 .sec-title-row {
@@ -2269,7 +2877,7 @@ onUnmounted(() => {
 
 .sec-highlighted {
   outline: 2px solid #f59e0b;
-  border-radius: 4px;
+  border-radius: 6px;
 }
 
 .highlight-manual-text {
@@ -2291,16 +2899,16 @@ onUnmounted(() => {
   font-size: 12px;
   color: #475569;
   background: #f8fafc;
-  padding: 6px 10px;
-  border-radius: 4px;
-  border-left: 3px solid #3b82f6;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border-left: 3px solid var(--brand, #1d4ed8);
 }
 
 .ai-chapter-card,
 .topic-card {
   padding: 12px 14px;
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
+  border: 1px solid #e6ebf2;
+  border-radius: 8px;
   margin-bottom: 12px;
   background: #ffffff;
 }
@@ -2322,7 +2930,7 @@ onUnmounted(() => {
   margin: 6px 0;
   font-size: 13px;
   line-height: 1.7;
-  color: #0f172a;
+  color: var(--txt-strong, #0b1324);
   text-indent: 2em;
 }
 
@@ -2333,7 +2941,7 @@ onUnmounted(() => {
 .ai-table-title {
   font-size: 12.5px;
   font-weight: 600;
-  color: #1e293b;
+  color: var(--txt-body, #1e293b);
   margin-bottom: 4px;
 }
 
@@ -2345,13 +2953,13 @@ onUnmounted(() => {
 
 .mini-grid-tbl th,
 .mini-grid-tbl td {
-  border: 1px solid #cbd5e1;
+  border: 1px solid #dce3ec;
   padding: 5px 8px;
   text-align: left;
 }
 
 .mini-grid-tbl th {
-  background: #f1f5f9;
+  background: #f8fafc;
   font-weight: 600;
 }
 
@@ -2359,15 +2967,16 @@ onUnmounted(() => {
   margin: 0 0 8px;
   padding-left: 18px;
   font-size: 13px;
-  color: #1e293b;
+  color: var(--txt-body, #1e293b);
 }
 
 .rag-snippet-box {
   background: #f8fafc;
-  border-left: 3px solid #f59e0b;
+  border-left: 3px solid #d97706;
   padding: 8px 10px;
   margin-top: 6px;
   font-size: 12px;
+  border-radius: 0 6px 6px 0;
 }
 
 .rag-notice {
@@ -2379,6 +2988,12 @@ onUnmounted(() => {
 .rag-body {
   color: #334155;
   white-space: pre-wrap;
+}
+
+.field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--txt-body, #1e293b);
 }
 
 .clean-toolbar {
@@ -2421,8 +3036,8 @@ onUnmounted(() => {
 
 .preview-box {
   padding: 12px;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
+  border: 1px solid #dce3ec;
+  border-radius: 8px;
   background: #f8fafc;
 }
 
@@ -2442,12 +3057,12 @@ onUnmounted(() => {
 .pv-body {
   margin: 0 0 10px;
   font-size: 12px;
-  color: #0f172a;
+  color: var(--txt-strong, #0b1324);
   white-space: pre-wrap;
   background: #ffffff;
   border: 1px solid #e2e8f0;
   padding: 8px;
-  border-radius: 4px;
+  border-radius: 6px;
   max-height: 180px;
   overflow-y: auto;
 }
@@ -2475,36 +3090,8 @@ onUnmounted(() => {
   margin-top: 12px;
 }
 
-.blind-mode-box {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border: 1px solid #fecaca;
-  border-radius: 6px;
-  background: #fffafa;
-}
-
-.bmb-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 6px;
-}
-
-.bmb-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: #0f172a;
-}
-
-.bmb-radios {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-}
-
 .bmb-panel {
-  margin-top: 8px;
+  margin-top: 4px;
   padding-top: 8px;
   border-top: 1px dashed #fca5a5;
 }
@@ -2535,38 +3122,15 @@ onUnmounted(() => {
   gap: 6px;
 }
 
-/* ── WPS 风格：单章专项补写与篇幅/表格密度档位 ── */
-.wps-scope-panel {
-  margin-top: 4px;
-  padding: 10px 12px;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  background: #f8fafc;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.wps-scope-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.wps-scope-radios {
-  display: flex;
-  gap: 14px;
-  flex-wrap: wrap;
-}
-
+/* ── 单章专项补写与篇幅/表格密度 ── */
 .wps-section-target-box {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  border: 1px dashed #93c5fd;
-  background: #eff6ff;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px dashed #bfdbfe;
+  background: #f5f8ff;
 }
 
 .wps-quick-topics {
@@ -2579,80 +3143,49 @@ onUnmounted(() => {
 .wps-qt-label {
   font-size: 11.5px;
   font-weight: 600;
-  color: #1e3a8a;
+  color: var(--brand-hover, #1e40af);
+  margin-right: 2px;
 }
 
 .wps-topic-chip {
   padding: 2px 8px;
-  border-radius: 4px;
-  border: 1px solid #bfdbfe;
+  border-radius: 5px;
+  border: 1px solid #cbd5e1;
   background: #ffffff;
-  color: #1e40af;
+  color: #334155;
   font-size: 11.5px;
   cursor: pointer;
   transition: all 0.15s;
 }
 
-.wps-topic-chip:hover,
+.wps-topic-chip:hover {
+  border-color: var(--brand, #1d4ed8);
+  color: var(--brand, #1d4ed8);
+}
+
 .wps-topic-chip.active {
-  background: #2563eb;
-  border-color: #2563eb;
+  background: var(--brand, #1d4ed8);
+  border-color: var(--brand, #1d4ed8);
   color: #ffffff;
 }
 
 .wps-density-grid {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding-top: 4px;
-  border-top: 1px dashed #e2e8f0;
+  gap: 7px;
 }
 
 .wps-density-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
 .wps-d-label {
   font-size: 12px;
   font-weight: 600;
-  color: #334155;
-  min-width: 66px;
-}
-
-.scoring-focus-bar {
-  margin-bottom: 10px;
-  padding: 10px 12px;
-  border-radius: 6px;
-  border: 1px solid #bfdbfe;
-  background: #eff6ff;
-}
-
-.sfb-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.sfb-title {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  font-size: 12.5px;
-  color: #1e3a8a;
-}
-
-.sfb-sub {
-  font-size: 11.5px;
-  color: #475569;
-}
-
-.sfb-body {
-  margin-top: 8px;
+  color: var(--txt-sec, #475569);
+  min-width: 52px;
 }
 </style>
