@@ -505,40 +505,45 @@ function handleLogout(): void {
 }
 
 .sb-theme-switcher {
-  margin: 12px 4px 8px;
-  padding: 8px 10px;
+  margin: 10px 4px 8px;
+  padding: 7px 8px;
   background: var(--sb-surface);
   border: 1px solid var(--sb-border);
   border-radius: 8px;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
+  flex-direction: column;
+  gap: 5px;
 }
 
 .sb-theme-label {
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 700;
-  color: var(--sb-text-sec);
+  color: var(--sb-muted);
+  letter-spacing: 0.02em;
+  line-height: 1.2;
 }
 
 .sb-theme-pills {
-  display: flex;
-  gap: 4px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
 }
 
 .sb-theme-btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 4px;
-  padding: 3px 7px;
+  padding: 4px 4px;
   border-radius: 5px;
   border: 1px solid transparent;
   background: transparent;
   color: var(--sb-text-sec);
   font-size: 11px;
   font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
+  transition: background-color 0.15s, color 0.15s, border-color 0.15s;
 }
 
 .sb-theme-btn.active {

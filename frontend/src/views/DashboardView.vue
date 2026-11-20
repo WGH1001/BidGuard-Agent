@@ -20,14 +20,30 @@ const appStore = useAppStore()
 const loading = ref(false)
 const stats = ref<DashboardStatsOut | null>(null)
 
-const matrixChartRef = ref<HTMLElement | null>(null)
 const severityChartRef = ref<HTMLElement | null>(null)
-let matrixChart: echarts.ECharts | null = null
 let severityChart: echarts.ECharts | null = null
 
 const defenseMatrix = computed(() => stats.value?.defense_matrix || [])
 const countdownAlerts = computed(() => stats.value?.countdown_alerts || [])
 const recentTasks = computed(() => stats.value?.recent_tasks || [])
+
+const defenseMaxCount = computed(() => {
+  const nums = defenseMatrix.value.map((i) => i.hit_count || 0)
+  return Math.max(1, ...nums)
+})
+
+function defenseBarPct(count: number): number {
+  if (!count || count <= 0) return 0
+  const raw = Math.round((count / defenseMaxCount.value) * 100)
+  return Math.max(6, Math.min(100, raw))
+}
+
+function countdownBorderClass(daysLeft?: number | null): string {
+  if (daysLeft === null || daysLeft === undefined) return 'is-calm'
+  if (daysLeft < 0) return 'is-past'
+  if (daysLeft <= 7) return 'is-urgent'
+  return 'is-calm'
+}
 
 function statusLabel(st: string): { text: string; cls: string } {
   const map: Record<string, { text: string; cls: string }> = {
@@ -57,35 +73,6 @@ function defenseModuleLabel(mod: string): string {
 function renderCharts(): void {
   if (!stats.value) return
 
-  if (matrixChartRef.value) {
-    if (!matrixChart) {
-      matrixChart = echarts.init(matrixChartRef.value)
-    }
-    const items = stats.value.defense_matrix || []
-    matrixChart.setOption({
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-      grid: { left: 12, right: 24, top: 14, bottom: 12, containLabel: true },
-      xAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { type: 'dashed' } } },
-      yAxis: {
-        type: 'category',
-        data: items.map((i) => i.title).reverse(),
-        axisLabel: { color: '#334155', fontWeight: 700, fontSize: 12 },
-      },
-      series: [
-        {
-          name: '累计检出/处理项数',
-          type: 'bar',
-          barWidth: 16,
-          data: items.map((i) => i.hit_count).reverse(),
-          itemStyle: {
-            color: '#1d4ed8',
-            borderRadius: [0, 4, 4, 0],
-          },
-        },
-      ],
-    })
-  }
-
   if (severityChartRef.value) {
     if (!severityChart) {
       severityChart = echarts.init(severityChartRef.value)
@@ -93,7 +80,17 @@ function renderCharts(): void {
     const veto = stats.value.veto_intercepted_count || 0
     const warn = stats.value.warning_count || 0
     const devCount = stats.value.deviation_tables_generated || 0
+    const totalSignals = veto + warn + devCount
     severityChart.setOption({
+      title: {
+        text: String(totalSignals),
+        subtext: '风险与交付合计',
+        left: 'center',
+        top: '34%',
+        textStyle: { fontSize: 22, fontWeight: 800, color: '#0b1324' },
+        subtextStyle: { fontSize: 11, color: '#64748b' },
+        itemGap: 3,
+      },
       tooltip: { trigger: 'item' },
       legend: { bottom: 0, itemWidth: 10, itemHeight: 10 },
       series: [
@@ -175,7 +172,6 @@ async function handleDeleteTask(row: Partial<BidTaskOut>): Promise<void> {
 }
 
 function handleResize(): void {
-  matrixChart?.resize()
   severityChart?.resize()
 }
 
@@ -186,7 +182,6 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleResize)
-  matrixChart?.dispose()
   severityChart?.dispose()
 })
 </script>
@@ -275,15 +270,16 @@ onBeforeUnmount(() => {
           <div v-for="item in defenseMatrix" :key="item.module" class="m6-card">
             <div class="m6-top">
               <span class="m6-mod">{{ defenseModuleLabel(item.module) }}</span>
-              <span class="sev-pill" :class="item.hit_count > 0 ? 'warning' : 'ok'">
-                累计 {{ item.hit_count }} 项
+              <span class="m6-count mono-num" :class="{ 'is-zero': item.hit_count === 0 }">
+                {{ item.hit_count }} <small>项</small>
               </span>
             </div>
             <div class="m6-title">{{ item.title }}</div>
+            <div class="m6-bar-track">
+              <div class="m6-bar-fill" :style="{ width: `${defenseBarPct(item.hit_count)}%` }"></div>
+            </div>
           </div>
         </div>
-
-        <div ref="matrixChartRef" class="matrix-chart-box"></div>
       </section>
 
       <!-- 右侧：截标倒计时预警列表 + ECharts 风险分布环形图 -->
@@ -299,7 +295,7 @@ onBeforeUnmount(() => {
         <div ref="severityChartRef" class="pie-chart-box"></div>
 
         <div v-if="countdownAlerts.length > 0" class="countdown-list">
-          <div v-for="alert in countdownAlerts" :key="alert.task_id" class="cd-row">
+          <div v-for="alert in countdownAlerts" :key="alert.task_id" class="cd-row" :class="countdownBorderClass(alert.days_left)">
             <div class="cd-main">
               <div class="cd-title-line">
                 <span
@@ -363,7 +359,10 @@ onBeforeUnmount(() => {
           <template #default="{ row }">
             <div class="tbl-proj-title">{{ row.title }}</div>
             <div class="tbl-proj-files">
-              招标书：{{ row.tender_filename || '—' }} ｜ 投标书：{{ row.bid_filename || '—' }}
+              <span>招标书：{{ row.tender_filename || '—' }}</span>
+              <span v-if="row.bid_filename || row.task_type !== 'radar'" class="tbl-file-bid">
+                ｜ 投标书：{{ row.bid_filename || '—' }}
+              </span>
             </div>
           </template>
         </el-table-column>
@@ -387,10 +386,17 @@ onBeforeUnmount(() => {
         <el-table-column label="检出统计" width="210">
           <template #default="{ row }">
             <template v-if="row.stats_json">
-              <span class="sev-pill error" style="margin-right: 6px">
+              <span
+                class="sev-pill"
+                :class="(row.stats_json.error_count ?? 0) > 0 ? 'error' : 'neutral'"
+                style="margin-right: 6px"
+              >
                 否决 {{ row.stats_json.error_count ?? 0 }}
               </span>
-              <span class="sev-pill warning">
+              <span
+                class="sev-pill"
+                :class="(row.stats_json.warning_count ?? row.stats_json.suspicious_count ?? 0) > 0 ? 'warning' : 'neutral'"
+              >
                 预警 {{ row.stats_json.warning_count ?? row.stats_json.suspicious_count ?? 0 }}
               </span>
             </template>
@@ -702,5 +708,53 @@ onBeforeUnmount(() => {
   .db-middle-split {
     grid-template-columns: 1fr;
   }
+}
+
+.m6-count {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--txt-strong, #0b1324);
+  line-height: 1.2;
+}
+
+.m6-count small {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--txt-muted, #64748b);
+}
+
+.m6-count.is-zero {
+  color: var(--txt-muted, #64748b);
+}
+
+.m6-bar-track {
+  margin-top: 8px;
+  height: 4px;
+  border-radius: 99px;
+  background: #e6ebf2;
+  overflow: hidden;
+}
+
+.m6-bar-fill {
+  height: 100%;
+  border-radius: 99px;
+  background: var(--brand, #1d4ed8);
+  transition: width 0.3s ease;
+}
+
+.cd-row.is-past {
+  border-left-color: #cbd5e1;
+}
+
+.cd-row.is-calm {
+  border-left-color: var(--brand, #1d4ed8);
+}
+
+.cd-row.is-urgent {
+  border-left-color: var(--sev-error, #dc2626);
+}
+
+.tbl-file-bid {
+  white-space: nowrap;
 }
 </style>

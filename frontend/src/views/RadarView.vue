@@ -831,13 +831,16 @@ onBeforeUnmount(() => {
 }
 
 .rri-title {
-  font-size: 13.5px;
-  font-weight: 800;
+  font-size: 13px;
+  font-weight: 700;
   color: var(--txt-strong);
-  margin-bottom: 4px;
+  line-height: 1.4;
+  margin-bottom: 5px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  word-break: break-word;
 }
 
 .rri-file {
@@ -1015,13 +1018,14 @@ onBeforeUnmount(() => {
 }
 
 .conclusion-banner {
-  padding: 20px 24px;
-  border-left: 5px solid var(--sev-warning);
+  padding: 16px 20px;
+  border-left: 3px solid var(--sev-warning);
+  background: #ffffff;
 }
 
 .conclusion-banner.rec-ok {
   border-left-color: var(--sev-ok);
-  background: #f0fdf4;
+  background: #ffffff;
 }
 
 .conclusion-banner.rec-caution {
@@ -1156,5 +1160,14 @@ onBeforeUnmount(() => {
   font-size: 12.5px;
   color: var(--txt-body);
   line-height: 1.6;
+}
+
+.rr-item {
+  border-left: 3px solid transparent;
+}
+
+.rr-item.active {
+  border-left-color: var(--brand, #1d4ed8);
+  background: #f5f8ff;
 }
 </style>

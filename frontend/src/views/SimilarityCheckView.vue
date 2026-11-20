@@ -463,6 +463,7 @@ onUnmounted(() => {
           />
           <el-button
             type="primary"
+            class="sim-run-btn"
             :loading="comparing"
             :disabled="pendingBids.length < 2"
             @click="handleRunCompare"
@@ -608,7 +609,7 @@ onUnmounted(() => {
 
         <template v-else>
           <div class="report-hd">
-            <div>
+            <div class="rh-main">
               <div class="rh-title-row">
                 <h3>{{ activeReport.title }}</h3>
                 <span class="sev-pill" :class="riskPillClass(activeReport.risk_level)">
@@ -622,7 +623,7 @@ onUnmounted(() => {
                 </el-tag>
               </div>
             </div>
-            <el-button type="primary" :loading="exporting" @click="handleExportDocx">
+            <el-button class="btn-download-docx" :loading="exporting" @click="handleExportDocx">
               导出比对分析报告 (.docx)
             </el-button>
           </div>
@@ -1330,5 +1331,51 @@ onUnmounted(() => {
   background: #e2e8f0;
   padding: 2px 8px;
   border-radius: 4px;
+}
+
+.sim-hd-actions {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.sim-run-btn {
+  margin-left: auto;
+}
+
+.report-hd {
+  flex-wrap: nowrap;
+}
+
+.rh-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.btn-download-docx {
+  background: #0f172a;
+  border-color: #0f172a;
+  color: #ffffff;
+  font-weight: 600;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.btn-download-docx:hover,
+.btn-download-docx:focus {
+  background: #1e293b;
+  border-color: #1e293b;
+  color: #ffffff;
+}
+
+.history-item {
+  border-left: 3px solid transparent;
+}
+
+.history-item.is-active {
+  border-left-color: var(--brand, #1d4ed8);
+  background: #f5f8ff;
 }
 </style>

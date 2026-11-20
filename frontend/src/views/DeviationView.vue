@@ -248,7 +248,7 @@ watch(
         </el-select>
 
         <el-button
-          type="primary"
+          class="dv-regen-btn"
           :loading="regenerating"
           :disabled="loadingTasks || loadingDeviation"
           @click="handleGenerateDeviation"
@@ -258,7 +258,7 @@ watch(
 
         <el-button
           v-if="devResult"
-          type="success"
+          class="btn-download-docx"
           :loading="downloading"
           @click="handleDownloadDocx"
         >
@@ -597,5 +597,63 @@ watch(
 
 .dev-empty {
   padding: 64px 24px;
+}
+
+.dv-regen-btn {
+  border-color: #dce3ec;
+  color: #334155;
+  background: #ffffff;
+}
+
+.dv-regen-btn:hover {
+  border-color: #bfdbfe;
+  color: var(--brand, #1d4ed8);
+  background: #f5f8ff;
+}
+
+.btn-download-docx {
+  background: #0f172a;
+  border-color: #0f172a;
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.btn-download-docx:hover,
+.btn-download-docx:focus {
+  background: #1e293b;
+  border-color: #1e293b;
+  color: #ffffff;
+}
+
+.dt-filter-bar :deep(.el-radio-group) {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 7px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  gap: 2px;
+}
+
+.dt-filter-bar :deep(.el-radio-button__inner) {
+  border: none !important;
+  background: transparent;
+  color: #475569;
+  font-weight: 500;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 5px !important;
+  box-shadow: none !important;
+}
+
+.dt-filter-bar :deep(.el-radio-button__inner:hover) {
+  color: #0f172a;
+}
+
+.dt-filter-bar :deep(.el-radio-button__original-radio:checked + .el-radio-button__inner) {
+  background: #ffffff !important;
+  color: var(--txt-strong, #0b1324) !important;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08), 0 0 0 1px rgba(15, 23, 42, 0.04) !important;
 }
 </style>

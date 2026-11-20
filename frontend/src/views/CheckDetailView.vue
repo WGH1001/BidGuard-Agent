@@ -228,11 +228,13 @@ const railCollapsed = ref(false)
 const DURATION_COLLAPSED_KEY = 'bidguard_checks_duration_collapsed'
 const SCORE_COLLAPSED_KEY = 'bidguard_checks_score_collapsed'
 
-function readStoredCollapsed(key: string): boolean {
+function readStoredCollapsed(key: string, defaultValue = false): boolean {
   try {
-    return localStorage.getItem(key) === '1'
+    const raw = localStorage.getItem(key)
+    if (raw === null) return defaultValue
+    return raw === '1'
   } catch {
-    return false
+    return defaultValue
   }
 }
 
@@ -244,7 +246,7 @@ function writeStoredCollapsed(key: string, collapsed: boolean): void {
   }
 }
 
-const durationCollapsed = ref(readStoredCollapsed(DURATION_COLLAPSED_KEY))
+const durationCollapsed = ref(readStoredCollapsed(DURATION_COLLAPSED_KEY, true))
 const scoreCollapsed = ref(readStoredCollapsed(SCORE_COLLAPSED_KEY))
 const forceExpandScoreOnce = ref(route.query.panel === 'score')
 const scoreFocusPulse = ref(false)
@@ -1167,45 +1169,46 @@ onBeforeUnmount(() => {
               {{ currentTask.status === 'delivered' ? '重新执行体检' : '启动防废标核验' }}
             </el-button>
             <el-button
-              type="warning"
-              plain
+              class="cwt-sec-btn"
               @click="priceModalVisible = true"
             >
               报价算术人工回填
             </el-button>
             <el-button
-              type="success"
-              plain
+              class="cwt-sec-btn"
               @click="router.push({ path: '/deviation', query: { task_id: String(currentTask.id) } })"
             >
               生成 Word 偏离表
             </el-button>
-            <el-button @click="handleDownloadRedline">
+            <el-button
+              class="cwt-sec-btn"
+              @click="handleDownloadRedline"
+            >
               下载标红批注件
             </el-button>
             <el-button
-              type="primary"
-              plain
+              class="cwt-sec-btn"
               :loading="exportingClean"
               @click="handleExportCleanBid"
             >
               导出 Clean 修订正本
             </el-button>
             <el-button
-              plain
+              class="cwt-sec-btn"
               @click="router.push({ path: '/composer', query: { tab: 'clean', taskId: String(currentTask.id) } })"
             >
               精修定稿中心
             </el-button>
-              <el-button
-                type="danger"
-                plain
-                :loading="deletingTaskId === currentTask.id"
-                :disabled="['extracting', 'checking', 'grading'].includes(currentTask.status)"
-                @click="handleDeleteTask(currentTask)"
-              >
-                删除任务
-              </el-button>
+            <el-button
+              type="danger"
+              text
+              class="cwt-del-btn"
+              :loading="deletingTaskId === currentTask.id"
+              :disabled="['extracting', 'checking', 'grading'].includes(currentTask.status)"
+              @click="handleDeleteTask(currentTask)"
+            >
+              删除任务
+            </el-button>
           </div>
         </section>
 
@@ -1925,8 +1928,14 @@ onBeforeUnmount(() => {
 
 .dbc-stages-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+}
+
+@media (max-width: 960px) {
+  .dbc-stages-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .dbc-stage-item {
@@ -1950,10 +1959,12 @@ onBeforeUnmount(() => {
 
 .dsi-code {
   font-size: 10.5px;
-  font-weight: 900;
+  font-weight: 800;
   color: #ffffff;
-  padding: 1px 5px;
+  padding: 1px 6px;
   border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .dsi-label {
@@ -2209,5 +2220,21 @@ onBeforeUnmount(() => {
   .check-workbench {
     grid-template-columns: 1fr;
   }
+}
+
+.cwt-sec-btn {
+  border-color: #dce3ec;
+  color: #334155;
+  background: #ffffff;
+}
+
+.cwt-sec-btn:hover {
+  border-color: #bfdbfe;
+  color: var(--brand, #1d4ed8);
+  background: #f5f8ff;
+}
+
+.cwt-del-btn {
+  margin-left: auto !important;
 }
 </style>

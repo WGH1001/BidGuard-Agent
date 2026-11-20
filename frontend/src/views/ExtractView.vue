@@ -384,6 +384,14 @@ function consequenceBadge(item: {
   return { label: '一般条款', cls: 'neutral' }
 }
 
+function formatClauseDisplay(raw?: string | null): string {
+  if (!raw) return ''
+  return raw
+    .replace(/\r\n/g, '\n')
+    .replace(/([^\n])\n(?!\n|[（(]?[一二三四五六七八九十\d]+[、.．)）]|注[:：])/g, '$1')
+    .trim()
+}
+
 function itemPage(item: unknown): number | null {
   if (item && typeof item === 'object' && 'page' in item) {
     const p = (item as { page?: number | null }).page
@@ -486,8 +494,7 @@ onBeforeUnmount(() => {
         <div class="eu-tag">招标红线与 ★/▲ 强制条款提取器</div>
         <h2>上传招标文件结构化拆解四张必审清单</h2>
         <p>
-          先抽取资格项、符合性审查项、★/▲ 强制参数与评分细则表建立核验基准（★漏检率=0%），
-          同时原样保留说明语与附表标记碎片供人工核对。
+          抽取资格项、符合性审查项、★/▲ 强制参数与评分细则表建立核验基准（★漏检率=0%），并保留说明语与附表碎片供核对。
         </p>
       </div>
 
@@ -765,7 +772,11 @@ onBeforeUnmount(() => {
                   <span class="sev-pill" :class="kindBadge(item.kind).cls">
                     {{ kindBadge(item.kind).label }}
                   </span>
-                  <span class="sev-pill" :class="consequenceBadge(item).cls">
+                  <span
+                    v-if="item.kind === 'requirement'"
+                    class="sev-pill"
+                    :class="consequenceBadge(item).cls"
+                  >
                     {{ consequenceBadge(item).label }}
                   </span>
                   <span class="cc-loc mono-num">
@@ -804,7 +815,7 @@ onBeforeUnmount(() => {
                   </span>
                   <span class="verified-badge">✓ 原文溯源通过</span>
                 </div>
-                <div class="cc-body">{{ w.text }}</div>
+                <div class="cc-body">{{ formatClauseDisplay(w.text) }}</div>
               </div>
               <el-empty
                 v-if="result.invalid_bid_clauses.length === 0"
@@ -1445,6 +1456,43 @@ onBeforeUnmount(() => {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.extract-page,
+.extract-view {
+  --el-color-primary: var(--brand, #1d4ed8);
+}
+
+.tab-toolbar :deep(.el-radio-group) {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 7px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  gap: 2px;
+}
+
+.tab-toolbar :deep(.el-radio-button__inner) {
+  border: none !important;
+  background: transparent;
+  color: #475569;
+  font-weight: 500;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 5px !important;
+  box-shadow: none !important;
+}
+
+.tab-toolbar :deep(.el-radio-button__inner:hover) {
+  color: #0f172a;
+}
+
+.tab-toolbar :deep(.el-radio-button__original-radio:checked + .el-radio-button__inner) {
+  background: #ffffff !important;
+  color: var(--txt-strong, #0b1324) !important;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08), 0 0 0 1px rgba(15, 23, 42, 0.04) !important;
 }
 </style>
 

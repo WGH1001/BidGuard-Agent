@@ -189,6 +189,34 @@ defineExpose({
   scrollToBottom,
   setQuestionInput,
 })
+
+const QUOTES_COLLAPSE_LIMIT = 2
+const expandedQuotesMap = ref<Record<string, boolean>>({})
+
+function quoteMsgKey(msg: { id?: string | number; created_at?: string; content?: string }, idx: number): string {
+  return String(msg.id ?? msg.created_at ?? `${idx}_${(msg.content || '').slice(0, 16)}`)
+}
+
+function isQuotesExpanded(msg: { id?: string | number; created_at?: string; content?: string }, idx: number): boolean {
+  return Boolean(expandedQuotesMap.value[quoteMsgKey(msg, idx)])
+}
+
+function toggleQuotesExpanded(msg: { id?: string | number; created_at?: string; content?: string }, idx: number): void {
+  const k = quoteMsgKey(msg, idx)
+  expandedQuotesMap.value[k] = !expandedQuotesMap.value[k]
+}
+
+function displayedQuotes(
+  quotes: QaQuoteOut[] | undefined,
+  msg: { id?: string | number; created_at?: string; content?: string },
+  idx: number,
+): QaQuoteOut[] {
+  const all = visibleQuotes(quotes)
+  if (all.length <= QUOTES_COLLAPSE_LIMIT || isQuotesExpanded(msg, idx)) {
+    return all
+  }
+  return all.slice(0, QUOTES_COLLAPSE_LIMIT)
+}
 </script>
 
 <template>
@@ -269,9 +297,19 @@ defineExpose({
 
             <!-- Quotes 原文溯源卡片列表（E24 支持 attachment 来源与视觉结论非逐字核验标记） -->
             <div v-if="visibleQuotes(msg.quotes).length > 0" class="quotes-grid">
-              <div class="qg-title">原文出处溯源核验卡（{{ visibleQuotes(msg.quotes).length }} 处）</div>
+              <div class="qg-head">
+                <div class="qg-title">原文出处溯源核验卡（{{ visibleQuotes(msg.quotes).length }} 处）</div>
+                <button
+                  v-if="visibleQuotes(msg.quotes).length > QUOTES_COLLAPSE_LIMIT"
+                  type="button"
+                  class="qg-toggle-btn"
+                  @click="toggleQuotesExpanded(msg, index)"
+                >
+                  {{ isQuotesExpanded(msg, index) ? '收起溯源 ▲' : `展开其余 ${visibleQuotes(msg.quotes).length - QUOTES_COLLAPSE_LIMIT} 处溯源 ▼` }}
+                </button>
+              </div>
               <div
-                v-for="(q, qIdx) in visibleQuotes(msg.quotes)"
+                v-for="(q, qIdx) in displayedQuotes(msg.quotes, msg, index)"
                 :key="qIdx"
                 class="quote-card"
               >
@@ -993,5 +1031,27 @@ defineExpose({
 .turn-act-btn.stop:hover {
   background: #fee2e2;
   border-color: #ef4444;
+}
+
+.qg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.qg-toggle-btn {
+  border: none;
+  background: transparent;
+  color: var(--brand, #1d4ed8);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.qg-toggle-btn:hover {
+  background: #eff6ff;
 }
 </style>
