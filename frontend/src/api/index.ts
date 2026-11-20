@@ -641,6 +641,10 @@ export const similarityApi = {
   cancel(reportId: number): Promise<OkResponse> {
     return post<OkResponse>(`/similarity/${reportId}/cancel`)
   },
+  rerun(reportId: number, enableAiReview?: boolean): Promise<SimilarityReportDetailOut> {
+    const q = enableAiReview === undefined ? '' : `?enable_ai_review=${enableAiReview}`
+    return post<SimilarityReportDetailOut>(`/similarity/${reportId}/rerun${q}`)
+  },
   list(): Promise<SimilarityReportListOut> {
     return get<SimilarityReportListOut>('/similarity')
   },

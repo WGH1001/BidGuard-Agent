@@ -468,3 +468,52 @@ def test_e10_radar_history_task_delete_guard_regulation_delete_and_dashboard_zer
     r_del_law = tc.delete(f"/api/regulations/laws/{target_law_id}", headers=admin_hdrs)
     assert r_del_law.status_code == 200
     assert tc.get(f"/api/regulations/laws/{target_law_id}", headers=admin_hdrs).status_code == 404
+
+
+def test_login_five_failures_brute_force_lockout(client_env: TestClient):
+    """验证连续 5 次输错密码触发 429 ACCOUNT_LOCKED 防爆破锁定，管理员重置密码后可立即解锁登录。"""
+    tc = client_env
+    admin_hdrs = _login_headers(tc, 'admin')
+
+    # 创建测试成员账号，避免影响其他复用默认账号的测试用例
+    r_create = tc.post(
+        '/api/auth/users',
+        json={
+            'username': 'lock_probe_user',
+            'display_name': '防爆破测试号',
+            'password': 'RightPass123!',
+            'role': 'member',
+            'tenant_id': 1,
+        },
+        headers=admin_hdrs,
+    )
+    assert r_create.status_code == 200, r_create.text
+    uid = r_create.json()['id']
+
+    # 第 1~4 次输错返回 401 INVALID_CREDENTIALS
+    for attempt in range(4):
+        r_bad = tc.post('/api/auth/login', json={'username': 'lock_probe_user', 'password': f'WrongPass{attempt}'})
+        assert r_bad.status_code == 401
+        assert r_bad.json()['detail']['code'] == 'INVALID_CREDENTIALS'
+
+    # 第 5 次输错直接触发 429 ACCOUNT_LOCKED
+    r_5th = tc.post('/api/auth/login', json={'username': 'lock_probe_user', 'password': 'WrongPass4'})
+    assert r_5th.status_code == 429
+    assert r_5th.json()['detail']['code'] == 'ACCOUNT_LOCKED'
+
+    # 锁定期间即使输入正确密码仍应被 429 拦截
+    r_locked_ok = tc.post('/api/auth/login', json={'username': 'lock_probe_user', 'password': 'RightPass123!'})
+    assert r_locked_ok.status_code == 429
+    assert r_locked_ok.json()['detail']['code'] == 'ACCOUNT_LOCKED'
+
+    # 管理员重置密码后自动解除锁定，可正常登录
+    r_reset = tc.post(
+        f'/api/auth/users/{uid}/reset-password',
+        json={'new_password': 'NewRightPass123!'},
+        headers=admin_hdrs,
+    )
+    assert r_reset.status_code == 200
+
+    r_ok = tc.post('/api/auth/login', json={'username': 'lock_probe_user', 'password': 'NewRightPass123!'})
+    assert r_ok.status_code == 200
+    assert r_ok.json()['token']

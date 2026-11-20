@@ -226,6 +226,9 @@ async function handleStopRadar(): Promise<void> {
     await loadHistoryList(false)
   } finally {
     cancellingRadar.value = false
+    loading.value = false
+    rescanningId.value = null
+    currentScanningName.value = ''
   }
 }
 

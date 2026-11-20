@@ -215,9 +215,19 @@ def compare_bids(
                 'rel_path': b_rel,
             })
 
-        # 预填基础参选名单，便于异步任务进行中列表中即时显示文件份数
+        # 预填基础参选名单，便于异步任务进行中列表中即时显示文件份数，并保留 rel_path 供中断后重新比对
         report.bidders_json = [
-            {'index': i, 'label': s['label'], 'filename': s['filename'], 'chars': 0, 'net_chars': 0, 'pages': 1, 'metadata': {}, 'media_count': 0}
+            {
+                'index': i,
+                'label': s['label'],
+                'filename': s['filename'],
+                'rel_path': s['rel_path'],
+                'chars': 0,
+                'net_chars': 0,
+                'pages': 1,
+                'metadata': {},
+                'media_count': 0,
+            }
             for i, s in enumerate(bid_specs)
         ]
         db.commit()
@@ -368,6 +378,176 @@ def compare_bids(
     db.expire_all()
     fresh = _get_tenant_report_or_404(db, report_id, tenant_id)
     return _to_detail_out(fresh)
+
+
+@router.post('/{report_id}/rerun', response_model=SimilarityReportDetailOut)
+def rerun_similarity_report(
+    report_id: int,
+    enable_ai_review: Optional[bool] = None,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> SimilarityReportDetailOut:
+    """对已中断或失败的多标书交叉比对任务原位重新发起比对（复用已上传原件）。"""
+    tenant_id = int(current_user.tenant_id)
+    user_id = current_user.get('id')
+    row = _get_tenant_report_or_404(db, report_id, tenant_id)
+    if row.status in ('queued', 'running'):
+        raise HTTPException(
+            status_code=409,
+            detail={'code': 'SIMILARITY_TASK_RUNNING', 'message': '比对任务正在运行中，请勿重复发起'},
+        )
+
+    report_dir = (_SIMILARITY_UPLOAD_ROOT / str(tenant_id) / str(report_id)).resolve()
+    tender_abs: Optional[Path] = None
+    if row.tender_path:
+        cand_t = (PROJECT_ROOT / row.tender_path).resolve()
+        if cand_t.is_file():
+            tender_abs = cand_t
+
+    bid_specs: list[dict[str, Any]] = []
+    for idx, b in enumerate(row.bidders_json or []):
+        rel_p = str(b.get('rel_path') or '').strip()
+        cand_b: Optional[Path] = None
+        if rel_p:
+            p = (PROJECT_ROOT / rel_p).resolve()
+            if p.is_file():
+                cand_b = p
+        if cand_b is None and report_dir.is_dir():
+            matches = sorted(report_dir.glob(f"bid_{idx + 1}.*"))
+            if matches and matches[0].is_file():
+                cand_b = matches[0]
+                rel_p = cand_b.relative_to(PROJECT_ROOT).as_posix()
+        if cand_b is None:
+            raise HTTPException(
+                status_code=422,
+                detail={'code': 'SIMILARITY_SOURCE_MISSING', 'message': '原上传投标文件已丢失，请重新上传文件发起比对'},
+            )
+        bid_specs.append({
+            'label': str(b.get('label') or f"标书#{idx + 1}")[:64],
+            'filename': str(b.get('filename') or cand_b.name),
+            'path': cand_b,
+            'rel_path': rel_p,
+        })
+
+    if len(bid_specs) < 2:
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'SIMILARITY_SOURCE_MISSING', 'message': '有效投标文件不足 2 份，请重新上传发起比对'},
+        )
+
+    use_ai = bool(enable_ai_review) if enable_ai_review is not None else (row.ai_review_json is not None)
+    now_utc = _utc_now()
+    row.status = 'queued'
+    row.progress = 5
+    row.stage_detail = '排队等待重新比对…'
+    row.error_msg = None
+    row.started_at = now_utc
+    row.finished_at = None
+    row.updated_at = now_utc
+    db.commit()
+    db.refresh(row)
+
+    worker = get_worker()
+    job_key = f"similarity:{report_id}"
+
+    def _run_rerun_job(cancel_ev) -> None:
+        sess: Session = worker.session_factory()
+        last_pct = 5
+        last_stage = ''
+        last_db_ts = 0.0
+        try:
+            r_row = sess.query(SimilarityReport).filter_by(id=report_id).first()
+            if r_row is None or r_row.status not in ('queued', 'running'):
+                return
+            r_row.status = 'running'
+            r_row.progress = 8
+            r_row.stage_detail = '准备开始多标书净正文与指纹交叉计算…'
+            r_row.updated_at = _utc_now()
+            sess.commit()
+
+            llm_client = None
+            if use_ai:
+                llm_client, _ = resolve_effective_llm_client(sess, user_id)
+
+            def _on_prog(pct: int, detail: str) -> None:
+                nonlocal last_pct, last_stage, last_db_ts
+                worker.check_cancelled(job_key, cancel_ev)
+                now_m = time.monotonic()
+                if pct == last_pct and detail == last_stage:
+                    return
+                if pct - last_pct < 5 and detail == last_stage and (now_m - last_db_ts) < 0.8:
+                    return
+                last_pct = pct
+                last_stage = detail
+                last_db_ts = now_m
+                cur = sess.query(SimilarityReport).filter_by(id=report_id).first()
+                if cur is None or cur.status not in ('queued', 'running'):
+                    raise PipelineCancelled('用户中断')
+                try:
+                    cur.progress = min(98, max(5, int(pct)))
+                    cur.stage_detail = str(detail)[:250]
+                    cur.updated_at = _utc_now()
+                    sess.commit()
+                except Exception:
+                    sess.rollback()
+
+            result = analyze_bid_similarity(
+                bid_specs,
+                tender_path=tender_abs,
+                enable_ai_review=use_ai,
+                client=llm_client,
+                progress_cb=_on_prog,
+                cancel_check=lambda: worker.check_cancelled(job_key, cancel_ev),
+            )
+
+            worker.check_cancelled(job_key, cancel_ev)
+            done_utc = _utc_now()
+            r_row = sess.query(SimilarityReport).filter_by(id=report_id).first()
+            if r_row is None:
+                return
+            if r_row.status not in ('queued', 'running'):
+                raise PipelineCancelled('用户中断')
+            r_row.bidders_json = result['bidders']
+            r_row.pair_matrix_json = result['pair_matrix']
+            r_row.findings_json = result['findings']
+            r_row.ai_review_json = result.get('ai_review')
+            r_row.max_similarity_pct = Decimal(str(result['max_similarity_pct']))
+            r_row.risk_level = result['risk_level']
+            r_row.status = 'completed'
+            r_row.progress = 100
+            r_row.stage_detail = '交叉比对分析完成'
+            r_row.error_msg = None
+            r_row.finished_at = done_utc
+            r_row.updated_at = done_utc
+            sess.commit()
+        except PipelineCancelled:
+            sess.rollback()
+            done_utc = _utc_now()
+            r_row = sess.query(SimilarityReport).filter_by(id=report_id).first()
+            if r_row is not None:
+                r_row.status = 'failed'
+                r_row.stage_detail = '用户中断'
+                r_row.error_msg = '用户中断'
+                r_row.finished_at = done_utc
+                r_row.updated_at = done_utc
+                sess.commit()
+        except Exception as exc:
+            sess.rollback()
+            done_utc = _utc_now()
+            r_row = sess.query(SimilarityReport).filter_by(id=report_id).first()
+            if r_row is not None:
+                r_row.status = 'failed'
+                r_row.error_msg = str(exc)[:500]
+                r_row.stage_detail = f"比对失败：{str(exc)[:120]}"
+                r_row.finished_at = done_utc
+                r_row.updated_at = done_utc
+                sess.commit()
+        finally:
+            sess.close()
+
+    worker.submit_background_job(job_key, _run_rerun_job, sync=False)
+    db.expire_all()
+    return _to_detail_out(_get_tenant_report_or_404(db, report_id, tenant_id))
 
 
 @router.post('/{report_id}/cancel', response_model=OkResponse)

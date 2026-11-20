@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
+import os
 import re
-from typing import Dict, List, Optional
+import threading
+import time
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -41,6 +45,67 @@ router = APIRouter(prefix='/api/auth', tags=['auth'])
 
 _VALID_USER_ROLES = frozenset({'admin', 'member'})
 _USERNAME_RE = re.compile(r'^[A-Za-z0-9_.\-]{1,64}$')
+
+# ── 登录连续 5 次输错防爆破锁定（线程安全，按库实例 + 用户名隔离）─────────
+_LOGIN_GUARD_LOCK = threading.Lock()
+_LOGIN_FAILURE_STATE: Dict[Tuple[str, str], Tuple[int, float]] = {}
+
+
+def _login_guard_limits() -> Tuple[int, int]:
+    raw_max = (os.getenv('AUTH_MAX_LOGIN_FAILS') or '').strip()
+    raw_sec = (os.getenv('AUTH_LOGIN_LOCK_SECONDS') or '').strip()
+    max_fails = max(1, int(raw_max)) if raw_max.isdigit() else 5
+    lock_secs = max(1, int(raw_sec)) if raw_sec.isdigit() else 900
+    return max_fails, lock_secs
+
+
+def _login_guard_key(db: Session, username: str) -> Tuple[str, str]:
+    bind = db.get_bind()
+    db_key = str(getattr(bind, 'url', 'default')) if bind is not None else 'default'
+    return (db_key, username.strip().lower())
+
+
+def _check_login_not_locked(db: Session, username: str) -> None:
+    key = _login_guard_key(db, username)
+    now = time.monotonic()
+    with _LOGIN_GUARD_LOCK:
+        entry = _LOGIN_FAILURE_STATE.get(key)
+        if not entry:
+            return
+        _fails, locked_until = entry
+        if locked_until > now:
+            remain_min = max(1, math.ceil((locked_until - now) / 60.0))
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    'code': 'ACCOUNT_LOCKED',
+                    'message': f'连续输错密码次数过多，账号已暂时锁定，请 {remain_min} 分钟后重试（或联系管理员重置密码）',
+                },
+            )
+        if locked_until > 0.0:
+            _LOGIN_FAILURE_STATE.pop(key, None)
+
+
+def _record_login_failure(db: Session, username: str) -> Tuple[int, bool, int, int]:
+    max_fails, lock_secs = _login_guard_limits()
+    key = _login_guard_key(db, username)
+    now = time.monotonic()
+    with _LOGIN_GUARD_LOCK:
+        prev_fails, prev_locked = _LOGIN_FAILURE_STATE.get(key, (0, 0.0))
+        if prev_locked > 0.0 and prev_locked <= now:
+            prev_fails = 0
+        new_fails = prev_fails + 1
+        if new_fails >= max_fails:
+            _LOGIN_FAILURE_STATE[key] = (new_fails, now + lock_secs)
+            return new_fails, True, max_fails, lock_secs
+        _LOGIN_FAILURE_STATE[key] = (new_fails, 0.0)
+        return new_fails, False, max_fails, lock_secs
+
+
+def _clear_login_failures(db: Session, username: str) -> None:
+    key = _login_guard_key(db, username)
+    with _LOGIN_GUARD_LOCK:
+        _LOGIN_FAILURE_STATE.pop(key, None)
 
 
 def _utc_now() -> datetime:
@@ -118,13 +183,37 @@ def auth_health() -> HealthOut:
 
 @router.post('/login', response_model=LoginResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
-    """用户登录（username 全局唯一，校验 bcrypt 密码并签发 HMAC 令牌）。"""
+    """用户登录（username 全局唯一，校验 bcrypt 密码、连续 5 次输错防爆破锁定并签发 HMAC 令牌）。"""
     username = body.username.strip()
+    _check_login_not_locked(db, username)
     user = db.query(User).filter_by(username=username).first()
     if user is None or not verify_password(body.password, user.password_hash):
+        fail_cnt, locked_now, max_fails, lock_secs = _record_login_failure(db, username)
+        if locked_now:
+            if user is not None:
+                record_audit(
+                    db,
+                    action='login_locked',
+                    tenant_id=user.tenant_id,
+                    user_id=user.id,
+                    target=f"user:{user.username}",
+                    detail_json={'username': user.username, 'failures': fail_cnt, 'lock_seconds': lock_secs},
+                )
+            remain_min = max(1, math.ceil(lock_secs / 60.0))
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    'code': 'ACCOUNT_LOCKED',
+                    'message': f'连续输错密码达 {max_fails} 次，账号已暂时锁定 {remain_min} 分钟（或联系管理员重置密码）',
+                },
+            )
+        remain_tries = max(1, max_fails - fail_cnt)
         raise HTTPException(
             status_code=401,
-            detail={'code': 'INVALID_CREDENTIALS', 'message': '用户名或密码错误'},
+            detail={
+                'code': 'INVALID_CREDENTIALS',
+                'message': f'用户名或密码错误（连续错误 {max_fails} 次将锁定账号，还剩 {remain_tries} 次机会）',
+            },
         )
     if not user.is_active:
         raise HTTPException(
@@ -139,6 +228,7 @@ def login(body: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
             detail={'code': 'TENANT_DISABLED', 'message': '所属部门租户已被禁用'},
         )
 
+    _clear_login_failures(db, username)
     user.last_login_at = _utc_now()
     db.commit()
     db.refresh(user)
@@ -517,6 +607,7 @@ def reset_user_password(
     new_pw = _validate_password(body.new_password)
     target_user.password_hash = hash_password(new_pw)
     db.commit()
+    _clear_login_failures(db, target_user.username)
 
     record_audit(
         db,

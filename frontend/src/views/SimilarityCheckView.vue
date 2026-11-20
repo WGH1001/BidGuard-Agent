@@ -280,6 +280,32 @@ async function handleCancelActive(): Promise<void> {
   }
 }
 
+const rerunning = ref(false)
+async function handleRerunActive(): Promise<void> {
+  if (!activeReport.value || rerunning.value) return
+  rerunning.value = true
+  try {
+    const detail = await similarityApi.rerun(activeReport.value.id, enableAiReview.value)
+    activeReport.value = detail
+    const listRes = await similarityApi.list()
+    historyList.value = listRes.items || []
+    notificationStore.registerTrackedJob({
+      kind: 'similarity',
+      targetId: detail.id,
+      title: detail.title,
+      status: detail.status,
+      progress: detail.progress,
+      stageDetail: detail.stage_detail || '交叉比对分析中…',
+      routePath: '/similarity',
+      routeQuery: { report_id: String(detail.id) },
+    })
+    schedulePoll(detail.id)
+    ElMessage.success('已重新发起交叉比对')
+  } finally {
+    rerunning.value = false
+  }
+}
+
 async function handleExportDocx(): Promise<void> {
   if (!activeReport.value) return
   exporting.value = true
@@ -566,7 +592,18 @@ onUnmounted(() => {
             :closable="false"
             show-icon
             :title="`比对任务未完成：${activeReport.error_msg || '已取消或解析异常'}`"
-          />
+          >
+            <template #default>
+              <div style="margin-top: 10px; display: flex; align-items: center; gap: 10px;">
+                <el-button type="primary" size="small" :loading="rerunning" @click="handleRerunActive">
+                  重新比对
+                </el-button>
+                <span style="font-size: 12px; color: var(--el-text-color-secondary);">
+                  将直接复用已上传的原件重新执行交叉比对，无需重新上传
+                </span>
+              </div>
+            </template>
+          </el-alert>
         </template>
 
         <template v-else>

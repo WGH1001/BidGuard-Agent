@@ -14,6 +14,7 @@
 签名约定（业务侧唯一入口）：
     extract_tender_with_llm(file_path, client=None, env=None) -> dict
 """
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 import json
 import os
@@ -182,14 +183,33 @@ def extract_tender_with_llm(
     if progress_cb is not None and total_cands > 0:
         progress_cb(0, total_cands)
 
-    structured = []
-    for idx, cand in enumerate(candidates, start=1):
-        if progress_cb is not None and idx > 1:
-            progress_cb(idx - 1, total_cands)
-        window = _expand_window(full_text, cand['start'], cand['end'])
-        structured.append(structure_candidate(window, cand, client))
-        if progress_cb is not None:
-            progress_cb(idx, total_cands)
+    structured: list[dict] = []
+    if total_cands > 0:
+        raw_conc = (os.getenv('BIDGUARD_F1_CONCURRENCY') or '').strip()
+        max_workers = max(1, min(16, int(raw_conc))) if raw_conc.isdigit() else 8
+        workers = min(max_workers, total_cands)
+        ordered_results: list[Optional[dict]] = [None] * total_cands
+
+        def _eval_one(orig_idx: int, cand_item: dict) -> tuple[int, dict]:
+            win = _expand_window(full_text, cand_item['start'], cand_item['end'])
+            return orig_idx, structure_candidate(win, cand_item, client)
+
+        pool = ThreadPoolExecutor(max_workers=workers)
+        try:
+            futs = [pool.submit(_eval_one, i, c) for i, c in enumerate(candidates)]
+            done_cnt = 0
+            for fut in as_completed(futs):
+                orig_idx, res_item = fut.result()
+                ordered_results[orig_idx] = res_item
+                done_cnt += 1
+                if progress_cb is not None:
+                    progress_cb(done_cnt, total_cands)
+        except BaseException:
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            pool.shutdown(wait=True)
+        structured = [r for r in ordered_results if r is not None]
 
     extra_calls = 0
     if open_date_fallback and not result.get('open_date'):
