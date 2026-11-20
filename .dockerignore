@@ -42,7 +42,10 @@ frontend/tsconfig.*.json
 frontend/vite.config.ts
 
 # ── 4. 敏感业务数据、输出产物、数据库文件、测试与归档目录 ──
-data/
+data/*
+!data/rules/
+data/rules/*
+!data/rules/indicator_library/
 output/
 tests/
 docs/
@@ -77,6 +80,8 @@ deploy/
 !config/**
 !frontend/dist/
 !frontend/dist/**
+!data/rules/indicator_library/
+!data/rules/indicator_library/**
 
 # ── 7. 最终底线：确保白名单目录内的字节码缓存依然被剔除（最后匹配规则优先）──
 backend/**/__pycache__/
