@@ -476,7 +476,7 @@ class BidTaskWorker:
         self.session_factory = session_factory or get_session_factory()
         self.broadcaster = SSEBroadcaster()
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='bidguard_worker')
-        self._lock = threading.Condition(threading.Lock())
+        self._lock = threading.Condition(threading.RLock())
         self._in_flight: set[int | str] = set()
         self._cancel_flags: dict[int | str, threading.Event] = {}
         self._deleted_task_ids: set[int | str] = set()
@@ -638,11 +638,13 @@ class BidTaskWorker:
             self._run_pipeline(tid, cancel_ev=ev)
             return
         with self._lock:
-            if self._shutdown or (tid in self._in_flight and not self.is_cancel_requested(tid)):
+            cur_ev = self._cancel_flags.get(tid)
+            cancel_requested = bool(cur_ev is not None and cur_ev.is_set())
+            if self._shutdown or (tid in self._in_flight and not cancel_requested):
                 return
             self._deleted_task_ids.discard(tid)
             # 若旧一轮已被请求中断且正在快速收敛退出，短暂让位避免并发写库竞争
-            if tid in self._in_flight and self.is_cancel_requested(tid):
+            if tid in self._in_flight and cancel_requested:
                 self._lock.wait(timeout=0.4)
             ev = threading.Event()
             self._cancel_flags[tid] = ev

@@ -1401,55 +1401,57 @@ def estimate_bid_score(
             )
             return j_idx, res_dict
 
-        with ThreadPoolExecutor(max_workers=min(4, max(1, total_llm))) as pool:
+        pool = ThreadPoolExecutor(max_workers=min(4, max(1, total_llm)))
+        try:
             fut_map = {pool.submit(_run_llm_one, jb): jb for jb in llm_jobs}
-            try:
-                for fut, jb in fut_map.items():
-                    j_idx, j_crit, _j_wins, j_quotes = jb
-                    cid = j_crit['criterion_id']
-                    max_sc = j_crit['max_score']
-                    try:
-                        _, llm_out = fut.result()
-                        evaluated_items[j_idx] = {
-                            'criterion_id': cid,
-                            'section': j_crit['section'],
-                            'factor': j_crit['factor'],
-                            'category': j_crit['category'],
-                            'evaluation_mode': j_crit['evaluation_mode'],
-                            'max_score': _fmt_dec(max_sc),
-                            'estimated_score': _fmt_dec(llm_out['estimated_score']),
-                            'status': llm_out['status'],
-                            'status_reason': llm_out['status_reason'],
-                            'score_ratio_pct': llm_out['score_ratio_pct'],
-                            'deduction_reasons': llm_out['deduction_reasons'],
-                            'improvement_suggestions': llm_out['improvement_suggestions'],
-                            'evidence_quotes': llm_out['evidence_quotes'],
-                        }
-                    except BaseException as exc:
-                        if not isinstance(exc, Exception):
-                            raise
-                        # 单条评分失败/超时优雅降级，严禁阻断整份报告
-                        evaluated_items[j_idx] = {
-                            'criterion_id': cid,
-                            'section': j_crit['section'],
-                            'factor': j_crit['factor'],
-                            'category': j_crit['category'],
-                            'evaluation_mode': j_crit['evaluation_mode'],
-                            'max_score': _fmt_dec(max_sc),
-                            'estimated_score': None,
-                            'status': 'need_llm',
-                            'status_reason': 'llm_call_failed',
-                            'score_ratio_pct': None,
-                            'deduction_reasons': [f"单条模型评估未完成（已保留本地检索证据）：{str(exc)[:80]}"],
-                            'improvement_suggestions': [f"请结合下方证据摘录人工复核「{j_crit['factor']}」响应完整度"],
-                            'evidence_quotes': j_quotes,
-                        }
-                    done_llm += 1
-                    pct = 50 + int((done_llm / max(1, total_llm)) * 40)
-                    _emit(pct, f"正在评估主观评分项（{done_llm}/{total_llm}）…")
-            except BaseException:
-                pool.shutdown(wait=False, cancel_futures=True)
-                raise
+            for fut, jb in fut_map.items():
+                j_idx, j_crit, _j_wins, j_quotes = jb
+                cid = j_crit['criterion_id']
+                max_sc = j_crit['max_score']
+                try:
+                    _, llm_out = fut.result()
+                    evaluated_items[j_idx] = {
+                        'criterion_id': cid,
+                        'section': j_crit['section'],
+                        'factor': j_crit['factor'],
+                        'category': j_crit['category'],
+                        'evaluation_mode': j_crit['evaluation_mode'],
+                        'max_score': _fmt_dec(max_sc),
+                        'estimated_score': _fmt_dec(llm_out['estimated_score']),
+                        'status': llm_out['status'],
+                        'status_reason': llm_out['status_reason'],
+                        'score_ratio_pct': llm_out['score_ratio_pct'],
+                        'deduction_reasons': llm_out['deduction_reasons'],
+                        'improvement_suggestions': llm_out['improvement_suggestions'],
+                        'evidence_quotes': llm_out['evidence_quotes'],
+                    }
+                except BaseException as exc:
+                    if not isinstance(exc, Exception):
+                        raise
+                    # 单条评分失败/超时优雅降级，严禁阻断整份报告
+                    evaluated_items[j_idx] = {
+                        'criterion_id': cid,
+                        'section': j_crit['section'],
+                        'factor': j_crit['factor'],
+                        'category': j_crit['category'],
+                        'evaluation_mode': j_crit['evaluation_mode'],
+                        'max_score': _fmt_dec(max_sc),
+                        'estimated_score': None,
+                        'status': 'need_llm',
+                        'status_reason': 'llm_call_failed',
+                        'score_ratio_pct': None,
+                        'deduction_reasons': [f"单条模型评估未完成（已保留本地检索证据）：{str(exc)[:80]}"],
+                        'improvement_suggestions': [f"请结合下方证据摘录人工复核「{j_crit['factor']}」响应完整度"],
+                        'evidence_quotes': j_quotes,
+                    }
+                done_llm += 1
+                pct = 50 + int((done_llm / max(1, total_llm)) * 40)
+                _emit(pct, f"正在评估主观评分项（{done_llm}/{total_llm}）…")
+        except BaseException:
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            pool.shutdown(wait=True)
 
     # 汇总 Decimal 守恒计算
     assessed_max = _DEC_ZERO

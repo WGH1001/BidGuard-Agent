@@ -1700,18 +1700,20 @@ def compose_bid_blueprint(
                 )
                 return ch_item['chapter_id'], res_d
 
-            with ThreadPoolExecutor(max_workers=min(4, max(1, total_ch))) as pool:
+            pool = ThreadPoolExecutor(max_workers=min(4, max(1, total_ch)))
+            try:
                 futs = [pool.submit(_run_one, ch) for ch in planned_chapters]
-                try:
-                    for fut in futs:
-                        cid, d_res = fut.result()
-                        draft_results[cid] = d_res
-                        done_cnt += 1
-                        pct = 45 + int((done_cnt / max(1, total_ch)) * 40)
-                        _emit_progress(pct, f"阶段 3/4：AI 正在撰写方案章节（{done_cnt}/{total_ch}）")
-                except BaseException:
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    raise
+                for fut in futs:
+                    cid, d_res = fut.result()
+                    draft_results[cid] = d_res
+                    done_cnt += 1
+                    pct = 45 + int((done_cnt / max(1, total_ch)) * 40)
+                    _emit_progress(pct, f"阶段 3/4：AI 正在撰写方案章节（{done_cnt}/{total_ch}）")
+            except BaseException:
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                pool.shutdown(wait=True)
 
             ai_ok_cnt = 0
             for ch_item in planned_chapters:

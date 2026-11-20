@@ -862,6 +862,7 @@ def ask_in_session_stream(
         db_mod.get_session_factory(db_bind) if db_bind is not None else db_mod.SessionLocal
     )
     db.rollback()
+    db.close()
 
     def _sse_stream_gen():
         try:

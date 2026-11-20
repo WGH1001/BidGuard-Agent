@@ -778,3 +778,49 @@ def test_e30_cancel_then_rerun_and_mark_deleted_race(tmp_path, monkeypatch):
         worker.shutdown(wait=False)
         eng.dispose()
 
+
+def test_e30_async_rerun_while_cancelled_inflight_no_deadlock(tmp_path, monkeypatch):
+    """回归：任务中断后旧线程尚未退出 _in_flight 时立即点击 async 重跑，严禁 self._lock 重入死锁。"""
+    from sqlalchemy import create_engine
+
+    monkeypatch.setenv('BIDGUARD_FORCE_ZERO_TOKEN', '1')
+    tender_docx = _make_docx_file(tmp_path / 't_lock.docx', ['第一章 招标要求', '★1. 须提供营业执照。'])
+    bid_docx = _make_docx_file(tmp_path / 'b_lock.docx', ['第一章 投标响应', '★1. 已提供营业执照。'])
+
+    db_file = tmp_path / 'e30_no_deadlock.db'
+    eng = create_engine(f"sqlite:///{db_file.as_posix()}", connect_args={'check_same_thread': False})
+    Base.metadata.create_all(eng)
+    SessionMaker = get_session_factory(eng)
+    with SessionMaker() as sess:
+        tenant = Tenant(name='防死锁租户')
+        sess.add(tenant)
+        sess.flush()
+        t = BidCheckTask(
+            tenant_id=tenant.id,
+            user_id=None,
+            task_type='pre_check',
+            title='异步重跑不死锁',
+            tender_filename='t_lock.docx',
+            tender_path=str(tender_docx),
+            bid_filename='b_lock.docx',
+            bid_path=str(bid_docx),
+            status='failed',
+        )
+        sess.add(t)
+        sess.commit()
+        tid = int(t.id)
+
+    worker = BidTaskWorker(session_factory=SessionMaker, max_workers=2)
+    try:
+        old_ev = worker.register_task_execution(tid)
+        assert worker.request_cancel(tid) is True
+        # 模拟旧线程仍未注销 _in_flight 时触发 sync=False 异步重跑（此前此处因非重入 Lock 自死锁）
+        worker.submit_check_task(tid, sync=False)
+        worker.unregister_task_execution(tid, old_ev)
+        assert worker.wait_all(timeout=15.0) is True
+    finally:
+        _cleanup_task_deviation_artifacts(tid)
+        worker.shutdown(wait=False)
+        eng.dispose()
+
+
