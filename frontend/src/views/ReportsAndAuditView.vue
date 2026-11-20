@@ -388,10 +388,17 @@ onMounted(() => {
               <el-table-column label="检出风险统计" width="195">
                 <template #default="{ row }">
                   <template v-if="row.stats_json">
-                    <span class="sev-pill error" style="margin-right: 6px">
+                    <span
+                      class="sev-pill"
+                      :class="(row.stats_json.error_count ?? 0) > 0 ? 'error' : 'neutral'"
+                      style="margin-right: 6px"
+                    >
                       一票否决 {{ row.stats_json.error_count ?? 0 }}
                     </span>
-                    <span class="sev-pill warning">
+                    <span
+                      class="sev-pill"
+                      :class="(row.stats_json.warning_count ?? 0) > 0 ? 'warning' : 'neutral'"
+                    >
                       预警 {{ row.stats_json.warning_count ?? 0 }}
                     </span>
                   </template>
@@ -404,6 +411,7 @@ onMounted(() => {
                   <div class="dl-btn-group">
                     <el-button
                       size="small"
+                      class="deliver-sec-btn"
                       :loading="Boolean(busyDownload[`${row.id}_orig`])"
                       @click="handleDownloadOriginalBid(row)"
                     >
@@ -411,8 +419,7 @@ onMounted(() => {
                     </el-button>
                     <el-button
                       size="small"
-                      type="primary"
-                      plain
+                      class="deliver-sec-btn"
                       :loading="Boolean(busyDownload[`${row.id}_redline`])"
                       @click="handleDownloadRedlineBid(row)"
                     >
@@ -420,8 +427,7 @@ onMounted(() => {
                     </el-button>
                     <el-button
                       size="small"
-                      type="warning"
-                      plain
+                      class="deliver-sec-btn"
                       :loading="Boolean(busyDownload[`${row.id}_deviation`])"
                       @click="handleDownloadDeviationDocx(row)"
                     >
@@ -429,8 +435,7 @@ onMounted(() => {
                     </el-button>
                     <el-button
                       size="small"
-                      type="info"
-                      plain
+                      class="deliver-sec-btn"
                       :loading="Boolean(busyDownload[`${row.id}_signoff`])"
                       @click="handleDownloadSignoffDocx(row)"
                     >
@@ -438,16 +443,7 @@ onMounted(() => {
                     </el-button>
                     <el-button
                       size="small"
-                      type="success"
-                      :loading="Boolean(busyDownload[`${row.id}_zip`])"
-                      @click="handleDownloadDeliverZip(row)"
-                    >
-                      交付包 ZIP
-                    </el-button>
-                    <el-button
-                      size="small"
-                      type="primary"
-                      plain
+                      class="deliver-sec-btn"
                       :loading="Boolean(busyDownload[`${row.id}_clean`])"
                       @click="handleExportCleanBidRow(row)"
                     >
@@ -455,8 +451,16 @@ onMounted(() => {
                     </el-button>
                     <el-button
                       size="small"
+                      class="btn-download-zip"
+                      :loading="Boolean(busyDownload[`${row.id}_zip`])"
+                      @click="handleDownloadDeliverZip(row)"
+                    >
+                      交付包 ZIP
+                    </el-button>
+                    <el-button
+                      size="small"
                       type="danger"
-                      plain
+                      text
                       :disabled="['extracting', 'checking', 'grading'].includes(row.status)"
                       @click="handleDeleteDeliveredTask(row)"
                     >
@@ -504,8 +508,7 @@ onMounted(() => {
                 </el-button>
                 <el-button
                   size="small"
-                  type="success"
-                  plain
+                  class="deliver-sec-btn"
                   :loading="exportingAudit"
                   @click="handleExportAuditCsv"
                 >
@@ -521,19 +524,19 @@ onMounted(() => {
                 </template>
               </el-table-column>
 
-              <el-table-column prop="action" label="审计动作 (action)" width="210">
+              <el-table-column prop="action" label="审计动作" width="210">
                 <template #default="{ row }">
                   <code class="act-code mono-num">{{ row.action }}</code>
                 </template>
               </el-table-column>
 
-              <el-table-column prop="target" label="操作对象 (target)" width="180">
+              <el-table-column prop="target" label="操作对象" width="180">
                 <template #default="{ row }">
                   <span class="mono-num">{{ row.target || '—' }}</span>
                 </template>
               </el-table-column>
 
-              <el-table-column label="详情快照 (detail_json)" min-width="280">
+              <el-table-column label="详情快照" min-width="280">
                 <template #default="{ row }">
                   <span class="mono-num detail-txt">
                     {{ row.detail_json ? JSON.stringify(row.detail_json) : '—' }}
@@ -782,5 +785,31 @@ onMounted(() => {
 .od-ok {
   color: #0f766e;
   font-weight: 700;
+}
+
+.deliver-sec-btn {
+  border-color: #dce3ec;
+  color: #334155;
+  background: #ffffff;
+}
+
+.deliver-sec-btn:hover {
+  border-color: #bfdbfe;
+  color: var(--brand, #1d4ed8);
+  background: #f5f8ff;
+}
+
+.btn-download-zip {
+  background: #0f172a;
+  border-color: #0f172a;
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.btn-download-zip:hover,
+.btn-download-zip:focus {
+  background: #1e293b;
+  border-color: #1e293b;
+  color: #ffffff;
 }
 </style>

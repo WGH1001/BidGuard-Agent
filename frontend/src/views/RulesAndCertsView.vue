@@ -1288,7 +1288,12 @@ onMounted(() => {
               </div>
             </div>
 
-            <div class="reg-split-layout">
+            <el-empty
+              v-if="!loadingIndicatorLines && indicatorLines.length === 0"
+              description="暂未加载到企业指标库数据（若为 Docker 部署，请确认已挂载 data/rules/indicator_library 目录后点击刷新，或直接新增业务线）"
+              :image-size="68"
+            />
+            <div v-else class="reg-split-layout">
               <!-- 左栏：业务线列表 -->
               <div class="law-cards-col">
                 <div
@@ -1673,7 +1678,7 @@ onMounted(() => {
             />
           </el-form-item>
 
-          <el-form-item label="提前预警天数 (warn_days)">
+          <el-form-item label="提前预警天数">
             <el-input v-model.number="certForm.warn_days" type="number" :disabled="certForm.is_long_term" />
           </el-form-item>
         </div>

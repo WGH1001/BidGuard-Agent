@@ -37,6 +37,7 @@ services:
       - app-output:/app/output
       - ./config:/app/config:ro
       - ./data/corpus/regulations:/app/data/corpus/regulations:ro
+      - ./data/rules/indicator_library:/app/data/rules/indicator_library
     depends_on:
       postgres:
         condition: service_healthy

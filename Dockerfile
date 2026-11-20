@@ -34,6 +34,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY core/ /app/core/
 COPY backend/ /app/backend/
 COPY config/ /app/config/
+COPY data/rules/indicator_library/ /app/data/rules/indicator_library/
 COPY frontend/dist/ /app/frontend/dist/
 
 # 4. 创建持久化运行目录（挂载卷：/app/data 存上传标书原件，/app/output 存偏离表与标红交付包）
